@@ -16,31 +16,31 @@ using namespace std;
 
 vector<int32_t> ReadArgs(uint8_t*& pos, ArgType argType)
 {
-	if (argType == Uint8)
+	if (argType == ArgType::Uint8)
 	{
 		return { ReadFixLen(pos, 1) };
 	}
-	else if (argType == Int8)
+	else if (argType == ArgType::Int8)
 	{
 		return { ReadFixLen(pos, 1, false, true) };
 	}
-	else if (argType == Uint16)
+	else if (argType == ArgType::Uint16)
 	{
 		return { ReadFixLen(pos, 2, false) };
 	}
-	else if (argType == Int16)
+	else if (argType == ArgType::Int16)
 	{
 		return { ReadFixLen(pos, 2, false, true) };
 	}
-	else if (argType == Rnd)
+	else if (argType == ArgType::Rnd)
 	{
 		return { ReadFixLen(pos, 2, false, true), ReadFixLen(pos, 2, false, true) };
 	}
-	else if (argType == Var)
+	else if (argType == ArgType::Var)
 	{
 		return { ReadFixLen(pos, 1) };
 	}
-	else if (argType == VarLen)
+	else if (argType == ArgType::VarLen)
 	{
 		return { ReadVarLen(pos) };
 	}
@@ -144,44 +144,44 @@ bool Cseq::Convert()
 
 		if (statusByte == 0xA2)
 		{
-			cmd.Suffix3 = SuffixType::_If;
+			cmd.Suffix3 = SuffixType::If;
 
 			statusByte = ReadFixLen(pos, 1);
 		}
 
 		if (statusByte == 0xA3)
 		{
-			cmd.Suffix2 = _Time;
-			cmd.Arg2 = Int16;
+			cmd.Suffix2 = SuffixType::Time;
+			cmd.Arg2 = ArgType::Int16;
 
 			statusByte = ReadFixLen(pos, 1);
 		}
 		else if (statusByte == 0xA4)
 		{
-			cmd.Suffix2 = _TimeRnd;
-			cmd.Arg2 = Rnd;
+			cmd.Suffix2 = SuffixType::TimeRnd;
+			cmd.Arg2 = ArgType::Rnd;
 
 			statusByte = ReadFixLen(pos, 1);
 		}
 		else if (statusByte == 0xA5)
 		{
-			cmd.Suffix2 = _TimeVar;
-			cmd.Arg2 = Var;
+			cmd.Suffix2 = SuffixType::TimeVar;
+			cmd.Arg2 = ArgType::Var;
 
 			statusByte = ReadFixLen(pos, 1);
 		}
 
 		if (statusByte == 0xA0)
 		{
-			cmd.Suffix1 = _Rnd;
-			cmd.Arg1 = Rnd;
+			cmd.Suffix1 = SuffixType::Rnd;
+			cmd.Arg1 = ArgType::Rnd;
 
 			statusByte = ReadFixLen(pos, 1);
 		}
 		else if (statusByte == 0xA1)
 		{
-			cmd.Suffix1 = _Var;
-			cmd.Arg1 = Var;
+			cmd.Suffix1 = SuffixType::Var;
+			cmd.Arg1 = ArgType::Var;
 
 			statusByte = ReadFixLen(pos, 1);
 		}
@@ -192,9 +192,9 @@ bool Cseq::Convert()
 		{
 			cmd.Args.push_back(ReadFixLen(pos, 1));
 
-			if (cmd.Arg1 == None)
+			if (cmd.Arg1 == ArgType::None)
 			{
-				cmd.Arg1 = VarLen;
+				cmd.Arg1 = ArgType::VarLen;
 			}
 
 			vector<int32_t> args = ReadArgs(pos, cmd.Arg1);
@@ -203,9 +203,9 @@ bool Cseq::Convert()
 		}
 		else if ((statusByte == 0x80) || (statusByte == 0x81))
 		{
-			if (cmd.Arg1 == None)
+			if (cmd.Arg1 == ArgType::None)
 			{
-				cmd.Arg1 = VarLen;
+				cmd.Arg1 = ArgType::VarLen;
 			}
 
 			vector<int32_t> args = ReadArgs(pos, cmd.Arg1);
@@ -234,9 +234,9 @@ bool Cseq::Convert()
 			// if ((statusByte != 0xB7) && (statusByte != 0xB8) && (statusByte != 0xB9) && (statusByte != 0xBA) && (statusByte != 0xBB) && (statusByte != 0xBC) && (statusByte != 0xDE))
 			if ((statusByte == 0xB1) || (statusByte == 0xC3) || (statusByte == 0xC4) || (statusByte == 0xD0) || (statusByte == 0xD1) || (statusByte == 0xD2) || (statusByte == 0xD3))
 			{
-				if (cmd.Arg1 == None)
+				if (cmd.Arg1 == ArgType::None)
 				{
-					cmd.Arg1 = Int8;
+					cmd.Arg1 = ArgType::Int8;
 				}
 
 				vector<int32_t> args = ReadArgs(pos, cmd.Arg1);
@@ -260,15 +260,15 @@ bool Cseq::Convert()
 			}
 			else if (statusByte == 0xD6)
 			{
-				vector<int32_t> args = ReadArgs(pos, Var);
+				vector<int32_t> args = ReadArgs(pos, ArgType::Var);
 
 				cmd.Args.insert(cmd.Args.end(), args.begin(), args.end());
 			}
 			else
 			{
-				if (cmd.Arg1 == None)
+				if (cmd.Arg1 == ArgType::None)
 				{
-					cmd.Arg1 = Uint8;
+					cmd.Arg1 = ArgType::Uint8;
 				}
 
 				vector<int32_t> args = ReadArgs(pos, cmd.Arg1);
@@ -276,7 +276,7 @@ bool Cseq::Convert()
 				cmd.Args.insert(cmd.Args.end(), args.begin(), args.end());
 			}
 
-			if (cmd.Arg2 != None)
+			if (cmd.Arg2 != ArgType::None)
 			{
 				vector<int32_t> args = ReadArgs(pos, cmd.Arg2);
 
@@ -285,9 +285,9 @@ bool Cseq::Convert()
 		}
 		else if ((statusByte == 0xE0) || (statusByte == 0xE1) || (statusByte == 0xE3) || (statusByte == 0xE4))
 		{
-			if (cmd.Arg1 == None)
+			if (cmd.Arg1 == ArgType::None)
 			{
-				cmd.Arg1 = Int16;
+				cmd.Arg1 = ArgType::Int16;
 			}
 
 			vector<int32_t> args = ReadArgs(pos, cmd.Arg1);
@@ -302,13 +302,13 @@ bool Cseq::Convert()
 
 			if (((statusByte >= 0x80) && (statusByte <= 0x8B)) || ((statusByte >= 0x90) && (statusByte <= 0x95)))
 			{
-				vector<int32_t> args1 = ReadArgs(pos, Var);
+				vector<int32_t> args1 = ReadArgs(pos, ArgType::Var);
 
 				cmd.Args.insert(cmd.Args.end(), args1.begin(), args1.end());
 
-				if (cmd.Arg1 == None)
+				if (cmd.Arg1 == ArgType::None)
 				{
-					cmd.Arg1 = Int16;
+					cmd.Arg1 = ArgType::Int16;
 				}
 
 				vector<int32_t> args2 = ReadArgs(pos, cmd.Arg1);
@@ -350,9 +350,9 @@ bool Cseq::Convert()
 			}
 			else if ((statusByte >= 0xA0) && (statusByte <= 0xB1))
 			{
-				if (cmd.Arg1 == None)
+				if (cmd.Arg1 == ArgType::None)
 				{
-					cmd.Arg1 = Uint8;
+					cmd.Arg1 = ArgType::Uint8;
 				}
 
 				vector<int32_t> args = ReadArgs(pos, cmd.Arg1);
@@ -361,9 +361,9 @@ bool Cseq::Convert()
 			}
 			else if (statusByte == 0xE0)
 			{
-				if (cmd.Arg1 == None)
+				if (cmd.Arg1 == ArgType::None)
 				{
-					cmd.Arg1 = Uint16;
+					cmd.Arg1 = ArgType::Uint16;
 				}
 
 				vector<int32_t> args = ReadArgs(pos, cmd.Arg1);
@@ -372,9 +372,9 @@ bool Cseq::Convert()
 			}
 			else if ((statusByte >= 0xE1) && (statusByte <= 0xE6))
 			{
-				if (cmd.Arg1 == None)
+				if (cmd.Arg1 == ArgType::None)
 				{
-					cmd.Arg1 = Int16;
+					cmd.Arg1 = ArgType::Int16;
 				}
 
 				vector<int32_t> args = ReadArgs(pos, cmd.Arg1);
