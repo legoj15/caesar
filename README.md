@@ -59,7 +59,10 @@ caesar is licensed under the **GPL-3.0** (see [LICENSE](LICENSE)). It bundles tw
 third-party libraries under `src/`:
 
 - **sf2cute 0.2** (`src/sf2cute-0.2`) — SoundFont 2 writer, zlib license.
-- **libsmfc** (`src/libsmfc`) — Standard MIDI File writer. This vendored copy
-  ships without any upstream license text; its redistribution terms are
-  currently unverified. This should be resolved before distributing built
-  binaries.
+- **libsmfc** (`src/libsmfc`) — Standard MIDI File writer by loveemu, vendored
+  from [loveemu-lab](https://github.com/loveemu/loveemu-lab) under the MIT
+  license (see [src/libsmfc/LICENSE](src/libsmfc/LICENSE)).
+
+Both the MIT and zlib licenses are compatible with the GPL-3.0, so the combined
+binary is distributable under the GPL-3.0 with those third-party notices
+retained.

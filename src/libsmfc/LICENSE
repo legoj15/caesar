@@ -1,0 +1,36 @@
+libsmfc — a simple Standard MIDI File writer by loveemu.
+
+Vendored into caesar from loveemu's "loveemu-lab" repository (the sseq2mid
+converter), which distributes it under the MIT License reproduced below.
+caesar's copies of libsmfc.c, libsmfc.h, libsmfcx.c, and libsmfcx.h are
+identical to that upstream source.
+
+Upstream: https://github.com/loveemu/loveemu-lab (nds/sseq2mid/src)
+
+The MIT License is compatible with caesar's GPL-3.0 license; this notice is
+retained to satisfy the MIT requirement that the copyright and permission
+notice accompany all copies.
+
+----------------------------------------------------------------------------
+
+MIT License
+
+Copyright (c) 2017 loveemu
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

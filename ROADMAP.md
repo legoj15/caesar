@@ -68,11 +68,15 @@ The cheapest changes with the most audible or visible payoff.
 - [ ] Map the sequence FX-send commands to reverb (CC91) / chorus (CC93) — the
       MIDI library already supports them; the converter just never emits them.
 
-### 5. Licensing — clear before distributing binaries ⚠️ release blocker
-- [ ] Resolve the license of the vendored `libsmfc` (it ships with no license
-      text). Identify the upstream source and terms, or replace it — the MIDI
-      writer it provides is small (~600 lines). Required before publishing any
-      binary, since caesar is GPL-3.0.
+### 5. Licensing — ✅ resolved
+The vendored `libsmfc` shipped without a license notice, but it is loveemu's
+MIT-licensed code (identical to the copy in
+[loveemu-lab](https://github.com/loveemu/loveemu-lab)); the copy had simply
+dropped the repo-level license. MIT is GPL-3.0-compatible, so there is no
+conflict with caesar's GPL-3.0.
+
+- [x] Add the MIT notice for `libsmfc` (`src/libsmfc/LICENSE`) and document the
+      third-party licenses in the README. Binaries are now distributable.
 
 ### 6. Continuous integration & first release — final step
 - [ ] GitHub Actions workflow: build on every push (start with Windows/MSVC).
