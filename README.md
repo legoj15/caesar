@@ -48,6 +48,11 @@ OPTIONS:
 For each input archive, caesar creates an output folder named after the archive
 and writes the converted `.sf2`, `.mid`, and extracted wave files into it.
 
+## Roadmap
+
+This fork is actively evolving. See [ROADMAP.md](ROADMAP.md) for the plan toward
+the first maintained release and beyond.
+
 ## Licensing
 
 caesar is licensed under the **GPL-3.0** (see [LICENSE](LICENSE)). It bundles two
