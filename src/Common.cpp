@@ -4,6 +4,7 @@
 #include <fstream>
 #include <iostream>
 #include <stack>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -67,6 +68,26 @@ void Common::Pop()
 {
 	Offsets.pop();
 	FileNames.pop();
+}
+
+// Clear all parsing context. Used to recover to a clean slate after an input
+// fails partway through, so a later input is not blamed on a stale filename.
+void Common::Reset()
+{
+	while (!FileNames.empty()) { FileNames.pop(); }
+	while (!Offsets.empty()) { Offsets.pop(); }
+	Log.clear();
+}
+
+// Reject a failed or empty file open before its length is used to allocate a
+// buffer. A missing/unreadable file yields a length of -1, which would
+// otherwise become an enormous allocation and crash.
+void Common::RequireOpen(bool streamOk, streamoff length, const string& fileName)
+{
+	if (!streamOk || length <= 0)
+	{
+		throw runtime_error("could not open or read file (missing, empty, or unreadable): " + fileName);
+	}
 }
 
 void Common::Analyse(string tag, uint32_t val)

@@ -13,6 +13,7 @@ Cwar::Cwar(const char* fileName) : FileName(fileName)
 	ifstream ifs(FileName, ios::binary | ios::ate);
 
 	Length = ifs.tellg();
+	Common::RequireOpen(ifs.good(), Length, FileName);
 	Data = new uint8_t[Length];
 
 	Common::Push(FileName, Data);

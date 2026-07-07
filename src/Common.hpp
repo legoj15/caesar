@@ -50,6 +50,8 @@ struct Common
 	static void Warning(uint8_t* pos, std::string msg);
 	static void Push(std::string fileName, uint8_t* data);
 	static void Pop();
+	static void Reset();
+	static void RequireOpen(bool streamOk, std::streamoff length, const std::string& fileName);
 	static void Analyse(std::string tag, uint32_t val);
 	static void Dump(std::string fileName);
 };

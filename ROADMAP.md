@@ -34,16 +34,22 @@ A tool whose job is parsing files ripped from game images should treat malformed
 or unusual input as normal, not exceptional. Today, bad input crashes with no
 explanation, and some failures corrupt output silently.
 
-- [ ] Add a bounds-checked reader (tracks the buffer end) and route all parsing
-      through it, so a truncated or unexpected file reports "archive damaged at
-      offset X" instead of reading past the buffer.
-- [ ] Check that every input file actually opened before using its size
-      (a missing/typo'd path currently triggers a giant bogus allocation).
+- [x] Check that every input file actually opened before using its size — a
+      missing, empty, or unreadable path previously triggered a giant bogus
+      allocation and crashed. (`Common::RequireOpen`, all load sites.)
+- [x] Wrap each input in top-level error handling so one bad file reports
+      cleanly and the rest still process (previously the first failure aborted
+      the whole run), and restore the working directory between inputs so
+      multi-archive runs (`caesar a.bcsar b.bcsar`) work.
+- [ ] Add a bounds-checked reader (checks reads against the live buffer they
+      fall in) and route all parsing through it, so a truncated or corrupt file
+      reports "archive damaged at offset X" instead of reading past the buffer.
+      This is the last large robustness item and needs a membership-based
+      design (the shared offset stack does not reliably track the current
+      buffer).
 - [ ] Replace the change-working-directory extraction model with composed output
-      paths. This fixes the broken multi-archive invocation
-      (`caesar a.bcsar b.bcsar`) and removes a class of failure-path bugs.
-- [ ] Wrap each input in top-level error handling so one bad file yields a clear
-      message and the rest still process.
+      paths (enables an `--output-dir` option and removes remaining failure-path
+      and parallelism limits).
 - [ ] Sanitize archive-supplied names before using them as file/dir names.
 
 ### 3. Surface what's being dropped

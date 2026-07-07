@@ -2,7 +2,10 @@
 #include "Csar.hpp"
 
 #include <cstring>
+#include <exception>
+#include <filesystem>
 #include <iostream>
+#include <system_error>
 
 using namespace std;
 
@@ -20,29 +23,51 @@ int main(int argc, char* argv[])
 
 		return 1;
 	}
-	else
+
+	int exitCode = 0;
+
+	// Extraction changes the working directory into each archive's output
+	// folder, so remember where we started and return there between inputs.
+	error_code ec;
+	filesystem::path startDir = filesystem::current_path(ec);
+
+	for (int i = 1; i < argc; ++i)
 	{
-		for (int i = 1; i < argc; ++i)
+		if (!strcmp(argv[i], "-p"))
 		{
-			if (!strcmp(argv[i], "-p"))
-			{
-				p = true;
-			}
-			else if (!strcmp(argv[i], "-w"))
-			{
-				Common::ShowWarnings = true;
-			}
-			else
+			p = true;
+		}
+		else if (!strcmp(argv[i], "-w"))
+		{
+			Common::ShowWarnings = true;
+		}
+		else
+		{
+			// Isolate each input: a bad file reports cleanly and the rest
+			// still process, instead of aborting the whole run.
+			try
 			{
 				Csar csar(argv[i], p);
 
 				if (!csar.Extract())
 				{
-					return 1;
+					exitCode = 1;
 				}
 			}
+			catch (const exception& e)
+			{
+				cerr << endl;
+				cerr << "ERROR IN\t" << argv[i] << endl;
+				cerr << "MESSAGE\t\t" << e.what() << endl;
+				cerr << endl;
+
+				Common::Reset();
+				exitCode = 1;
+			}
+
+			filesystem::current_path(startDir, ec);
 		}
 	}
 
-	return 0;
+	return exitCode;
 }
