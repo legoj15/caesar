@@ -1,0 +1,27 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": { "major": 3, "minor": 21, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "binaryDir": "${sourceDir}/build",
+      "cacheVariables": {
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+      }
+    },
+    {
+      "name": "windows",
+      "displayName": "Windows x64 (MSVC)",
+      "description": "Ninja Multi-Config build with MSVC. Run from a VS Developer prompt, or just open this folder in Visual Studio.",
+      "inherits": "base",
+      "generator": "Ninja Multi-Config",
+      "architecture": { "value": "x64", "strategy": "external" },
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows" }
+    }
+  ],
+  "buildPresets": [
+    { "name": "debug",   "displayName": "Debug",   "configurePreset": "windows", "configuration": "Debug" },
+    { "name": "release", "displayName": "Release", "configurePreset": "windows", "configuration": "Release" }
+  ]
+}
