@@ -314,6 +314,20 @@ hazard. Not release-blocking on their own.
 - **Compiler narrowing warnings** (`C4267` / `C4244`, `size_t`/`int` to smaller
   types). Harmless in practice but they flag real implicit truncations; worth a
   code-quality pass.
+- **Non-deterministic SF2 output from an uninitialised sample key** (*fixed
+  2026-07-08*). `CbnkCwav::Key` — written as each sample's shdr `byOriginalKey` —
+  was only assigned when a note referenced the sample, but every sample with
+  `Id < 0xF000` is emitted regardless, so a sample no instrument used wrote an
+  *uninitialised* byte into the `.sf2`. Output was therefore non-deterministic:
+  that byte varied (0x00 / 0x01 / 0x0D) between runs and with the output-path
+  length. Value-initialising the record (`CbnkCwav cwav{}` in `Cbnk.cpp`) pins it
+  to 0. Behaviour-preserving for every *defined* byte — the garbage happened to be
+  0 in the runs sampled, so the 24,928-file A/B above stayed byte-identical — and
+  it only ever affects the cosmetic root key of a sample that no zone plays. Found
+  while validating the composed-path rewrite above, whose extra `std::filesystem`
+  allocations perturbed the heap enough to expose the latent read. (A wider
+  value-initialisation audit of the parser structs may be worthwhile.)
+
 - **Shared sequence banks: per-entry start offsets now honoured** (*fixed
   2026-07-07*). Most `.bcseq` in these archives are *multi-entry banks*: one DATA
   blob holds many independent mini-sequences (each ends in `Fin`) plus helper

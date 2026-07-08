@@ -186,7 +186,11 @@ bool Cbnk::Convert()
 	{
 		pos = Data + infoOffset + 8 + cwavOffset + 4 + (i * 8);
 
-		CbnkCwav cwav;
+		// Value-initialize: Key is only assigned when a note references this
+		// sample, but every sample with Id < 0xF000 is still emitted (with Key as
+		// its shdr byOriginalKey). Without this, an unreferenced sample wrote an
+		// uninitialized byte, making SF2 output non-deterministic.
+		CbnkCwav cwav{};
 		cwav.Cwar = ReadFixLen(pos, 4) - 0x5000000;
 		cwav.Id = ReadFixLen(pos, 4);
 
