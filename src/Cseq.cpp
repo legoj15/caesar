@@ -56,7 +56,7 @@ Cseq::Cseq(const char* fileName) : FileName(fileName)
 	Common::RequireOpen(ifs.good(), Length, FileName);
 	Data = new uint8_t[Length];
 
-	Common::Push(FileName, Data);
+	Common::Push(FileName, Data, Length);
 
 	ifs.seekg(0, ios::beg);
 	ifs.read(reinterpret_cast<char*>(Data), Length);

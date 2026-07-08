@@ -115,7 +115,7 @@ Cbnk::Cbnk(const char* fileName, map<int, Cwar*>* cwars, bool p) : FileName(file
 	Common::RequireOpen(ifs.good(), Length, FileName);
 	Data = new uint8_t[Length];
 
-	Common::Push(FileName, Data);
+	Common::Push(FileName, Data, Length);
 
 	ifs.seekg(0, ios::beg);
 	ifs.read(reinterpret_cast<char*>(Data), Length);
@@ -189,7 +189,7 @@ bool Cbnk::Convert(string cwarPath)
 			Common::RequireOpen(ifs.good(), cwavLength, to_string(cwav.Id) + ".wav");
 			uint8_t* cwavData = new uint8_t[cwavLength];
 
-			Common::Push(string(to_string(cwav.Id) + ".wav"), cwavData);
+			Common::Push(string(to_string(cwav.Id) + ".wav"), cwavData, cwavLength);
 
 			ifs.seekg(0, ios::beg);
 			ifs.read(reinterpret_cast<char*>(cwavData), cwavLength);

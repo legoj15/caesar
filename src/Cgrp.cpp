@@ -22,7 +22,7 @@ Cgrp::Cgrp(const char* fileName, map<int, Cwar*>* cwars, const map<int, bool>& c
 	Common::RequireOpen(ifs.good(), Length, FileName);
 	Data = new uint8_t[Length];
 
-	Common::Push(FileName, Data);
+	Common::Push(FileName, Data, Length);
 
 	ifs.seekg(0, ios::beg);
 	ifs.read(reinterpret_cast<char*>(Data), Length);

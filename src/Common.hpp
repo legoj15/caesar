@@ -11,11 +11,20 @@
 int32_t ReadFixLen(uint8_t*& pos, size_t bytes, bool littleEndian = true, bool isSigned = false);
 int32_t ReadVarLen(uint8_t*& pos);
 
+// A loaded file buffer and its extent, used to bounds-check reads.
+struct Range
+{
+	uint8_t* base;
+	uint8_t* end;
+	std::string name;
+};
+
 struct Common
 {
 	static bool ShowWarnings;
 	static std::stack<std::string> FileNames;
 	static std::stack<uint8_t*> Offsets;
+	static std::vector<Range> Buffers;
 	static std::vector<std::string> Log;
 
 	template<typename T>
@@ -48,7 +57,7 @@ struct Common
 	}
 
 	static void Warning(uint8_t* pos, std::string msg);
-	static void Push(std::string fileName, uint8_t* data);
+	static void Push(std::string fileName, uint8_t* data, std::streamoff length);
 	static void Pop();
 	static void Reset();
 	static void RequireOpen(bool streamOk, std::streamoff length, const std::string& fileName);

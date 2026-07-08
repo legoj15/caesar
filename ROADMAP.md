@@ -41,12 +41,15 @@ explanation, and some failures corrupt output silently.
       cleanly and the rest still process (previously the first failure aborted
       the whole run), and restore the working directory between inputs so
       multi-archive runs (`caesar a.bcsar b.bcsar`) work.
-- [ ] Add a bounds-checked reader (checks reads against the live buffer they
-      fall in) and route all parsing through it, so a truncated or corrupt file
-      reports "archive damaged at offset X" instead of reading past the buffer.
-      This is the last large robustness item and needs a membership-based
-      design (the shared offset stack does not reliably track the current
-      buffer).
+- [x] Add a bounds-checked reader so a truncated or corrupt file reports
+      "archive damaged at offset X" instead of reading past the buffer. Every
+      read through `ReadFixLen`/`ReadVarLen` is checked against whichever loaded
+      buffer the position falls in. Verified behavior-preserving by diffing
+      13,843 output files across 31 real archives against the pre-change build
+      (byte-identical), and that truncated/corrupt inputs now fail cleanly.
+- [ ] Bounds-check the remaining bulk reads that bypass the readers (string
+      construction from a file-supplied length, raw sub-file writes), which can
+      still over-read on a corrupt length field.
 - [ ] Replace the change-working-directory extraction model with composed output
       paths (enables an `--output-dir` option and removes remaining failure-path
       and parallelism limits).

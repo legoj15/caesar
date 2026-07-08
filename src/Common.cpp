@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <fstream>
 #include <iostream>
+#include <sstream>
 #include <stack>
 #include <stdexcept>
 #include <string>
@@ -13,10 +14,42 @@ using namespace std;
 bool Common::ShowWarnings = false;
 stack<string> Common::FileNames;
 stack<uint8_t*> Common::Offsets;
+vector<Range> Common::Buffers;
 vector<string> Common::Log;
+
+// Verify that a read of `bytes` bytes starting at `pos` stays inside one of the
+// currently-loaded file buffers. Offsets in these archives are read from the
+// file itself, so a corrupt or truncated file can point anywhere; without this
+// the readers would walk off the end of the buffer and crash. Throwing here
+// turns that into a clean error caught by main.
+static void CheckBounds(uint8_t* pos, size_t bytes)
+{
+	for (size_t i = Common::Buffers.size(); i-- > 0; )
+	{
+		const Range& r = Common::Buffers[i];
+
+		if (pos >= r.base && pos < r.end)
+		{
+			if (bytes > static_cast<size_t>(r.end - pos))
+			{
+				ostringstream msg;
+				msg << "archive damaged: a read of " << bytes << " byte(s) runs past the end of \""
+					<< r.name << "\" (at offset 0x" << hex << uppercase << (pos - r.base) << ")";
+
+				throw runtime_error(msg.str());
+			}
+
+			return;
+		}
+	}
+
+	throw runtime_error("archive damaged: a file offset points outside the loaded data");
+}
 
 int32_t ReadFixLen(uint8_t*& pos, size_t bytes, bool littleEndian, bool isSigned)
 {
+	CheckBounds(pos, bytes);
+
 	int32_t result = 0;
 
 	for (size_t i = 0; i < bytes; ++i)
@@ -36,10 +69,18 @@ int32_t ReadVarLen(uint8_t*& pos)
 {
 	int32_t result = 0;
 
-	do
+	while (true)
 	{
-		result = (result << 7) | (*pos & 0x7F);
-	} while (*pos++ & 0x80);
+		CheckBounds(pos, 1);
+
+		uint8_t b = *pos++;
+		result = (result << 7) | (b & 0x7F);
+
+		if (!(b & 0x80))
+		{
+			break;
+		}
+	}
 
 	return result;
 }
@@ -56,10 +97,11 @@ void Common::Warning(uint8_t* pos, string msg)
 	}
 }
 
-void Common::Push(string fileName, uint8_t* data)
+void Common::Push(string fileName, uint8_t* data, streamoff length)
 {
 	FileNames.push(fileName);
 	Offsets.push(data);
+	Buffers.push_back({ data, data + static_cast<size_t>(length), fileName });
 
 	cout << FileNames.top() << endl;
 }
@@ -68,6 +110,11 @@ void Common::Pop()
 {
 	Offsets.pop();
 	FileNames.pop();
+
+	if (!Buffers.empty())
+	{
+		Buffers.pop_back();
+	}
 }
 
 // Clear all parsing context. Used to recover to a clean slate after an input
@@ -76,6 +123,7 @@ void Common::Reset()
 {
 	while (!FileNames.empty()) { FileNames.pop(); }
 	while (!Offsets.empty()) { Offsets.pop(); }
+	Buffers.clear();
 	Log.clear();
 }
 
