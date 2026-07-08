@@ -54,7 +54,10 @@ explanation, and some failures corrupt output silently.
 - [ ] Replace the change-working-directory extraction model with composed output
       paths (enables an `--output-dir` option and removes remaining failure-path
       and parallelism limits).
-- [ ] Sanitize archive-supplied names before using them as file/dir names.
+- [x] Sanitize archive-supplied names before using them as file/dir names —
+      illegal characters (including path separators, which could otherwise
+      escape the output folder) are replaced. Done in the same `TypedName`
+      choke-point; a no-op on normal names, so valid output is unchanged.
 
 ### 3. Surface what's being dropped
 By default (without `-w`), the tool prints no warnings at all — so a normal run

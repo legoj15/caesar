@@ -139,26 +139,40 @@ void Common::RequireOpen(bool streamOk, streamoff length, const string& fileName
 	}
 }
 
-// Give a bare numeric name (an item the archive left unnamed, or named only by
-// its numeric id) a type prefix like "BANK_206", so extracted output is
-// identifiable and banks/wave-archives/etc. that share a number don't collide.
-// Names that already carry a symbol from the archive are returned unchanged.
+// Normalize an archive-supplied output name. First replace characters that are
+// illegal in file names (the stored name is untrusted, and a path separator
+// could otherwise let extraction escape the output directory). Then, if the
+// name is only digits — an item the archive left unnamed, identified only by
+// its id — give it a type prefix like "BANK_206" so it is recognizable and
+// banks/wave-archives/etc. that share a number don't collide. Names that carry
+// a real symbol from the archive are returned as-is (aside from sanitizing).
 string Common::TypedName(const string& name, const string& type)
 {
-	if (name.empty())
-	{
-		return name;
-	}
+	string clean = name;
 
-	for (unsigned char c : name)
+	for (char& c : clean)
 	{
-		if (!isdigit(c))
+		if (c == '<' || c == '>' || c == ':' || c == '"' || c == '/' || c == '\\' ||
+			c == '|' || c == '?' || c == '*' || static_cast<unsigned char>(c) < 0x20)
 		{
-			return name;
+			c = '_';
 		}
 	}
 
-	return type + "_" + name;
+	if (clean.empty())
+	{
+		return clean;
+	}
+
+	for (unsigned char c : clean)
+	{
+		if (!isdigit(c))
+		{
+			return clean;
+		}
+	}
+
+	return type + "_" + clean;
 }
 
 void Common::Analyse(string tag, uint32_t val)
