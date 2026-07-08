@@ -92,10 +92,28 @@ The cheapest changes with the most audible or visible payoff.
       preserved (verified: the marker lands exactly on the sequence's own
       `..._LoopStart` label). A jump into not-yet-played code — a shared block
       several tracks reuse — is instead followed as a goto, so those tracks keep
-      their notes. Conditional (`0xA2`-prefixed) jumps are skipped with a warning
-      and left for the conditional-command work. Verified across 5 real archives
+      their notes. Verified across 5 real archives
       (~8,000 MIDIs): jump-free sequences stay byte-identical, BGM/`SEQ` music
       gains correct loop markers, sound effects don't, and nothing hangs.
+- [x] Resolve note-less conditional (`[If]`) jump dispatchers. Some sequences
+      build a whole track out of nothing but conditional jumps — the track body
+      is a dispatcher and every note lives behind an `[If]` branch keyed on a
+      runtime variable — so skipping the branches (the previous behaviour) wrote a
+      silent MIDI. The variable can't be modelled statically, but when a track
+      would otherwise emit no notes at all, the converter now follows the first
+      branch that actually reaches a note (the default `variable == 0` section the
+      engine would pick), even through a chain of nested `[If]` jumps. It only
+      fires while the track is still silent, so any track that already produces
+      sound is byte-for-byte unchanged, and it never removes a note. This also
+      fixed a latent crash-class bug: the walk's jump/call redirect used
+      `--iterator` on the first command, which is undefined behaviour when a
+      target is offset 0 (exactly where these note blocks sit) — replaced with an
+      explicit redirect flag. Verified old-vs-new across 8 archives (~12,300
+      MIDIs): games with no dispatchers (Zelda ALBW, Kirby) stay 100%
+      byte-identical, 909 previously-silent sequences gained notes (812 in
+      GardenSound alone, incl. full multi-track songs), the only sequences still
+      silent are genuinely note-less (`dummy_seq`, `SE_SYS_SILENT`, control-only
+      `*_CTRL_*`/`*_GVAR` setters), zero notes were lost, and nothing hangs.
 - [ ] Verify and fix the suspected typo in the envelope decay-rate table in
       `Cbnk.cpp`, which makes some instruments fade out ~10x too fast.
 - [ ] Map the sequence FX-send commands to reverb (CC91) / chorus (CC93) — the
@@ -124,9 +142,14 @@ conflict with caesar's GPL-3.0.
 
 Larger efforts that expand what caesar can do. Rough priority order:
 
-- **Sequence (CSEQ → MIDI) fidelity.** Implement the variable/conditional/random
-  command machinery (currently parsed but ignored, so conditional passages play
-  unconditionally and random/variable values convert wrong), tie mode, and
+- **Sequence (CSEQ → MIDI) fidelity.** Implement the full variable/conditional/
+  random command machinery. Note-less `[If]` dispatchers are now resolved
+  heuristically (a fully-silent track follows the default branch), but the
+  underlying variables are still not evaluated, so: `[If]`-prefixed *non-jump*
+  commands (e.g. `[If] Program`, `[If] Return`) currently execute
+  unconditionally; the extended `setvar`/`cmp`/mod commands are parsed but
+  dropped (their walker branch is dead code — `cmd.Cmd` is never set to the
+  extended opcode); and random/variable values convert wrong. Also tie mode and
   finite loop repeat counts.
 - **Missing audio coverage.** Implement IMA-ADPCM (codec 3), which currently
   produces silent output reported as success; extract CWSD wave-sound data
@@ -203,6 +226,7 @@ hazard. Not release-blocking on their own.
   `SMF_SD_CAR_BGM01_Start`), which is the decisive accuracy signal. Apparent
   note-loss cases resolve to labels literally named `<nosound>`/`<dummy_bgm>`
   (intentionally silent — the old byte-0 walk played a placeholder). No hangs, no
-  crashes. Sequences that still emit no notes are either those silent entries or
-  dispatchers that select a section via conditional (`[If]`) jumps — see the
-  conditional-jump limitation, still unimplemented.
+  crashes. Sequences that emitted no notes were either those silent entries or
+  dispatchers that select a section via conditional (`[If]`) jumps; the latter are
+  now resolved (see "Resolve note-less conditional `[If]` jump dispatchers" under
+  the first-release fidelity wins).

@@ -8,6 +8,7 @@
 #include <fstream>
 #include <iterator>
 #include <map>
+#include <set>
 #include <stack>
 #include <string>
 #include <vector>
@@ -74,6 +75,98 @@ Cseq::~Cseq()
 	Common::Pop();
 
 	delete[] Data;
+}
+
+// The set of command offsets from which the walk reaches a note (any Cmd < 0x80),
+// following calls and unconditional jumps. `followConditional` controls whether
+// conditional [If] jumps are treated as branchable:
+//   false -> skip them, exactly what Convert emits today; answers "would the
+//            current converter produce a note starting here" (used to decide
+//            whether the plain fall-through of a dispatcher stays silent).
+//   true  -> also follow their targets; answers "can this offset reach a note by
+//            some branch" (used to decide whether a dispatcher branch is worth
+//            taking, even when the note hides behind a further [If] jump).
+// Two notions are needed: a single any-path set would report the fall-through as
+// note-reaching via a branch we never take, so no dispatcher would ever fire.
+// Computed by seeding every note command and walking predecessor edges, so
+// cycles (loops) resolve correctly.
+static set<uint32_t> ReachableNotes(const map<uint32_t, CseqCmd>& commands, bool followConditional)
+{
+	map<uint32_t, vector<uint32_t>> preds;
+	vector<uint32_t> work;
+	set<uint32_t> reaches;
+
+	for (auto it = commands.begin(); it != commands.end(); ++it)
+	{
+		uint32_t offset = it->first;
+		const CseqCmd& cmd = it->second;
+		auto nextIt = next(it, 1);
+		uint32_t nextOffset = (nextIt != commands.end()) ? nextIt->first : 0xFFFFFFFF;
+
+		// Record that reaching `succ` also reaches `offset` (a reverse edge).
+		auto edge = [&](uint32_t succ)
+		{
+			if (commands.count(succ))
+			{
+				preds[succ].push_back(offset);
+			}
+		};
+
+		if (!cmd.Extended && (cmd.Cmd < 0x80))
+		{
+			// A note: a source of the reachability we are propagating backwards.
+			reaches.insert(offset);
+			work.push_back(offset);
+		}
+		else if (!cmd.Extended && ((cmd.Cmd == 0xFF) || (cmd.Cmd == 0xFD)))
+		{
+			// Fin / Return: this path ends here, so there are no successors.
+		}
+		else if (!cmd.Extended && (cmd.Cmd == 0x89) && (cmd.Suffix3 != SuffixType::If))
+		{
+			edge(cmd.Args[0]);          // unconditional jump: control follows it
+		}
+		else if (!cmd.Extended && (cmd.Cmd == 0x89) && (cmd.Suffix3 == SuffixType::If))
+		{
+			edge(nextOffset);           // conditional jump: the not-taken path, and
+			if (followConditional)
+			{
+				edge(cmd.Args[0]);      // optionally the taken branch as well
+			}
+		}
+		else if (!cmd.Extended && (cmd.Cmd == 0x8A))
+		{
+			edge(cmd.Args[0]);          // call into the subroutine, or
+			edge(nextOffset);           // continue after it returns
+		}
+		else
+		{
+			edge(nextOffset);           // everything else
+		}
+	}
+
+	while (!work.empty())
+	{
+		uint32_t succ = work.back();
+		work.pop_back();
+
+		auto p = preds.find(succ);
+
+		if (p == preds.end())
+		{
+			continue;
+		}
+
+		for (uint32_t pred : p->second)
+		{
+			if (reaches.insert(pred).second)
+			{
+				work.push_back(pred);
+			}
+		}
+	}
+
+	return reaches;
 }
 
 bool Cseq::Convert(uint32_t startOffset)
@@ -414,10 +507,29 @@ bool Cseq::Convert(uint32_t startOffset)
 		commands[offset] = cmd;
 	}
 
+	// Offsets from which a note is reachable (see ReachableNotes). `noteOnFall`
+	// follows only the plain (skip-[If]) flow, so it reports whether a
+	// dispatcher's fall-through stays silent; `noteViaBranch` also follows [If]
+	// branches, so it reports whether a branch target eventually reaches a note
+	// even through further conditional jumps. Together they let the walk resolve
+	// note-less [If] dispatchers below.
+	set<uint32_t> noteOnFall = ReachableNotes(commands, false);
+	set<uint32_t> noteViaBranch = ReachableNotes(commands, true);
+
 	Smf* smf = smfCreate();
 	uint32_t absTime = 0;
 	uint8_t track = 0;
 	bool noteWait = false;
+	// Whether the current track has emitted a note yet. A note-less [If]
+	// dispatcher is only followed while this is false, so any track that already
+	// produces sound converts exactly as before.
+	bool trackHasNote = false;
+	// Set by any handler that redirects the walk (jump, call, return, track
+	// change) so the loop lands on the freshly-found command instead of stepping
+	// past it. This replaces the old "find(target); --i;" idiom, which was
+	// undefined behaviour whenever the target was the first command (offset 0) --
+	// exactly the case for the note blocks these dispatchers jump into.
+	bool redirected = false;
 	uint32_t trackOffsets[16] = { 0 };
 	stack<uint32_t> sp;
 	bool trackEnabled[16] = { false };
@@ -458,10 +570,11 @@ bool Cseq::Convert(uint32_t startOffset)
 				absTime = 0;
 				track = j;
 				noteWait = false;
+				trackHasNote = false;
 				offsetTime.clear();
 
 				i = commands.find(trackOffsets[j]);
-				--i;
+				redirected = true;
 
 				return true;
 			}
@@ -470,7 +583,7 @@ bool Cseq::Convert(uint32_t startOffset)
 		return false;
 	};
 
-	for (; i != commands.end(); ++i)
+	while (i != commands.end())
 	{
 		offsetTime[i->first] = absTime;
 
@@ -484,6 +597,7 @@ bool Cseq::Convert(uint32_t startOffset)
 			if (i->second.Cmd < 0x80)
 			{
 				smfInsertNote(smf, absTime, track, track, i->second.Cmd, i->second.Args[0], i->second.Args[1]);
+				trackHasNote = true;
 
 				if (noteWait)
 				{
@@ -510,10 +624,32 @@ bool Cseq::Convert(uint32_t startOffset)
 
 				if (i->second.Suffix3 == SuffixType::If)
 				{
-					// Conditional jump. The condition/variable machinery is not
-					// implemented, so fall through to the next command (the
-					// branch-not-taken path) rather than guess, exactly as before.
-					Common::Warning(Data + dataOffset + 8 + i->first, "conditional jump skipped (conditions not implemented)");
+					// Conditional (dispatcher) jump. The runtime variable it tests
+					// is not modelled, so by default we take the branch-not-taken
+					// path and fall through -- correct for spin-waits and for any
+					// track that already carries its own notes. But many sequences
+					// (notably Animal Crossing's GardenSound) build a whole track as
+					// a note-less dispatcher: the body is nothing but conditional
+					// jumps and every note lives behind one, so falling through
+					// yields a silent MIDI. When this track has emitted no notes and
+					// its plain continuation stays silent, follow the first branch
+					// that actually reaches a note -- the default (variable == 0)
+					// section the sound engine would pick -- rather than drop the
+					// track. The forward-only test (target not yet played) keeps
+					// backward spin-wait loops on the fall-through path.
+					auto nextIt = next(i, 1);
+					uint32_t fallThrough = (nextIt != commands.end()) ? nextIt->first : 0xFFFFFFFF;
+					bool fallSilent = (fallThrough == 0xFFFFFFFF) || !noteOnFall.count(fallThrough);
+
+					if (!trackHasNote && !offsetTime.count(target) && fallSilent && noteViaBranch.count(target))
+					{
+						i = commands.find(target);
+						redirected = true;
+					}
+					else
+					{
+						Common::Warning(Data + dataOffset + 8 + i->first, "conditional jump skipped (conditions not implemented)");
+					}
 				}
 				else if (offsetTime.count(target))
 				{
@@ -542,7 +678,7 @@ bool Cseq::Convert(uint32_t startOffset)
 					if (n != commands.end())
 					{
 						i = n;
-						--i;
+						redirected = true;
 					}
 					else
 					{
@@ -555,7 +691,7 @@ bool Cseq::Convert(uint32_t startOffset)
 				sp.push(next(i, 1)->first);
 
 				i = commands.find(i->second.Args[0]);
-				--i;
+				redirected = true;
 			}
 			else if (i->second.Cmd == 0xB0)
 			{
@@ -754,7 +890,7 @@ bool Cseq::Convert(uint32_t startOffset)
 				if (!sp.empty())
 				{
 					i = commands.find(sp.top());
-					--i;
+					redirected = true;
 
 					sp.pop();
 				}
@@ -965,6 +1101,18 @@ bool Cseq::Convert(uint32_t startOffset)
 			{
 				Common::Warning(Data + dataOffset + 8 + i->first, "mod4_period not implemented");
 			}
+		}
+
+		// Advance to the next command, unless a handler above redirected the walk
+		// (jump/call/return/track change), in which case i already points at the
+		// target and must be left there.
+		if (redirected)
+		{
+			redirected = false;
+		}
+		else
+		{
+			++i;
 		}
 	}
 
