@@ -161,6 +161,8 @@ bool Cgrp::Extract()
 				create_directory(name);
 				current_path(name);
 
+				Common::CheckBounds(pos, cwarLength);
+
 				ofstream ofs(string(name + ".bcwar"), ofstream::binary);
 				ofs.write(reinterpret_cast<const char*>(pos), cwarLength);
 				ofs.close();
@@ -194,6 +196,8 @@ bool Cgrp::Extract()
 				create_directory(name);
 				current_path(name);
 
+				Common::CheckBounds(pos, cbnkLength);
+
 				ofstream ofs(string(name + ".bcbnk"), ofstream::binary);
 				ofs.write(reinterpret_cast<const char*>(pos), cbnkLength);
 				ofs.close();
@@ -214,6 +218,8 @@ bool Cgrp::Extract()
 				pos -= 16;
 
 				string name = Common::TypedName(to_string(files[i].Id), "SEQ");
+
+				Common::CheckBounds(pos, cseqLength);
 
 				ofstream ofs(string(name + ".bcseq"), ofstream::binary);
 				ofs.write(reinterpret_cast<const char*>(pos), cseqLength);

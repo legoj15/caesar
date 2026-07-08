@@ -84,6 +84,8 @@ bool Cwar::Extract()
 
 	for (uint32_t i = 0; i < cwavCount; ++i)
 	{
+		Common::CheckBounds(cwavs[i].Offset, cwavs[i].Length);
+
 		ofstream ofs(string(to_string(i) + ".bcwav"), ofstream::binary);
 		ofs.write(reinterpret_cast<const char*>(cwavs[i].Offset), cwavs[i].Length);
 		ofs.close();

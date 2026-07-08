@@ -47,9 +47,10 @@ explanation, and some failures corrupt output silently.
       buffer the position falls in. Verified behavior-preserving by diffing
       13,843 output files across 31 real archives against the pre-change build
       (byte-identical), and that truncated/corrupt inputs now fail cleanly.
-- [ ] Bounds-check the remaining bulk reads that bypass the readers (string
-      construction from a file-supplied length, raw sub-file writes), which can
-      still over-read on a corrupt length field.
+- [x] Bounds-check the remaining bulk reads that bypass the readers (name/label
+      string construction, the null-terminated location scan, and every raw
+      sub-file dump), so a corrupt length or offset can no longer over-read.
+      Verified byte-identical output on real archives.
 - [ ] Replace the change-working-directory extraction model with composed output
       paths (enables an `--output-dir` option and removes remaining failure-path
       and parallelism limits).

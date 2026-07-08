@@ -119,6 +119,7 @@ bool Cseq::Convert()
 		CseqLabl labl;
 		labl.Offset = Data + dataOffset + 8 + ReadFixLen(pos, 4);
 		uint32_t lablLength = ReadFixLen(pos, 4);
+		Common::CheckBounds(pos, lablLength);
 		labl.Label = string(reinterpret_cast<const char*>(pos), lablLength);
 
 		labls[labl.Offset] = labl;

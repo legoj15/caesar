@@ -23,7 +23,7 @@ vector<string> Common::Log;
 // file itself, so a corrupt or truncated file can point anywhere; without this
 // the readers would walk off the end of the buffer and crash. Throwing here
 // turns that into a clean error caught by main.
-static void CheckBounds(uint8_t* pos, size_t bytes)
+void Common::CheckBounds(uint8_t* pos, size_t bytes)
 {
 	for (size_t i = Common::Buffers.size(); i-- > 0; )
 	{
@@ -49,7 +49,7 @@ static void CheckBounds(uint8_t* pos, size_t bytes)
 
 int32_t ReadFixLen(uint8_t*& pos, size_t bytes, bool littleEndian, bool isSigned)
 {
-	CheckBounds(pos, bytes);
+	Common::CheckBounds(pos, bytes);
 
 	int32_t result = 0;
 
@@ -72,7 +72,7 @@ int32_t ReadVarLen(uint8_t*& pos)
 
 	while (true)
 	{
-		CheckBounds(pos, 1);
+		Common::CheckBounds(pos, 1);
 
 		uint8_t b = *pos++;
 		result = (result << 7) | (b & 0x7F);

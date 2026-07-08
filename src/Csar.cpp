@@ -107,6 +107,7 @@ bool Csar::Extract()
 
 		for (uint32_t i = 0; i < strgCount; ++i)
 		{
+			Common::CheckBounds(pos, strgs[i].Length - 1);
 			strgs[i].String = string(reinterpret_cast<const char*>(pos), strgs[i].Length - 1);
 
 			pos = i != (strgCount - 1) ? strgs[i + 1].Offset : pos + strgs[i].Length;
@@ -209,8 +210,15 @@ bool Csar::Extract()
 			{
 				if (!Common::Assert(pos, 0xC, ReadFixLen(pos, 8))) { return false; }
 
-				while (*pos != 0x00)
+				while (true)
 				{
+					Common::CheckBounds(pos, 1);
+
+					if (*pos == 0x00)
+					{
+						break;
+					}
+
 					file.Location += *pos++;
 				}
 
@@ -267,6 +275,8 @@ bool Csar::Extract()
 
 			create_directory(fileName);
 			current_path(fileName);
+
+			Common::CheckBounds(pos, cwarLength);
 
 			ofstream ofs(string(fileName + ".bcwar"), ofstream::binary);
 			ofs.write(reinterpret_cast<const char*>(pos), cwarLength);
@@ -325,6 +335,8 @@ bool Csar::Extract()
 			uint32_t cbnkLength = ReadFixLen(pos, 4);
 
 			pos -= 16;
+
+			Common::CheckBounds(pos, cbnkLength);
 
 			ofstream ofs(string(cbnks[i].FileName + ".bcbnk"), ofstream::binary);
 			ofs.write(reinterpret_cast<const char*>(pos), cbnkLength);
@@ -405,6 +417,8 @@ bool Csar::Extract()
 					pos -= 16;
 
 					current_path(cbnks[cbnk].FileName);
+
+					Common::CheckBounds(pos, cseqLength);
 
 					ofstream ofs(string(cseqs[i].FileName + ".bcseq"), ofstream::binary);
 					ofs.write(reinterpret_cast<const char*>(pos), cseqLength);
@@ -496,6 +510,8 @@ bool Csar::Extract()
 			uint32_t cgrpLength = ReadFixLen(pos, 4);
 
 			pos -= 16;
+
+			Common::CheckBounds(pos, cgrpLength);
 
 			ofstream ofs(string(cgrps[i].FileName + ".bcgrp"), ofstream::binary);
 			ofs.write(reinterpret_cast<const char*>(pos), cgrpLength);
