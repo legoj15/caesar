@@ -160,9 +160,19 @@ The cheapest changes with the most audible or visible payoff.
       instruments all read `A=D=S=R=127`) sounded sharply cut off. Now mapped to
       ~3.5 s (`ConvertTime(3.5)`), calibrated by A/B of patched soundfonts against
       a Citra HLE capture; the four pads went from `-12000` to `~2168` tc and the
-      render matches the chosen reference to floating-point noise. Exact driver
-      value still wants console/LLE confirmation (a $5 3.5 mm cable would let the
-      user capture the console, which already reaches this sequence). **Open
+      render matches the chosen reference to floating-point noise. **Validated
+      against a real console capture** (2026-07-08, 192 kHz line-in off the CFW
+      New 3DS, `EMPTY_LANDSCAPE_console.wav`): the fixed render's loudness
+      distribution matches console (median ~-8 dB below peak, same ~18 dB dynamic
+      range, neither ever below -30 dB — the instant-cutoff signature is gone).
+      The exact release *time*, however, is **not measurable from this track** —
+      it is such a dense overlapping-pad texture that a voice is essentially
+      always sounding, so the aggregate envelope is near-identical for a 1 ms vs a
+      5 s release (verified by a dry+wet render sweep; p90 falling-slope moved
+      <4 dB/s across the whole range). So 3.5 s stands on the ear, not on a
+      measurement; nothing in the console data contradicts it. Pinning the exact
+      constant needs either a console capture of a *sparse* track with isolated
+      note-offs, or RE of `code.bin`. **Open
       follow-up:** `decay == 127` (`ConvertDecay`) is still treated as instant —
       probably the same sentinel, but every instrument seen with `decay 127` also
       had full sustain (decay unobservable), so it's left until there's evidence;
