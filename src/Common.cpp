@@ -1,5 +1,6 @@
 #include "Common.hpp"
 
+#include <cctype>
 #include <cstdint>
 #include <fstream>
 #include <iostream>
@@ -136,6 +137,28 @@ void Common::RequireOpen(bool streamOk, streamoff length, const string& fileName
 	{
 		throw runtime_error("could not open or read file (missing, empty, or unreadable): " + fileName);
 	}
+}
+
+// Give a bare numeric name (an item the archive left unnamed, or named only by
+// its numeric id) a type prefix like "BANK_206", so extracted output is
+// identifiable and banks/wave-archives/etc. that share a number don't collide.
+// Names that already carry a symbol from the archive are returned unchanged.
+string Common::TypedName(const string& name, const string& type)
+{
+	if (name.empty())
+	{
+		return name;
+	}
+
+	for (unsigned char c : name)
+	{
+		if (!isdigit(c))
+		{
+			return name;
+		}
+	}
+
+	return type + "_" + name;
 }
 
 void Common::Analyse(string tag, uint32_t val)

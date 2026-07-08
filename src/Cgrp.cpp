@@ -156,14 +156,16 @@ bool Cgrp::Extract()
 
 				pos -= 16;
 
-				create_directory(to_string(files[i].Id));
-				current_path(to_string(files[i].Id));
+				string name = Common::TypedName(to_string(files[i].Id), "WARC");
 
-				ofstream ofs(string(to_string(files[i].Id) + ".bcwar"), ofstream::binary);
+				create_directory(name);
+				current_path(name);
+
+				ofstream ofs(string(name + ".bcwar"), ofstream::binary);
 				ofs.write(reinterpret_cast<const char*>(pos), cwarLength);
 				ofs.close();
 
-				(*Cwars)[files[i].Id] = new Cwar(string(to_string(files[i].Id) + ".bcwar").c_str());
+				(*Cwars)[files[i].Id] = new Cwar(string(name + ".bcwar").c_str());
 
 				current_path("..");
 
@@ -187,14 +189,16 @@ bool Cgrp::Extract()
 
 				pos -= 16;
 
-				create_directory(to_string(files[i].Id));
-				current_path(to_string(files[i].Id));
+				string name = Common::TypedName(to_string(files[i].Id), "BANK");
 
-				ofstream ofs(string(to_string(files[i].Id) + ".bcbnk"), ofstream::binary);
+				create_directory(name);
+				current_path(name);
+
+				ofstream ofs(string(name + ".bcbnk"), ofstream::binary);
 				ofs.write(reinterpret_cast<const char*>(pos), cbnkLength);
 				ofs.close();
 
-				Cbnks.push_back(new Cbnk(string(to_string(files[i].Id) + ".bcbnk").c_str(), Cwars, P));
+				Cbnks.push_back(new Cbnk(string(name + ".bcbnk").c_str(), Cwars, P));
 
 				current_path("..");
 
@@ -209,11 +213,13 @@ bool Cgrp::Extract()
 
 				pos -= 16;
 
-				ofstream ofs(string(to_string(files[i].Id) + ".bcseq"), ofstream::binary);
+				string name = Common::TypedName(to_string(files[i].Id), "SEQ");
+
+				ofstream ofs(string(name + ".bcseq"), ofstream::binary);
 				ofs.write(reinterpret_cast<const char*>(pos), cseqLength);
 				ofs.close();
 
-				Cseqs.push_back(new Cseq(string(to_string(files[i].Id) + ".bcseq").c_str()));
+				Cseqs.push_back(new Cseq(string(name + ".bcseq").c_str()));
 
 				break;
 			}

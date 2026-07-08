@@ -61,6 +61,7 @@ struct Common
 	static void Pop();
 	static void Reset();
 	static void RequireOpen(bool streamOk, std::streamoff length, const std::string& fileName);
+	static std::string TypedName(const std::string& name, const std::string& type);
 	static void Analyse(std::string tag, uint32_t val);
 	static void Dump(std::string fileName);
 };

@@ -255,7 +255,7 @@ bool Csar::Extract()
 
 		uint32_t hasFileName = ReadFixLen(pos, 4);
 
-		string fileName = hasFileName  && (strgOffset != 0xFFFFFFFF) ? strgs[ReadFixLen(pos, 4)].String : to_string(id);
+		string fileName = Common::TypedName(hasFileName  && (strgOffset != 0xFFFFFFFF) ? strgs[ReadFixLen(pos, 4)].String : to_string(id), "WARC");
 
 		if (files[id].Offset != nullptr)
 		{
@@ -313,7 +313,7 @@ bool Csar::Extract()
 		Common::Analyse("Cbnk 0x08", ReadFixLen(pos, 4));
 		Common::Analyse("Cbnk 0x0C", ReadFixLen(pos, 4));
 
-		cbnks[i].FileName = strgOffset != 0xFFFFFFFF ? strgs[ReadFixLen(pos, 4)].String : to_string(cbnks[i].Id);
+		cbnks[i].FileName = Common::TypedName(strgOffset != 0xFFFFFFFF ? strgs[ReadFixLen(pos, 4)].String : to_string(cbnks[i].Id), "BANK");
 
 		create_directory(cbnks[i].FileName);
 		current_path(cbnks[i].FileName);
@@ -372,7 +372,7 @@ bool Csar::Extract()
 
 		Common::Analyse("Cseq 0x14", ReadFixLen(pos, 4));
 
-		cseqs[i].FileName = strgOffset != 0xFFFFFFFF ? strgs[ReadFixLen(pos, 4)].String : to_string(id);
+		cseqs[i].FileName = Common::TypedName(strgOffset != 0xFFFFFFFF ? strgs[ReadFixLen(pos, 4)].String : to_string(id), "SEQ");
 
 		switch (type)
 		{
@@ -487,7 +487,7 @@ bool Csar::Extract()
 
 		if (!Common::Assert(pos, 0x1, ReadFixLen(pos, 4))) { return false; }
 
-		cgrps[i].FileName = strgOffset != 0xFFFFFFFF ? strgs[ReadFixLen(pos, 4)].String : to_string(cgrps[i].Id);
+		cgrps[i].FileName = Common::TypedName(strgOffset != 0xFFFFFFFF ? strgs[ReadFixLen(pos, 4)].String : to_string(cgrps[i].Id), "GROUP");
 
 		if (files[cgrps[i].Id].Offset != nullptr)
 		{

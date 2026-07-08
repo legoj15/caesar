@@ -68,8 +68,18 @@ entire audio codec, and more. Users can't tell what they didn't get.
 ### 4. High-value fidelity & UX wins
 The cheapest changes with the most audible or visible payoff.
 
-- [ ] Name output files/folders from the archive's symbol table instead of bare
-      numbers (`206.sf2`) — the single most-requested usability fix upstream.
+- [x] Give numeric output names a type prefix so numbered items are
+      identifiable and can't collide. Symbol-table names (e.g. `BANK_CTR_COMMON`)
+      were already used where present; now items the archive leaves unnamed —
+      including everything inside groups, which had no naming at all — become
+      `BANK_206`, `WARC_390`, `SEQ_…` instead of bare numbers (issue #17's
+      `206.sf2` → `BANK_206.sf2`). Verified content-preserving over real
+      archives (only the SF2 embedded name and the `.log` change, as intended).
+- [ ] Deeper naming: groups keep symbol names too. Group-resident banks are
+      extracted under a number while the matching symbol-named directory from the
+      CSAR level sits empty (28 of 85 named dirs in MK7's `ctr_dash`). Mapping
+      the CSAR symbol names across the group boundary would fill those and drop
+      the numeric duplicates — belongs with the external-`.bcgrp` group work.
 - [ ] Implement whole-song loops (the sequence "jump" command is currently
       unimplemented, so every looping track converts as play-once).
 - [ ] Verify and fix the suspected typo in the envelope decay-rate table in
