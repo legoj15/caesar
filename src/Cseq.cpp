@@ -4,6 +4,7 @@
 #include "libsmfc/libsmfc.h"
 #include "libsmfc/libsmfcx.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <fstream>
 #include <iterator>
@@ -839,11 +840,16 @@ bool Cseq::Convert(uint32_t startOffset)
 			}
 			else if (i->second.Cmd == 0xD9)
 			{
-				Common::Warning(Data + dataOffset + 8 + i->first, "fx send a not implemented");
+				// FX send A -> reverb depth (CC91). The aux-send level is a 7-bit
+				// value in these sequences (observed 0-120 across MeetSound);
+				// clamp defensively so an unexpected value can't push the control
+				// out of MIDI range and get silently dropped by the writer.
+				smfInsertControl(smf, absTime, track, track, SMF_CONTROL_REVERB, clamp(i->second.Args[0], 0, 127));
 			}
 			else if (i->second.Cmd == 0xDA)
 			{
-				Common::Warning(Data + dataOffset + 8 + i->first, "fx send b not implemented");
+				// FX send B -> chorus depth (CC93), same 0-127 convention.
+				smfInsertControl(smf, absTime, track, track, SMF_CONTROL_CHORUS, clamp(i->second.Args[0], 0, 127));
 			}
 			else if (i->second.Cmd == 0xDB)
 			{
