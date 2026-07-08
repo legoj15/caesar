@@ -136,20 +136,38 @@ The cheapest changes with the most audible or visible payoff.
       original repro, `BGM_DEN_EMPTY_LANDSCAPE`, is *not* affected by this fix —
       its four instruments use release `127` (the instant sentinel, special-cased
       before the table), so old/new render bit-identical; that track's wrongness
-      was dropped reverb (below), not decay. Console A/B still worthwhile for the
-      many tracks that do use the table.
+      was the release-127 cutoff and dropped reverb (both below), not decay.
+      Console A/B still worthwhile for the many tracks that do use the table.
 - [x] Map the sequence FX-send commands to reverb (CC91) / chorus (CC93). The
       converter dropped `0xD9` (fx send a) and `0xDA` (fx send b) with a
       "not implemented" warning, so extracted MIDIs were bone-dry even where the
-      game routed tracks through the DSP reverb/chorus — the actual reason
+      game routed tracks through the DSP reverb/chorus — one reason
       `BGM_DEN_EMPTY_LANDSCAPE` sounded wrong vs console (525 reverb-sends dropped
-      across MeetSound; 4 on that track alone). Now `0xD9`→CC91 reverb depth and
+      across MeetSound; 4 on that track alone), though the bigger cause on that
+      track was the release-127 cutoff (below). Now `0xD9`→CC91 reverb depth and
       `0xDA`→CC93 chorus depth, passing the 7-bit send level through (observed
       0-120; clamped 0-127 so the MIDI writer can't silently drop it). Verified:
       the track's MIDI now carries 4 `CC91=60` events (was 0), and a reverb-on
       FluidSynth render differs from the old dry render by 11% RMS. Remaining
       unmapped: `0xDB` main send and the `0xD2` envelope-sustain override (no
       clean MIDI CC equivalent).
+- [x] Fix envelope release `127` being treated as instant. `ConvertRelease`
+      special-cased `release == 127` to `-12000` timecents (~1 ms), chopping any
+      such voice dead at note-off. That is backwards: `127` is a *long*-release
+      sentinel (the 0-126 table already spans fast→slow; nothing uses `127` for
+      an instant stop), and on 3DS these voices ring out for seconds. This — more
+      than the dropped reverb — is why `BGM_DEN_EMPTY_LANDSCAPE` (whose four
+      instruments all read `A=D=S=R=127`) sounded sharply cut off. Now mapped to
+      ~3.5 s (`ConvertTime(3.5)`), calibrated by A/B of patched soundfonts against
+      a Citra HLE capture; the four pads went from `-12000` to `~2168` tc and the
+      render matches the chosen reference to floating-point noise. Exact driver
+      value still wants console/LLE confirmation (a $5 3.5 mm cable would let the
+      user capture the console, which already reaches this sequence). **Open
+      follow-up:** `decay == 127` (`ConvertDecay`) is still treated as instant —
+      probably the same sentinel, but every instrument seen with `decay 127` also
+      had full sustain (decay unobservable), so it's left until there's evidence;
+      the definitive answer for both is in the dumped `code.bin` (nn::snd rate
+      handling) if someone wants to reverse-engineer it.
 
 ### 5. Licensing — ✅ resolved
 The vendored `libsmfc` shipped without a license notice, but it is loveemu's
