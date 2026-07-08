@@ -187,8 +187,39 @@ The cheapest changes with the most audible or visible payoff.
       correction (NOT yet applied, needs user sign-off — reverses a committed
       change):** shorten release-127 toward short/instant, rely on the emitted
       reverb; re-check EMPTY_LANDSCAPE with short-release+reverb; exact value wants
-      the user's ear or `code.bin` RE. **Open
-      follow-up:** `decay == 127` (`ConvertDecay`) is still treated as instant —
+      the user's ear or `code.bin` RE.
+
+      **ROOT CAUSE (user's ear, 2026-07-08): no single release can ever be right.**
+      A per-instrument A/B ("0.3 s perfect for some notes, too short for others;
+      1.0 fits nothing; 3.5 fits a couple but muds the rest") plus `variance.py`
+      shows all 34 sentinel programs are ENVELOPE-IDENTICAL (attack/hold instant,
+      decay 127, full sustain, release 127). The tail variation the user hears is
+      NOT in the envelope — it lives in the **sample** (6 one-shot vs 28 looped;
+      loop lengths 225…28k samples) and the **per-note reverb sends**. So byte 127
+      is one global behaviour; caesar is being asked to fake, with one release knob,
+      a variation that physically lives in the samples + reverb. Accurate-fix
+      options, best→cheapest (user wants these documented; decided to keep 3.5 s
+      for now):
+        1. **RE `code.bin` (nn::snd)** — definitive. Disassemble ARM11 (ARMv6K) for
+           (a) envelope-byte→DSP-rate (true meaning of 127) and (b) the DSP reverb
+           aux-bus/room coefficients. The reverb half matters most — it's the real
+           source of the per-instrument tails. `MiiPlazaEX\code.bin`. Note caesar
+           also discards 3 per-note 4-byte fields (Cbnk.cpp Note 0x2C/0x30/0x34) —
+           check them here.
+        2. **Model the 3DS DSP reverb** (Teakra/DSP-LLE or extracted coefficients)
+           and let caesar emit a pre-reverbed reference render; this is what makes
+           all instruments' tails correct at once.
+        3. **Per-instrument isolated-note console capture** — a generated test
+           `.bcseq` playing each sentinel instrument as one note→silence; measure
+           each tail empirically (tooling exists). No RE; laborious.
+        4. **Faithful model**: set release-127 to the true short value + rely on
+           emitted CC91/93, optionally boosting reverb depth to offset weak GM
+           reverb in common players; document that faithful playback needs a
+           reverb-capable player.
+        5. **Sample-loop-aware release** (cheap stopgap): don't force long release
+           on one-shot samples; cap release relative to loop length. Heuristic,
+           reduces mud without RE.
+      **Open follow-up:** `decay == 127` (`ConvertDecay`) is still treated as instant —
       probably the same sentinel, but every instrument seen with `decay 127` also
       had full sustain (decay unobservable), so it's left until there's evidence;
       the definitive answer for both is in the dumped `code.bin` (nn::snd rate
