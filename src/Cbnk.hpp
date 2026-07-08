@@ -76,5 +76,5 @@ struct Cbnk
 
 	Cbnk(const char* fileName, std::map<int, Cwar*>* cwars, bool p);
 	~Cbnk();
-	bool Convert(std::string cwarPath);
+	bool Convert();
 };

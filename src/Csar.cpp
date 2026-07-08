@@ -42,10 +42,28 @@ Csar::~Csar()
 	delete[] Data;
 }
 
-bool Csar::Extract()
+bool Csar::Extract(const string& outputDir)
 {
-	create_directory(FileName.substr(0, FileName.length() - 6));
-	current_path(FileName.substr(0, FileName.length() - 6));
+	// Compose the archive's output directory rather than changing into it: every
+	// output path below is built from archiveDir, so no global working-directory
+	// state is touched (which is what previously limited failure recovery and
+	// parallel/multi-file use). Default layout is unchanged -- beside the input,
+	// in a folder named after the archive -- while an explicit outputDir puts
+	// every archive under "<outputDir>/<name>/".
+	path stem = path(FileName).stem();
+	path archiveDir;
+
+	if (outputDir.empty())
+	{
+		archiveDir = FileName;
+		archiveDir.replace_extension();
+	}
+	else
+	{
+		archiveDir = path(outputDir) / stem;
+	}
+
+	create_directories(archiveDir);
 
 	uint8_t* pos = Data;
 
@@ -273,23 +291,22 @@ bool Csar::Extract()
 
 			pos -= 16;
 
-			create_directory(fileName);
-			current_path(fileName);
+			path warcDir = archiveDir / fileName;
+			create_directories(warcDir);
 
 			Common::CheckBounds(pos, cwarLength);
 
-			ofstream ofs(string(fileName + ".bcwar"), ofstream::binary);
+			string warcFile = (warcDir / (fileName + ".bcwar")).string();
+			ofstream ofs(warcFile, ofstream::binary);
 			ofs.write(reinterpret_cast<const char*>(pos), cwarLength);
 			ofs.close();
 
-			Cwars[id] = new Cwar(string(fileName + ".bcwar").c_str());
+			Cwars[id] = new Cwar(warcFile.c_str());
 
 			if (!Cwars[id]->Extract())
 			{
 				return false;
 			}
-
-			current_path("..");
 		}
 		else
 		{
@@ -325,8 +342,10 @@ bool Csar::Extract()
 
 		cbnks[i].FileName = Common::TypedName(strgOffset != 0xFFFFFFFF ? strgs[ReadFixLen(pos, 4)].String : to_string(cbnks[i].Id), "BANK");
 
-		create_directory(cbnks[i].FileName);
-		current_path(cbnks[i].FileName);
+		// Create the bank directory unconditionally (even when the bank has no
+		// data), matching the historical layout.
+		path bankDir = archiveDir / cbnks[i].FileName;
+		create_directories(bankDir);
 
 		if (files[cbnks[i].Id].Offset != nullptr)
 		{
@@ -338,19 +357,18 @@ bool Csar::Extract()
 
 			Common::CheckBounds(pos, cbnkLength);
 
-			ofstream ofs(string(cbnks[i].FileName + ".bcbnk"), ofstream::binary);
+			string bankFile = (bankDir / (cbnks[i].FileName + ".bcbnk")).string();
+			ofstream ofs(bankFile, ofstream::binary);
 			ofs.write(reinterpret_cast<const char*>(pos), cbnkLength);
 			ofs.close();
 
-			Cbnk cbnk(string(cbnks[i].FileName + ".bcbnk").c_str(), &Cwars, P);
+			Cbnk cbnk(bankFile.c_str(), &Cwars, P);
 
-			if (!cbnk.Convert(".."))
+			if (!cbnk.Convert())
 			{
 				return false;
 			}
 		}
-
-		current_path("..");
 	}
 
 	pos = Data + infoOffset + 8 + infoCseqOffset;
@@ -431,22 +449,23 @@ bool Csar::Extract()
 
 					pos -= 16;
 
-					current_path(cbnks[cbnk].FileName);
+					// The sequence is written into the directory of the bank it
+					// references (created in the bank loop above).
+					path bankDir = archiveDir / cbnks[cbnk].FileName;
 
 					Common::CheckBounds(pos, cseqLength);
 
-					ofstream ofs(string(cseqs[i].FileName + ".bcseq"), ofstream::binary);
+					string seqFile = (bankDir / (cseqs[i].FileName + ".bcseq")).string();
+					ofstream ofs(seqFile, ofstream::binary);
 					ofs.write(reinterpret_cast<const char*>(pos), cseqLength);
 					ofs.close();
 
-					Cseq cseq(string(cseqs[i].FileName + ".bcseq").c_str());
+					Cseq cseq(seqFile.c_str());
 
 					if (!cseq.Convert(startOffset))
 					{
 						return false;
 					}
-
-					current_path("..");
 
 					cseqsFromCsar[id] = true;
 				}
@@ -528,11 +547,12 @@ bool Csar::Extract()
 
 			Common::CheckBounds(pos, cgrpLength);
 
-			ofstream ofs(string(cgrps[i].FileName + ".bcgrp"), ofstream::binary);
+			string grpFile = (archiveDir / (cgrps[i].FileName + ".bcgrp")).string();
+			ofstream ofs(grpFile, ofstream::binary);
 			ofs.write(reinterpret_cast<const char*>(pos), cgrpLength);
 			ofs.close();
 
-			Cgrp cgrp(string(cgrps[i].FileName + ".bcgrp").c_str(), &Cwars, cseqsFromCsar, P);
+			Cgrp cgrp(grpFile.c_str(), &Cwars, cseqsFromCsar, P);
 
 			if (!cgrp.Extract())
 			{
@@ -541,7 +561,7 @@ bool Csar::Extract()
 		}
 	}
 
-	Common::Dump(FileName.substr(0, FileName.length() - 5).append("log"));
+	Common::Dump((archiveDir / (stem.string() + ".log")).string());
 
 	return true;
 }

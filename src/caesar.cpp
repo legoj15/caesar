@@ -3,33 +3,30 @@
 
 #include <cstring>
 #include <exception>
-#include <filesystem>
 #include <iostream>
-#include <system_error>
+#include <string>
 
 using namespace std;
 
 int main(int argc, char* argv[])
 {
 	bool p = false;
+	string outputDir;
+	bool haveInput = false;
 
 	if (argc == 1)
 	{
 		cout << "OVERVIEW: Caesar" << endl << endl;
 		cout << "USAGE: caesar [options] <inputs>" << endl << endl;
 		cout << "OPTIONS:" << endl;
-		cout << "\t-p\tDo not ignore pan values of stereo samples" << endl;
-		cout << "\t-w\tShow warnings" << endl;
+		cout << "\t-p\t\tDo not ignore pan values of stereo samples" << endl;
+		cout << "\t-w\t\tShow warnings" << endl;
+		cout << "\t-o <dir>\tWrite output under <dir> (default: beside each input)" << endl;
 
 		return 1;
 	}
 
 	int exitCode = 0;
-
-	// Extraction changes the working directory into each archive's output
-	// folder, so remember where we started and return there between inputs.
-	error_code ec;
-	filesystem::path startDir = filesystem::current_path(ec);
 
 	for (int i = 1; i < argc; ++i)
 	{
@@ -41,15 +38,28 @@ int main(int argc, char* argv[])
 		{
 			Common::ShowWarnings = true;
 		}
+		else if (!strcmp(argv[i], "-o") || !strcmp(argv[i], "--output-dir"))
+		{
+			if (i + 1 >= argc)
+			{
+				cerr << "ERROR\t\t" << argv[i] << " requires a directory argument" << endl;
+
+				return 1;
+			}
+
+			outputDir = argv[++i];
+		}
 		else
 		{
+			haveInput = true;
+
 			// Isolate each input: a bad file reports cleanly and the rest
 			// still process, instead of aborting the whole run.
 			try
 			{
 				Csar csar(argv[i], p);
 
-				if (!csar.Extract())
+				if (!csar.Extract(outputDir))
 				{
 					exitCode = 1;
 				}
@@ -64,9 +74,14 @@ int main(int argc, char* argv[])
 				Common::Reset();
 				exitCode = 1;
 			}
-
-			filesystem::current_path(startDir, ec);
 		}
+	}
+
+	if (!haveInput)
+	{
+		cerr << "ERROR\t\tno input archive given" << endl;
+
+		return 1;
 	}
 
 	return exitCode;

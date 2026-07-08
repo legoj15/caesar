@@ -57,5 +57,10 @@ struct Csar
 
 	Csar(const char* fileName, bool p);
 	~Csar();
-	bool Extract();
+
+	// outputDir is the base directory to extract into. When empty (the default),
+	// each archive is extracted beside its own input file, into a folder named
+	// after the archive (the historical behaviour). Otherwise every archive is
+	// extracted into "<outputDir>/<archive-name>/".
+	bool Extract(const std::string& outputDir = "");
 };

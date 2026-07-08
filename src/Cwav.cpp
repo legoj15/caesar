@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <filesystem>
 #include <fstream>
 #include <vector>
 
@@ -18,7 +19,7 @@ Cwav::Cwav(const char* fileName) : FileName(fileName)
 	Common::RequireOpen(ifs.good(), Length, FileName);
 	Data = new uint8_t[Length];
 
-	Common::Push(FileName, Data, Length);
+	Common::Push(filesystem::path(FileName).filename().string(), Data, Length);
 
 	ifs.seekg(0, ios::beg);
 	ifs.read(reinterpret_cast<char*>(Data), Length);

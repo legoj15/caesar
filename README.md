@@ -41,12 +41,17 @@ OVERVIEW: Caesar
 USAGE: caesar [options] <inputs>
 
 OPTIONS:
-	-p	Do not ignore pan values of stereo samples
-	-w	Show warnings
+	-p		Do not ignore pan values of stereo samples
+	-w		Show warnings
+	-o <dir>	Write output under <dir> (default: beside each input)
 ```
 
 For each input archive, caesar creates an output folder named after the archive
-and writes the converted `.sf2`, `.mid`, and extracted wave files into it.
+and writes the converted `.sf2`, `.mid`, and extracted wave files into it. By
+default that folder is created beside the input file; pass `-o <dir>` (or
+`--output-dir <dir>`) to collect every archive's folder under a chosen directory
+instead. Multiple archives can be given in one invocation; a malformed one is
+reported and skipped without affecting the others.
 
 ## Roadmap
 

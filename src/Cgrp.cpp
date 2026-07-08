@@ -22,7 +22,7 @@ Cgrp::Cgrp(const char* fileName, map<int, Cwar*>* cwars, const map<int, bool>& c
 	Common::RequireOpen(ifs.good(), Length, FileName);
 	Data = new uint8_t[Length];
 
-	Common::Push(FileName, Data, Length);
+	Common::Push(filesystem::path(FileName).filename().string(), Data, Length);
 
 	ifs.seekg(0, ios::beg);
 	ifs.read(reinterpret_cast<char*>(Data), Length);
@@ -48,6 +48,12 @@ Cgrp::~Cgrp()
 
 bool Cgrp::Extract()
 {
+	// A group shares the archive's output directory (the folder its own dump was
+	// written into); its wave-archives/banks get sub-folders there and its
+	// sequences sit directly in it. Compose everything from that base instead of
+	// changing the working directory.
+	path baseDir = path(FileName).parent_path();
+
 	uint8_t* pos = Data;
 
 	if (!Common::Assert(pos, 0x43475250, ReadFixLen(pos, 4, false))) { return false; }
@@ -158,27 +164,22 @@ bool Cgrp::Extract()
 
 				string name = Common::TypedName(to_string(files[i].Id), "WARC");
 
-				create_directory(name);
-				current_path(name);
+				path warcDir = baseDir / name;
+				create_directories(warcDir);
 
 				Common::CheckBounds(pos, cwarLength);
 
-				ofstream ofs(string(name + ".bcwar"), ofstream::binary);
+				string warcFile = (warcDir / (name + ".bcwar")).string();
+				ofstream ofs(warcFile, ofstream::binary);
 				ofs.write(reinterpret_cast<const char*>(pos), cwarLength);
 				ofs.close();
 
-				(*Cwars)[files[i].Id] = new Cwar(string(name + ".bcwar").c_str());
-
-				current_path("..");
-
-				current_path(((*Cwars)[files[i].Id]->FileName.substr(0, (*Cwars)[files[i].Id]->FileName.length() - 6)));
+				(*Cwars)[files[i].Id] = new Cwar(warcFile.c_str());
 
 				if (!(*Cwars)[files[i].Id]->Extract())
 				{
 					return false;
 				}
-
-				current_path("..");
 
 				break;
 			}
@@ -193,18 +194,17 @@ bool Cgrp::Extract()
 
 				string name = Common::TypedName(to_string(files[i].Id), "BANK");
 
-				create_directory(name);
-				current_path(name);
+				path bankDir = baseDir / name;
+				create_directories(bankDir);
 
 				Common::CheckBounds(pos, cbnkLength);
 
-				ofstream ofs(string(name + ".bcbnk"), ofstream::binary);
+				string bankFile = (bankDir / (name + ".bcbnk")).string();
+				ofstream ofs(bankFile, ofstream::binary);
 				ofs.write(reinterpret_cast<const char*>(pos), cbnkLength);
 				ofs.close();
 
-				Cbnks.push_back(new Cbnk(string(name + ".bcbnk").c_str(), Cwars, P));
-
-				current_path("..");
+				Cbnks.push_back(new Cbnk(bankFile.c_str(), Cwars, P));
 
 				break;
 			}
@@ -221,11 +221,12 @@ bool Cgrp::Extract()
 
 				Common::CheckBounds(pos, cseqLength);
 
-				ofstream ofs(string(name + ".bcseq"), ofstream::binary);
+				string seqFile = (baseDir / (name + ".bcseq")).string();
+				ofstream ofs(seqFile, ofstream::binary);
 				ofs.write(reinterpret_cast<const char*>(pos), cseqLength);
 				ofs.close();
 
-				Cseqs.push_back(new Cseq(string(name + ".bcseq").c_str()));
+				Cseqs.push_back(new Cseq(seqFile.c_str()));
 
 				break;
 			}
@@ -248,14 +249,10 @@ bool Cgrp::Extract()
 
 	for (uint32_t i = 0; i < Cbnks.size(); ++i)
 	{
-		current_path(Cbnks[i]->FileName.substr(0, Cbnks[i]->FileName.length() - 6));
-
-		if (!Cbnks[i]->Convert(".."))
+		if (!Cbnks[i]->Convert())
 		{
 			return false;
 		}
-
-		current_path("..");
 	}
 
 	for (uint32_t i = 0; i < Cseqs.size(); ++i)

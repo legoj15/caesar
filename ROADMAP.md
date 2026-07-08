@@ -29,18 +29,20 @@ A single CMake build that works on current (2026) toolchains.
 - [ ] Verify the build on Linux and macOS (the CMake is written to be portable;
       only Windows/MSVC is tested so far).
 
-### 2. Robustness — never crash on real-world input
+### 2. Robustness — ✅ done
 A tool whose job is parsing files ripped from game images should treat malformed
-or unusual input as normal, not exceptional. Today, bad input crashes with no
-explanation, and some failures corrupt output silently.
+or unusual input as normal, not exceptional. Previously, bad input crashed with no
+explanation, and some failures corrupted output silently.
 
 - [x] Check that every input file actually opened before using its size — a
       missing, empty, or unreadable path previously triggered a giant bogus
       allocation and crashed. (`Common::RequireOpen`, all load sites.)
 - [x] Wrap each input in top-level error handling so one bad file reports
       cleanly and the rest still process (previously the first failure aborted
-      the whole run), and restore the working directory between inputs so
-      multi-archive runs (`caesar a.bcsar b.bcsar`) work.
+      the whole run), so multi-archive runs (`caesar a.bcsar b.bcsar`) work.
+      (The between-inputs working-directory restore this originally added was
+      later removed as unnecessary — see the composed-output-paths item below,
+      which eliminates the working directory from extraction entirely.)
 - [x] Add a bounds-checked reader so a truncated or corrupt file reports
       "archive damaged at offset X" instead of reading past the buffer. Every
       read through `ReadFixLen`/`ReadVarLen` is checked against whichever loaded
@@ -51,9 +53,25 @@ explanation, and some failures corrupt output silently.
       string construction, the null-terminated location scan, and every raw
       sub-file dump), so a corrupt length or offset can no longer over-read.
       Verified byte-identical output on real archives.
-- [ ] Replace the change-working-directory extraction model with composed output
+- [x] Replace the change-working-directory extraction model with composed output
       paths (enables an `--output-dir` option and removes remaining failure-path
-      and parallelism limits).
+      and parallelism limits). Extraction no longer calls `current_path`/`chdir`
+      at all: each level composes a full output path (`archiveDir / <name> / …`)
+      and threads the destination through `Cwar`/`Cbnk`/`Cseq`/`Cwav`/`Cgrp` via
+      each object's own full dump-file path — so, e.g., `Cbnk` now locates its
+      `.wav`s from the wave-archive's stored path instead of a relative `..` hop,
+      and its `cwarPath` argument is gone. Added `-o <dir>` / `--output-dir <dir>`;
+      the default layout (beside the input) is unchanged. With no global
+      working-directory state, one invocation can process many archives and a
+      malformed one is isolated without a cwd reset, and inputs given with a path
+      prefix now extract correctly (the old model mis-placed the `.log` for those).
+      Display/log/embedded names are still bare basenames, so the SF2 `INAM`, the
+      `.log`, and console progress are unchanged. Verified byte-identical
+      old-vs-new over **24,928 output files across 6 real archives** (MK7
+      `ctr_dash` incl. internal groups, MiiPlaza `MeetSound` [+0x60 layout] and
+      `mgCar`, Animal `GardenSound`, eShop `TigerSound` [+0x54 layout], System
+      `menu`); `-o` output matches the default byte-for-byte except the `.log`
+      (which records the input path as spelled, as it always did).
 - [x] Sanitize archive-supplied names before using them as file/dir names —
       illegal characters (including path separators, which could otherwise
       escape the output folder) are replaced. Done in the same `TypedName`

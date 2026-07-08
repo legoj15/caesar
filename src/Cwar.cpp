@@ -2,6 +2,7 @@
 #include "Common.hpp"
 #include "Cwav.hpp"
 
+#include <filesystem>
 #include <fstream>
 #include <string>
 #include <vector>
@@ -16,7 +17,7 @@ Cwar::Cwar(const char* fileName) : FileName(fileName)
 	Common::RequireOpen(ifs.good(), Length, FileName);
 	Data = new uint8_t[Length];
 
-	Common::Push(FileName, Data, Length);
+	Common::Push(filesystem::path(FileName).filename().string(), Data, Length);
 
 	ifs.seekg(0, ios::beg);
 	ifs.read(reinterpret_cast<char*>(Data), Length);
@@ -82,15 +83,21 @@ bool Cwar::Extract()
 	if (!Common::Assert(pos, 0x46494C45, ReadFixLen(pos, 4, false))) { return false; }
 	if (!Common::Assert<uint32_t>(pos, fileLength, ReadFixLen(pos, 4))) { return false; }
 
+	// Write each sub-file into this wave-archive's own directory (the folder its
+	// dump was written into), composed from the full path rather than relying on
+	// the working directory.
+	filesystem::path dir = filesystem::path(FileName).parent_path();
+
 	for (uint32_t i = 0; i < cwavCount; ++i)
 	{
 		Common::CheckBounds(cwavs[i].Offset, cwavs[i].Length);
 
-		ofstream ofs(string(to_string(i) + ".bcwav"), ofstream::binary);
+		string cwavFile = (dir / (to_string(i) + ".bcwav")).string();
+		ofstream ofs(cwavFile, ofstream::binary);
 		ofs.write(reinterpret_cast<const char*>(cwavs[i].Offset), cwavs[i].Length);
 		ofs.close();
 
-		Cwavs.push_back(new Cwav(string(to_string(i) + ".bcwav").c_str()));
+		Cwavs.push_back(new Cwav(cwavFile.c_str()));
 
 		if (!Cwavs[i]->Convert())
 		{

@@ -5,6 +5,7 @@
 #include <sf2cute.hpp>
 
 #include <cmath>
+#include <filesystem>
 #include <fstream>
 #include <ios>
 #include <map>
@@ -134,7 +135,7 @@ Cbnk::Cbnk(const char* fileName, map<int, Cwar*>* cwars, bool p) : FileName(file
 	Common::RequireOpen(ifs.good(), Length, FileName);
 	Data = new uint8_t[Length];
 
-	Common::Push(FileName, Data, Length);
+	Common::Push(filesystem::path(FileName).filename().string(), Data, Length);
 
 	ifs.seekg(0, ios::beg);
 	ifs.read(reinterpret_cast<char*>(Data), Length);
@@ -148,7 +149,7 @@ Cbnk::~Cbnk()
 	delete[] Data;
 }
 
-bool Cbnk::Convert(string cwarPath)
+bool Cbnk::Convert()
 {
 	uint8_t* pos = Data;
 
@@ -202,7 +203,11 @@ bool Cbnk::Convert(string cwarPath)
 
 		if (cwav.Id < 0xF000)
 		{
-			ifstream ifs(cwarPath + "/" + it->second->FileName.substr(0, it->second->FileName.length() - 6) + "/" + to_string(cwav.Id) + ".wav", ios::binary | ios::ate);
+			// The decoded .wav sits beside the wave-archive's own dump file (the
+			// folder Cwar extracted into), so derive its path from that
+			// wave-archive's full path rather than assuming a working directory.
+			filesystem::path wavPath = filesystem::path(it->second->FileName).parent_path() / (to_string(cwav.Id) + ".wav");
+			ifstream ifs(wavPath, ios::binary | ios::ate);
 
 			streamoff cwavLength = ifs.tellg();
 			Common::RequireOpen(ifs.good(), cwavLength, to_string(cwav.Id) + ".wav");
@@ -471,7 +476,7 @@ bool Cbnk::Convert(string cwarPath)
 
 	SoundFont sf2;
 	sf2.set_sound_engine("EMU8000");
-	sf2.set_bank_name(FileName.substr(0, FileName.length() - 6));
+	sf2.set_bank_name(filesystem::path(FileName).stem().string());
 	sf2.set_rom_name("ROM");
 	sf2.set_software("Caesar");
 
