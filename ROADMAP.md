@@ -165,14 +165,16 @@ The cheapest changes with the most audible or visible payoff.
       New 3DS, `EMPTY_LANDSCAPE_console.wav`): the fixed render's loudness
       distribution matches console (median ~-8 dB below peak, same ~18 dB dynamic
       range, neither ever below -30 dB — the instant-cutoff signature is gone).
-      The exact release *time*, however, is **not measurable from this track** —
-      it is such a dense overlapping-pad texture that a voice is essentially
-      always sounding, so the aggregate envelope is near-identical for a 1 ms vs a
-      5 s release (verified by a dry+wet render sweep; p90 falling-slope moved
-      <4 dB/s across the whole range). So 3.5 s stands on the ear, not on a
-      measurement; nothing in the console data contradicts it. Pinning the exact
-      constant needs either a console capture of a *sparse* track with isolated
-      note-offs, or RE of `code.bin`. **Open
+      The exact release *time* is not measurable from that dense track (a voice is
+      essentially always sounding, so its aggregate envelope is near-identical for
+      1 ms vs 5 s release). So the value was pinned from a *second* console capture
+      (2026-07-08) of `BGM_MAIN_Mii_Only_One`, which has a 1.61 s all-voices-off
+      gap at ~51 s where sentinel voices ring out exposed. **A least-squares fit of
+      that gap's decay against a rendered release grid (aligned at the -25 dB
+      crossing, over the reliable -26…-43 dB window above the recording's -49 dB
+      noise floor) minimises at 3.5 s** (RMS 4.5 dB; 3.25 s→4.9, 3.75 s→4.6,
+      4.0 s→7.0, 5.0 s→12.3). So `ConvertTime(3.5)` is now **hardware-validated to
+      3.5 ± ~0.25 s** — the ear-picked value was correct. **Open
       follow-up:** `decay == 127` (`ConvertDecay`) is still treated as instant —
       probably the same sentinel, but every instrument seen with `decay 127` also
       had full sustain (decay unobservable), so it's left until there's evidence;
