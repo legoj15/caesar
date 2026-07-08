@@ -131,3 +131,29 @@ Larger efforts that expand what caesar can do. Rough priority order:
   structure; supporting them would make caesar the only maintained cross-console
   converter. (Note: the sequence command stream is big-endian even where the
   container is little-endian — endianness can't be a single global switch.)
+
+---
+
+## Known bugs
+
+Concrete defects found while surveying and evolving the code. None crash the tool
+on the archives tested so far, but each is a real correctness or portability
+hazard. Not release-blocking on their own.
+
+- **Group file-table desync** (`Cgrp.cpp`, the file-record loop). Each record's
+  offset is only consumed when the preceding marker equals `0x1F00`; on any other
+  marker the offset read is short-circuited away by the `?:`, so the length field
+  and every following record are read from the wrong position. A group containing
+  an external or absent file misparses everything after it.
+- **32-bit reader invoked with an 8-byte width** (`Csar.cpp`, the `0x220C` and
+  `0x220D` file-record branches call `ReadFixLen(pos, 8)`). That shifts a 32-bit
+  value by up to 56 bits — undefined behavior — and silently discards the top
+  four bytes. It works under MSVC today; a sanitizer build or a different compiler
+  could flag or miscompile it.
+- **Non-ASCII file names.** Input paths and archive-internal names pass through
+  narrow `char*` / `std::string` into `std::filesystem`, so non-ASCII names
+  (common for Japanese titles) can be mangled or throw. Illegal-character
+  sanitizing is done; character encoding is not.
+- **Compiler narrowing warnings** (`C4267` / `C4244`, `size_t`/`int` to smaller
+  types). Harmless in practice but they flag real implicit truncations; worth a
+  code-quality pass.
