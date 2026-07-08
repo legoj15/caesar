@@ -130,11 +130,26 @@ The cheapest changes with the most audible or visible payoff.
       125→`-1.2` would introduce a fresh 20x discontinuity. Bug is upstream
       (traces to commit e99708a, 2019). Verified by cross-checking the curve fit
       three ways (independent derivation, adversarial refutation, external
-      DS/3DS shape reference) and a clean Release rebuild. **Still to confirm
-      audibly:** regenerate the MeetSound SF2 and A/B `BGM_DEN_EMPTY_LANDSCAPE`
-      against console (hardware available).
-- [ ] Map the sequence FX-send commands to reverb (CC91) / chorus (CC93) — the
-      MIDI library already supports them; the converter just never emits them.
+      DS/3DS shape reference) and a clean Release rebuild. Confirmed in the
+      output: regenerating MeetSound `BANK_BGM.sf2` shifts exactly 99 release
+      generators by +3986 timecents (10x longer), no other bytes. Note the
+      original repro, `BGM_DEN_EMPTY_LANDSCAPE`, is *not* affected by this fix —
+      its four instruments use release `127` (the instant sentinel, special-cased
+      before the table), so old/new render bit-identical; that track's wrongness
+      was dropped reverb (below), not decay. Console A/B still worthwhile for the
+      many tracks that do use the table.
+- [x] Map the sequence FX-send commands to reverb (CC91) / chorus (CC93). The
+      converter dropped `0xD9` (fx send a) and `0xDA` (fx send b) with a
+      "not implemented" warning, so extracted MIDIs were bone-dry even where the
+      game routed tracks through the DSP reverb/chorus — the actual reason
+      `BGM_DEN_EMPTY_LANDSCAPE` sounded wrong vs console (525 reverb-sends dropped
+      across MeetSound; 4 on that track alone). Now `0xD9`→CC91 reverb depth and
+      `0xDA`→CC93 chorus depth, passing the 7-bit send level through (observed
+      0-120; clamped 0-127 so the MIDI writer can't silently drop it). Verified:
+      the track's MIDI now carries 4 `CC91=60` events (was 0), and a reverb-on
+      FluidSynth render differs from the old dry render by 11% RMS. Remaining
+      unmapped: `0xDB` main send and the `0xD2` envelope-sustain override (no
+      clean MIDI CC equivalent).
 
 ### 5. Licensing — ✅ resolved
 The vendored `libsmfc` shipped without a license notice, but it is loveemu's
