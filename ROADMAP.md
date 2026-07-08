@@ -114,8 +114,25 @@ The cheapest changes with the most audible or visible payoff.
       GardenSound alone, incl. full multi-track songs), the only sequences still
       silent are genuinely note-less (`dummy_seq`, `SE_SYS_SILENT`, control-only
       `*_CTRL_*`/`*_GVAR` setters), zero notes were lost, and nothing hangs.
-- [ ] Verify and fix the suspected typo in the envelope decay-rate table in
-      `Cbnk.cpp`, which makes some instruments fade out ~10x too fast.
+- [x] Fix the typo in the envelope decay-rate table in `Cbnk.cpp`, which made
+      some instruments fade out ~10x too fast. It was not one typo but a
+      systematic decimal-shift error on **eight** entries. The `DecayTable`
+      (indexed by the decay/release parameter byte, shared by `ConvertDecay` and
+      `ConvertRelease`) follows the exact curve `-1.2 / (126 - index)` over
+      indices 50-126; the eight "round-number" tail entries had all been typed
+      10x too large (decimal shifted one place right): indices 114, 120, 121,
+      122, 123, 124, 125, 126 read `-1, -2, -2.4, -3, -4, -6, -12, -24` but sit
+      on the curve at `-0.1, -0.2, -0.24, -0.3, -0.4, -0.6, -1.2, -2.4`. A rate
+      10x too steep makes the decay/release time ~10x too short (≈3986 timecents
+      early), so sustained/pad instruments collapse to near-silence. The single
+      curve fits ~68 untouched neighbours to 5 decimals, and index 126 (at the
+      curve's pole) is pinned to `-2.4` because leaving it at `-24` after fixing
+      125→`-1.2` would introduce a fresh 20x discontinuity. Bug is upstream
+      (traces to commit e99708a, 2019). Verified by cross-checking the curve fit
+      three ways (independent derivation, adversarial refutation, external
+      DS/3DS shape reference) and a clean Release rebuild. **Still to confirm
+      audibly:** regenerate the MeetSound SF2 and A/B `BGM_DEN_EMPTY_LANDSCAPE`
+      against console (hardware available).
 - [ ] Map the sequence FX-send commands to reverb (CC91) / chorus (CC93) — the
       MIDI library already supports them; the converter just never emits them.
 
