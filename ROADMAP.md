@@ -172,9 +172,22 @@ The cheapest changes with the most audible or visible payoff.
       gap at ~51 s where sentinel voices ring out exposed. **A least-squares fit of
       that gap's decay against a rendered release grid (aligned at the -25 dB
       crossing, over the reliable -26…-43 dB window above the recording's -49 dB
-      noise floor) minimises at 3.5 s** (RMS 4.5 dB; 3.25 s→4.9, 3.75 s→4.6,
-      4.0 s→7.0, 5.0 s→12.3). So `ConvertTime(3.5)` is now **hardware-validated to
-      3.5 ± ~0.25 s** — the ear-picked value was correct. **Open
+      noise floor) minimises at 3.5 s** (RMS 4.5 dB; 4.0 s→7.0, 5.0 s→12.3).
+      **BUT this is now DISPUTED — 3.5 s likely over-blends and is too long.** A
+      controlled busy-section comparison of the *same* console capture (dense
+      passage, only release varied between renders) shows console peak-to-trough
+      articulation = 11.1 dB vs renders 0.3 s→9.4, 1.0 s→6.5, 3.5 s→5.1: console
+      sits at the SHORT-release end (polyphony/voice-stealing ruled out). Since all
+      34 sentinel programs are identical full-sustain/instant-decay voices, the gap
+      note == the busy pads, so they share one release; if busy is short, the gap's
+      long tail is **DSP reverb, not release**. Reading: the note release is short
+      and the ring is reverb (already emitted as CC91) — `ConvertTime(3.5)` fakes
+      reverb with note-sustain, OK for sparse pads (both the gap fit and
+      EMPTY_LANDSCAPE confound reverb+release) but wrong for busy tracks. **Likely
+      correction (NOT yet applied, needs user sign-off — reverses a committed
+      change):** shorten release-127 toward short/instant, rely on the emitted
+      reverb; re-check EMPTY_LANDSCAPE with short-release+reverb; exact value wants
+      the user's ear or `code.bin` RE. **Open
       follow-up:** `decay == 127` (`ConvertDecay`) is still treated as instant —
       probably the same sentinel, but every instrument seen with `decay 127` also
       had full sustain (decay unobservable), so it's left until there's evidence;
