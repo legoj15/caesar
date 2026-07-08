@@ -90,7 +90,16 @@ double ConvertRelease(uint8_t release, uint8_t sustain)
 
 	if (release == 127)
 	{
-		return -12000;
+		// Release 127 is a long-release sentinel, NOT "instant". The old
+		// -12000 (~1 ms) chopped notes dead at note-off, which was wrong: on
+		// 3DS these voices (e.g. the R=127 pads in MeetSound's
+		// BGM_DEN_EMPTY_LANDSCAPE) ring out for seconds. Calibrated to ~3.5 s
+		// by A/B against a Citra capture; the exact driver value still wants
+		// console/LLE confirmation. NOTE: decay 127 (ConvertDecay above) is
+		// still treated as instant -- likely the same sentinel, but unverified
+		// (every instrument seen with decay 127 also had full sustain, so its
+		// decay is unobservable), so it is left alone until there is evidence.
+		return ConvertTime(3.5);
 	}
 	else
 	{
