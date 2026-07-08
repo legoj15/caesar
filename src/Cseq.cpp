@@ -14,6 +14,12 @@
 
 using namespace std;
 
+// Meta event type 0x06 = Marker. libsmfc has no named constant for it; it is
+// used below to write the "loopStart"/"loopEnd" markers that express a
+// whole-song loop, which loop-aware players (e.g. foobar2000's foo_midi) honor
+// and DAWs display on the timeline.
+static constexpr int SMF_META_MARKER = 0x06;
+
 vector<int32_t> ReadArgs(uint8_t*& pos, ArgType argType)
 {
 	if (argType == ArgType::Uint8)
@@ -70,7 +76,7 @@ Cseq::~Cseq()
 	delete[] Data;
 }
 
-bool Cseq::Convert()
+bool Cseq::Convert(uint32_t startOffset)
 {
 	uint8_t* pos = Data;
 
@@ -416,8 +422,58 @@ bool Cseq::Convert()
 	stack<uint32_t> sp;
 	bool trackEnabled[16] = { false };
 
-	for (auto i = commands.begin(); i != commands.end(); ++i)
+	// Absolute MIDI time at which each command offset was reached in the current
+	// track, so a backward jump can place its loop-start marker at the tick where
+	// the loop target originally played. Cleared at every track boundary.
+	map<uint32_t, uint32_t> offsetTime;
+
+	// Begin at this entry's start offset within the shared bank. If it does not
+	// land on a command boundary (a malformed offset, or an archive that stores
+	// it differently), fall back to the top rather than skip the sequence.
+	auto i = commands.find(startOffset);
+
+	if (i == commands.end())
 	{
+		if (startOffset != 0)
+		{
+			Common::Warning(Data + dataOffset + 8, "sequence start offset is not a command boundary; starting from the top");
+		}
+
+		i = commands.begin();
+	}
+
+	// End the current track and move to the next allocated one (registered by an
+	// earlier 0x88 in trackOffsets). Shared by three "this track is done here"
+	// cases: Fin (0xFF), a whole-song loop's loop-back, and a stray Return.
+	// Returns false when no further track remains, i.e. the whole sequence has
+	// finished and the caller should stop the walk.
+	auto advanceToNextTrack = [&]() -> bool
+	{
+		smfSetEndTimingOfTrack(smf, track, absTime);
+
+		for (uint8_t j = track + 1; j < 16; ++j)
+		{
+			if (trackOffsets[j] != 0)
+			{
+				absTime = 0;
+				track = j;
+				noteWait = false;
+				offsetTime.clear();
+
+				i = commands.find(trackOffsets[j]);
+				--i;
+
+				return true;
+			}
+		}
+
+		return false;
+	};
+
+	for (; i != commands.end(); ++i)
+	{
+		offsetTime[i->first] = absTime;
+
 		if (!i->second.Label.empty())
 		{
 			smfInsertMetaText(smf, absTime, track, SMF_META_TEXT, i->second.Label.c_str());
@@ -450,7 +506,49 @@ bool Cseq::Convert()
 			}
 			else if (i->second.Cmd == 0x89)
 			{
-				Common::Warning(Data + dataOffset + 8 + i->first, "jump not implemented");
+				uint32_t target = i->second.Args[0];
+
+				if (i->second.Suffix3 == SuffixType::If)
+				{
+					// Conditional jump. The condition/variable machinery is not
+					// implemented, so fall through to the next command (the
+					// branch-not-taken path) rather than guess, exactly as before.
+					Common::Warning(Data + dataOffset + 8 + i->first, "conditional jump skipped (conditions not implemented)");
+				}
+				else if (offsetTime.count(target))
+				{
+					// The target has already played in this track, so following the
+					// jump would replay it forever: this is the format's whole-song
+					// loop. A MIDI file cannot loop on its own, so mark the loop span
+					// (target..here) with "loopStart"/"loopEnd" and end the track
+					// instead of following the jump.
+					smfInsertMetaText(smf, offsetTime[target], track, SMF_META_MARKER, "loopStart");
+					smfInsertMetaText(smf, absTime, track, SMF_META_MARKER, "loopEnd");
+
+					if (!advanceToNextTrack())
+					{
+						break;
+					}
+				}
+				else
+				{
+					// The target has not played yet in this track: this is a goto to
+					// new code (a forward skip, or a jump into a shared block that
+					// several tracks reuse, which will end on its own Fin). Follow it,
+					// like a call with no return address. Any real loop this leads
+					// into is caught above once it revisits played code.
+					auto n = commands.find(target);
+
+					if (n != commands.end())
+					{
+						i = n;
+						--i;
+					}
+					else
+					{
+						Common::Warning(Data + dataOffset + 8 + i->first, "jump target out of range");
+					}
+				}
 			}
 			else if (i->second.Cmd == 0x8A)
 			{
@@ -662,11 +760,20 @@ bool Cseq::Convert()
 				}
 				else
 				{
-					Common::Warning(Data + dataOffset + 8 + i->first, "Sequence attempted to return with empty call stack");
+					// A Return with no matching Call. These archives pack many
+					// sequence entries into one shared bank and the converter
+					// currently starts every entry at the bank's first byte,
+					// which is often a helper subroutine that ends in Return
+					// (see the ROADMAP note on shared-bank start offsets). Rather
+					// than discard the whole in-progress MIDI, treat the stray
+					// Return as end-of-track, exactly like Fin: close this track
+					// and move to the next so the sequence still yields a file.
+					Common::Warning(Data + dataOffset + 8 + i->first, "Return with empty call stack; ending track");
 
-					smfDelete(smf);
-
-					return true;
+					if (!advanceToNextTrack())
+					{
+						break;
+					}
 				}
 			}
 			else if (i->second.Cmd == 0xFE)
@@ -678,26 +785,7 @@ bool Cseq::Convert()
 			}
 			else if (i->second.Cmd == 0xFF)
 			{
-				smfSetEndTimingOfTrack(smf, track, absTime);
-
-				uint8_t j;
-
-				for (j = track + 1; j < 16; ++j)
-				{
-					if (trackOffsets[j] != 0)
-					{
-						absTime = 0;
-						track = j;
-						noteWait = false;
-
-						i = commands.find(trackOffsets[j]);
-						--i;
-
-						break;
-					}
-				}
-
-				if (j == 16)
+				if (!advanceToNextTrack())
 				{
 					break;
 				}

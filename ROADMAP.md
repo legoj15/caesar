@@ -84,8 +84,18 @@ The cheapest changes with the most audible or visible payoff.
       CSAR level sits empty (28 of 85 named dirs in MK7's `ctr_dash`). Mapping
       the CSAR symbol names across the group boundary would fill those and drop
       the numeric duplicates — belongs with the external-`.bcgrp` group work.
-- [ ] Implement whole-song loops (the sequence "jump" command is currently
-      unimplemented, so every looping track converts as play-once).
+- [x] Implement whole-song loops. The sequence "jump" (`0x89`) command now ends a
+      track at its loop-back and writes `loopStart`/`loopEnd` marker meta events
+      spanning the looped region — honored by loop-aware players (e.g.
+      foobar2000's foo_midi) and shown on the timeline by DAWs. The loop start is
+      placed at the tick its target first played, so an intro before the loop is
+      preserved (verified: the marker lands exactly on the sequence's own
+      `..._LoopStart` label). A jump into not-yet-played code — a shared block
+      several tracks reuse — is instead followed as a goto, so those tracks keep
+      their notes. Conditional (`0xA2`-prefixed) jumps are skipped with a warning
+      and left for the conditional-command work. Verified across 5 real archives
+      (~8,000 MIDIs): jump-free sequences stay byte-identical, BGM/`SEQ` music
+      gains correct loop markers, sound effects don't, and nothing hangs.
 - [ ] Verify and fix the suspected typo in the envelope decay-rate table in
       `Cbnk.cpp`, which makes some instruments fade out ~10x too fast.
 - [ ] Map the sequence FX-send commands to reverb (CC91) / chorus (CC93) — the
@@ -157,3 +167,42 @@ hazard. Not release-blocking on their own.
 - **Compiler narrowing warnings** (`C4267` / `C4244`, `size_t`/`int` to smaller
   types). Harmless in practice but they flag real implicit truncations; worth a
   code-quality pass.
+- **Shared sequence banks: per-entry start offsets now honoured** (*fixed
+  2026-07-07*). Most `.bcseq` in these archives are *multi-entry banks*: one DATA
+  blob holds many independent mini-sequences (each ends in `Fin`) plus helper
+  subroutines (each ends in `Return`), and the archive maps many differently-named
+  SEQ entries onto the *same* blob, each meant to begin at its own offset.
+  `Cseq::Convert` used to always start at byte 0, which caused two bugs at once:
+    - byte 0 is usually a `Return`-terminated helper, so the walk hit a `Return`
+      with an empty call stack and the old `0xFD` handler `smfDelete`d the
+      in-progress MIDI and wrote nothing — silently dropping 972/1369 sequences
+      in MK7 `ctr_dash` and 115 in `GardenSound`; and
+    - even the sequences that *did* convert were mostly wrong duplicates — every
+      entry sharing a blob produced the same byte-0 walk.
+
+  The fix has two parts. (1) `Csar.cpp` reads each entry's start offset from its
+  INFO record and passes it to `Cseq::Convert`, which begins the walk there
+  (falling back to the top, with a warning, if it does not land on a command
+  boundary). The field sits `0xC` before the bank-reference sub-structure that
+  `cbnkOffset` locates, so it is read at `entry + cbnkOffset + 0x10` — **not** a
+  fixed `+0x54`. Two record layouts exist in the wild under the same CSAR version:
+  the common one (`cbnkOffset 0x44` → field at `+0x54`, e.g. MK7, System `mset`,
+  eShop `TigerSound`) and a `+0xC`-larger one (`cbnkOffset 0x50` → field at
+  `+0x60`, e.g. the MiiPlaza `MeetSound`/`mgCar` archives); anchoring to
+  `cbnkOffset` handles both, whereas a fixed `+0x54` silently read the constant
+  `0x18` for the larger layout. (2) The `0xFD` handler now treats a stray `Return`
+  as end-of-track (same path as `Fin`) rather than discarding, as a safety net.
+
+  Verified side-by-side (old binary vs fixed) on eight archives. Original three:
+  distinct MIDIs 23→1027 (`ctr_dash`), 862→2825 (`GardenSound`), 11→83 (`menu`).
+  Regression set (System/MiiPlaza/eShop, accuracy-critical): distinct MIDIs
+  5→40 (`mset`), 9→74 (`TigerSound`), 56→252 / 64→395 (`MeetSound` ×2),
+  105→105 (`mgCar`); all boundary-fallbacks 0 after the layout fix (were 147/87);
+  every start offset lands on a command boundary, and 57–76% land exactly on a
+  named `..._Start` label whose name matches the entry (e.g. `SD_BGM01` →
+  `SMF_SD_CAR_BGM01_Start`), which is the decisive accuracy signal. Apparent
+  note-loss cases resolve to labels literally named `<nosound>`/`<dummy_bgm>`
+  (intentionally silent — the old byte-0 walk played a placeholder). No hangs, no
+  crashes. Sequences that still emit no notes are either those silent entries or
+  dispatchers that select a section via conditional (`[If]`) jumps — see the
+  conditional-jump limitation, still unimplemented.

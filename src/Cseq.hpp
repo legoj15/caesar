@@ -39,5 +39,10 @@ struct Cseq
 
 	Cseq(const char* fileName);
 	~Cseq();
-	bool Convert();
+
+	// startOffset is the entry's start position within the sequence data,
+	// relative to DATA+8 (the same space the command map is keyed in). These
+	// archives pack many entries into one shared sequence bank, each beginning
+	// at its own offset; 0 (the default) starts from the top of the data.
+	bool Convert(uint32_t startOffset = 0);
 };

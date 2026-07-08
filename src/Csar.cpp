@@ -406,6 +406,21 @@ bool Csar::Extract()
 			{
 				if (files[id].Offset != nullptr)
 				{
+					// The entry's start offset within the sequence data (relative to
+					// its DATA+8). These archives map many entries onto one shared
+					// sequence bank, each beginning at its own offset; without this
+					// every entry would convert from the top of the bank.
+					//
+					// The field sits just before the bank-reference sub-structure that
+					// cbnkOffset locates, so its position tracks cbnkOffset (which
+					// grows when the record carries extra optional fields). Anchoring
+					// to cbnkOffset handles both record layouts seen in the wild: the
+					// common one (cbnkOffset 0x44 -> field at +0x54) and a +0xC-larger
+					// one (cbnkOffset 0x50 -> field at +0x60). A fixed +0x54 would
+					// silently read the wrong word for the larger layout.
+					uint8_t* startPos = cseqs[i].Offset + cbnkOffset + 0x10;
+					uint32_t startOffset = ReadFixLen(startPos, 4);
+
 					pos += cbnkOffset;
 
 					uint32_t cbnk = ReadFixLen(pos, 2);
@@ -426,7 +441,7 @@ bool Csar::Extract()
 
 					Cseq cseq(string(cseqs[i].FileName + ".bcseq").c_str());
 
-					if (!cseq.Convert())
+					if (!cseq.Convert(startOffset))
 					{
 						return false;
 					}
