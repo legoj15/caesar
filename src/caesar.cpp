@@ -20,7 +20,8 @@ int main(int argc, char* argv[])
 		cout << "USAGE: caesar [options] <inputs>" << endl << endl;
 		cout << "OPTIONS:" << endl;
 		cout << "\t-p\t\tDo not ignore pan values of stereo samples" << endl;
-		cout << "\t-w\t\tShow warnings" << endl;
+		cout << "\t-w\t\tShow per-item warning detail (a summary of skipped/" << endl;
+		cout << "\t\t\tapproximated content is shown by default)" << endl;
 		cout << "\t-o <dir>\tWrite output under <dir> (default: beside each input)" << endl;
 
 		return 1;
@@ -74,6 +75,11 @@ int main(int argc, char* argv[])
 				Common::Reset();
 				exitCode = 1;
 			}
+
+			// Report what this input skipped or approximated (shown by default;
+			// -w adds the per-item detail). Runs even if the input failed part
+			// way, so anything dropped before the failure is still surfaced.
+			Common::FlushNotices(argv[i]);
 		}
 	}
 

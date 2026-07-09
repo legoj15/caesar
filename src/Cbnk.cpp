@@ -446,7 +446,7 @@ bool Cbnk::Convert()
 			}
 			else
 			{
-				Common::Warning(pos - 4, "CWAV " + to_string(cwav) + " does not exist");
+				Common::Warning(pos - 4, "CWAV " + to_string(cwav) + " does not exist", "instrument notes referencing a missing sample (substituted the first sample)");
 
 				insts[i].Notes[j].Cwav = &cwavs[0];
 			}

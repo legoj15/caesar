@@ -82,8 +82,26 @@ By default (without `-w`), the tool prints no warnings at all — so a normal ru
 reports success while silently omitting sound effects, whole-song loops, an
 entire audio codec, and more. Users can't tell what they didn't get.
 
-- [ ] Promote "content was skipped / approximated" notices so they show by
-      default; keep `-w` for verbose per-command detail.
+- [x] Promote "content was skipped / approximated" notices so they show by
+      default; keep `-w` for verbose per-command detail. A normal run now prints a
+      compact per-input summary of what it dropped — e.g. `41 CWSD wave-sound
+      blocks skipped (sound effects not extracted)`, `267 external streams
+      skipped`, `47 INFX metadata chunks skipped`, IMA-ADPCM waves left silent, and
+      instrument notes pointing at a missing sample. Implemented as a second tier
+      on `Common::Warning`: an optional `noticeCategory` argument tallies the site
+      into `Common::Notices` (a `map<category,count>`) regardless of `-w`, while the
+      existing verbose positional line still only prints under `-w`; sites with no
+      category (all the per-command `Cseq` "…not implemented" spam) stay `-w`-only
+      exactly as before. `Common::FlushNotices` prints and clears the tally once per
+      top-level input (even if that input failed partway, so anything dropped before
+      the failure is still surfaced). The five content-drop sites tagged: CWSD in
+      `Cgrp`/`Csar` (merged into one count), external streams and INFX in
+      `Csar`/`Cgrp`, IMA-ADPCM in `Cwav`, and the out-of-range CWAV reference in
+      `Cbnk`. Verified byte-identical extraction (stderr-only change): 19,768 output
+      files across 5 archives (menu, MeetSound, TigerSound, cardboard, GardenSound)
+      diff clean old-vs-new; the old binary prints nothing by default while the new
+      one emits the summaries, and `-w` still shows all 471 per-item warnings on
+      `menu` plus the summary.
 - [ ] Check the MIDI-writer's return values (it silently rejects out-of-range
       events today, so some notes/program-changes vanish with no warning).
 

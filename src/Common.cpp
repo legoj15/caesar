@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <fstream>
 #include <iostream>
+#include <map>
 #include <sstream>
 #include <stack>
 #include <stdexcept>
@@ -17,6 +18,7 @@ stack<string> Common::FileNames;
 stack<uint8_t*> Common::Offsets;
 vector<Range> Common::Buffers;
 vector<string> Common::Log;
+map<string, size_t> Common::Notices;
 
 // Verify that a read of `bytes` bytes starting at `pos` stays inside one of the
 // currently-loaded file buffers. Offsets in these archives are read from the
@@ -86,8 +88,19 @@ int32_t ReadVarLen(uint8_t*& pos)
 	return result;
 }
 
-void Common::Warning(uint8_t* pos, string msg)
+// Report something the converter could not fully handle. A bare call is
+// per-item detail that only appears under -w (unchanged behaviour). When a
+// noticeCategory is given, the site is also flagged as dropped/approximated
+// content: it is tallied under that category and surfaced by default in the
+// per-input FlushNotices summary, so a normal run tells the user what it left
+// out even without -w. The verbose positional line below still needs -w.
+void Common::Warning(uint8_t* pos, string msg, const string& noticeCategory)
 {
+	if (!noticeCategory.empty())
+	{
+		++Notices[noticeCategory];
+	}
+
 	if (ShowWarnings)
 	{
 		cerr << hex << setfill('0') << uppercase << endl;
@@ -96,6 +109,32 @@ void Common::Warning(uint8_t* pos, string msg)
 		cerr << "MESSAGE\t\t" << msg << endl;
 		cerr << endl;
 	}
+}
+
+// Print the "content skipped or approximated" summary gathered while processing
+// one top-level input, then reset for the next. Shown by default (independent of
+// -w) so a normal run reports what it dropped; -w adds the per-item detail. A no
+// -op when nothing was dropped, so clean archives stay quiet.
+void Common::FlushNotices(const string& inputName)
+{
+	if (Notices.empty())
+	{
+		return;
+	}
+
+	// Warning() leaves the stream in hex/uppercase/zero-fill; restore decimal.
+	cerr << dec << nouppercase << setfill(' ') << endl;
+	cerr << "NOTE\t\tcontent skipped or approximated in \"" << inputName
+		<< "\" (use -w for per-item detail):" << endl;
+
+	for (const auto& notice : Notices)
+	{
+		cerr << "\t\t" << setw(6) << notice.second << "  " << notice.first << endl;
+	}
+
+	cerr << endl;
+
+	Notices.clear();
 }
 
 void Common::Push(string fileName, uint8_t* data, streamoff length)

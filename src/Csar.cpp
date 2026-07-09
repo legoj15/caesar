@@ -408,14 +408,14 @@ bool Csar::Extract(const string& outputDir)
 		{
 			case 0x2201:
 			{
-				Common::Warning(pos - 16, "Skipping external stream");
+				Common::Warning(pos - 16, "Skipping external stream", "external streams skipped (audio stored in a separate file)");
 
 				break;
 			}
 
 			case 0x2202:
 			{
-				Common::Warning(pos - 16, "Skipping CWSD");
+				Common::Warning(pos - 16, "Skipping CWSD", "CWSD wave-sound blocks skipped (sound effects not extracted)");
 
 				break;
 			}

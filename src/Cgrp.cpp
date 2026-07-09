@@ -233,7 +233,7 @@ bool Cgrp::Extract()
 
 			case 0x43575344:
 			{
-				Common::Warning(pos - 4, "Skipping CWSD");
+				Common::Warning(pos - 4, "Skipping CWSD", "CWSD wave-sound blocks skipped (sound effects not extracted)");
 
 				break;
 			}
@@ -267,7 +267,7 @@ bool Cgrp::Extract()
 	{
 		pos = Data + infxOffset;
 
-		Common::Warning(pos, "Skipping INFX chunk");
+		Common::Warning(pos, "Skipping INFX chunk", "INFX metadata chunks skipped");
 	}
 
 	return true;

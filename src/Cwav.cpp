@@ -198,7 +198,7 @@ bool Cwav::Convert()
 
 			case 3:
 			{
-				Common::Warning(Data + infoOffset + 8, "IMA ADPCM decoding not implemented");
+				Common::Warning(Data + infoOffset + 8, "IMA ADPCM decoding not implemented", "waves left silent (IMA-ADPCM codec not implemented)");
 
 				break;
 			}

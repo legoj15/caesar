@@ -4,6 +4,7 @@
 #include <iomanip>
 #include <ios>
 #include <iostream>
+#include <map>
 #include <stack>
 #include <string>
 #include <vector>
@@ -26,6 +27,12 @@ struct Common
 	static std::stack<uint8_t*> Offsets;
 	static std::vector<Range> Buffers;
 	static std::vector<std::string> Log;
+
+	// Counts, per top-level input, of content that was skipped or approximated
+	// (keyed by a human-readable category). Populated regardless of -w so the
+	// summary in FlushNotices can be shown by default; the per-item positional
+	// detail behind those counts still only prints with -w.
+	static std::map<std::string, size_t> Notices;
 
 	template<typename T>
 	static bool Assert(uint8_t* pos, T expected, T found)
@@ -56,7 +63,8 @@ struct Common
 		std::cerr << std::endl;
 	}
 
-	static void Warning(uint8_t* pos, std::string msg);
+	static void Warning(uint8_t* pos, std::string msg, const std::string& noticeCategory = "");
+	static void FlushNotices(const std::string& inputName);
 	static void Push(std::string fileName, uint8_t* data, std::streamoff length);
 	static void Pop();
 	static void Reset();
