@@ -77,7 +77,7 @@ explanation, and some failures corrupted output silently.
       escape the output folder) are replaced. Done in the same `TypedName`
       choke-point; a no-op on normal names, so valid output is unchanged.
 
-### 3. Surface what's being dropped
+### 3. Surface what's being dropped — ✅ done
 By default (without `-w`), the tool prints no warnings at all — so a normal run
 reports success while silently omitting sound effects, whole-song loops, an
 entire audio codec, and more. Users can't tell what they didn't get.
@@ -102,8 +102,43 @@ entire audio codec, and more. Users can't tell what they didn't get.
       diff clean old-vs-new; the old binary prints nothing by default while the new
       one emits the summaries, and `-w` still shows all 471 per-item warnings on
       `menu` plus the summary.
-- [ ] Check the MIDI-writer's return values (it silently rejects out-of-range
-      events today, so some notes/program-changes vanish with no warning).
+- [x] Check the MIDI-writer's return values (it silently rejected out-of-range
+      events, so notes/program-changes/controllers vanished with no warning). Every
+      value-bearing `smfInsert*` in `Cseq::Convert` is now checked: two file-local
+      helpers `emitCtrl`/`emitProgram` surface a rejected event as a default-visible
+      notice (grouped — "MIDI program changes dropped", "MIDI control/parameter
+      events dropped") plus `-w` positional detail, reusing bullet 1's
+      `Common::Warning` notice tier. The note site is checked inline and flags only a
+      genuinely out-of-range velocity (> 127), not a velocity-0 rest (which the
+      writer legitimately skips). Inserts whose value is a constant, clamped, or a
+      provably in-range expression (`Int8 * 64` pitch bend, `Int8/2 + 64`
+      attack/decay/release) are still emitted raw. An adversarial multi-agent audit
+      (14 agents) confirmed the instrumentation and turned up the fixes below.
+
+      **Surfacing exposed a real pre-existing bug (fixed):** the `0x81` program
+      change passed the raw packed `Args[0]` to `smfInsertProgram` while the two
+      bank-select lines already take the high 14 bits, so every banked voice
+      (`Args[0] >= 128`) exceeded MIDI's 0-127 range, was rejected by the writer, and
+      the track fell back to the wrong/default instrument — **6,422 program changes
+      across the 82-archive corpus** (up to 2,038 in one). Fixed by masking the
+      program to its low 7 bits (`Args[0] % 128`), matching the surrounding
+      bank-select math; the two bank-select controls are now checked too, since a
+      `Rnd`/`Var` prefix can make `Args[0]` negative and `/128 % 128` does not keep a
+      negative dividend in range.
+
+      Verified two ways. The surfacing half is stderr-only — **byte-identical
+      extraction over 40,941 files** (the pre-bullet-2 build reported nothing; the
+      new build emits the summaries; `-w` still prints every per-item warning). The
+      program-mask half *does* change MIDI output, but the change is confined to it:
+      over a 10-archive ref-vs-fixed A/B the diff touches **only `.mid` files (zero
+      non-`.mid` diffs — every `.sf2`/`.wav`/`.log`/raw dump byte-identical)**, 1,192
+      sequences gain the program change they were dropping, and the program-drop
+      count falls **6,422 → 0**. **This is an audible change — a console A/B on the
+      New 3DS is still wanted to confirm the recovered instruments match hardware.**
+      Remaining surfaced drops: ~1,020 control/parameter events corpus-wide (8-bit
+      values > 127, or `Int16` vibrato-delay/tempo) — now *visible* rather than
+      silent; some likely want 8-bit → 7-bit scaling instead of dropping, tracked as
+      a follow-up fidelity item below.
 
 ### 4. High-value fidelity & UX wins
 The cheapest changes with the most audible or visible payoff.
@@ -292,7 +327,13 @@ Larger efforts that expand what caesar can do. Rough priority order:
   unconditionally; the extended `setvar`/`cmp`/mod commands are parsed but
   dropped (their walker branch is dead code — `cmd.Cmd` is never set to the
   extended opcode); and random/variable values convert wrong. Also tie mode and
-  finite loop repeat counts.
+  finite loop repeat counts. **Controller range mapping:** surfacing the MIDI
+  writer's rejections (section 3) exposed ~1,020 control/parameter events
+  corpus-wide dropped for exceeding MIDI's 0-127 range — some are 8-bit source
+  values (volume/pan/expression parse as `Uint8` 0-255) that should be *scaled*
+  to 7 bits rather than dropped, and the `Int16` vibrato-delay (`0xE0`/`0xE3`)
+  and tempo (`0xE1`) sends want their true encodings worked out. Each is now
+  visible in the default run, so they can be triaged one controller at a time.
 - **Missing audio coverage.** Implement IMA-ADPCM (codec 3), which currently
   produces silent output reported as success; extract CWSD wave-sound data
   (most sound effects), currently skipped entirely.
@@ -325,6 +366,15 @@ hazard. Not release-blocking on their own.
   value by up to 56 bits — undefined behavior — and silently discards the top
   four bytes. It works under MSVC today; a sanitizer build or a different compiler
   could flag or miscompile it.
+- **Tempo `bpm == 0` is undefined behavior** (vendored `libsmfcx.c`,
+  `smfInsertTempoBPM`). A `0xE1` tempo command decodes bpm as a signed 16-bit
+  value, so `bpm == 0` makes `60000000 / bpm` evaluate to `+inf` and the
+  `(int) microSeconds` cast is UB. Pre-existing in loveemu's library, and benign
+  in practice: on x86 the cast yields `INT_MIN`, which fails the microseconds
+  range check, so the garbage tempo is dropped (and, since section 3, surfaced as
+  a control/parameter drop). A defensive `bpm > 0` guard in the caller or the
+  library would remove the UB; left as-is for now to keep the vendored copy
+  pristine. Found by the section-3 MIDI-return-value audit.
 - **Non-ASCII file names.** Input paths and archive-internal names pass through
   narrow `char*` / `std::string` into `std::filesystem`, so non-ASCII names
   (common for Japanese titles) can be mangled or throw. Illegal-character

@@ -23,6 +23,39 @@ using namespace std;
 // and DAWs display on the timeline.
 static constexpr int SMF_META_MARKER = 0x06;
 
+// The libsmfc writer silently returns false and drops an event when an argument
+// is outside MIDI range (a control/program/master-volume value above 127, a
+// pitch bend beyond +/-8192, a tempo out of the 24-bit range). The sequence
+// stream can carry such values, so without checking the return the note or
+// controller just vanishes with no trace. These wrappers surface a rejected
+// event: they count a default-visible notice (grouped by kind) and, under -w,
+// print the positional detail. Each returns the writer's own result so callers
+// are unaffected. The category strings are shared so counts merge across sites.
+// emitCtrl covers the channel controllers plus the value-carrying master volume,
+// pitch bend and tempo events (all "parameter" writes), so its wording stays
+// general rather than claiming every one is a MIDI control-change message.
+static bool emitCtrl(bool ok, uint8_t* pos)
+{
+	if (!ok)
+	{
+		Common::Warning(pos, "control/parameter event out of MIDI range; dropped",
+			"MIDI control/parameter events dropped (value out of range)");
+	}
+
+	return ok;
+}
+
+static bool emitProgram(bool ok, uint8_t* pos)
+{
+	if (!ok)
+	{
+		Common::Warning(pos, "program number out of MIDI range; dropped",
+			"MIDI program changes dropped (value out of range)");
+	}
+
+	return ok;
+}
+
 vector<int32_t> ReadArgs(uint8_t*& pos, ArgType argType)
 {
 	if (argType == ArgType::Uint8)
@@ -589,6 +622,9 @@ bool Cseq::Convert(uint32_t startOffset)
 	{
 		offsetTime[i->first] = absTime;
 
+		// Position of the command now being emitted, for any dropped-event notice.
+		uint8_t* here = Data + dataOffset + 8 + i->first;
+
 		if (!i->second.Label.empty())
 		{
 			smfInsertMetaText(smf, absTime, track, SMF_META_TEXT, i->second.Label.c_str());
@@ -598,7 +634,17 @@ bool Cseq::Convert(uint32_t startOffset)
 		{
 			if (i->second.Cmd < 0x80)
 			{
-				smfInsertNote(smf, absTime, track, track, i->second.Cmd, i->second.Args[0], i->second.Args[1]);
+				// key is Cmd (< 0x80, always valid); a note is only rejected on its
+				// velocity. Velocity 0 is a legitimate silent note (the writer skips
+				// it and timing below still advances), so surface a drop only when
+				// the velocity is genuinely out of MIDI range, not merely zero.
+				if (!smfInsertNote(smf, absTime, track, track, i->second.Cmd, i->second.Args[0], i->second.Args[1])
+					&& i->second.Args[0] > 127)
+				{
+					Common::Warning(here, "note velocity out of MIDI range; note dropped",
+						"MIDI notes dropped (velocity out of range)");
+				}
+
 				trackHasNote = true;
 
 				if (noteWait)
@@ -612,9 +658,22 @@ bool Cseq::Convert(uint32_t startOffset)
 			}
 			else if (i->second.Cmd == 0x81)
 			{
-				smfInsertControl(smf, absTime, track, track, SMF_CONTROL_BANKSELM, (i->second.Args[0] / 128 / 128) % 128);
-				smfInsertControl(smf, absTime, track, track, SMF_CONTROL_BANKSELL, (i->second.Args[0] / 128) % 128);
-				smfInsertProgram(smf, absTime, track, track, i->second.Args[0]);
+				// Args[0] packs the voice as [bankMSB:7][bankLSB:7][program:7]: the
+				// two bank-select controls take the high 14 bits, so the program is
+				// the LOW 7 bits (Args[0] % 128). Previously the raw Args[0] was passed
+				// as the program number, so any banked voice (Args[0] >= 128) exceeded
+				// MIDI's 0-127 range and the program change was dropped entirely --
+				// the track then played the wrong/default instrument. Masking to the
+				// low 7 bits emits the intended program (6,422 program changes across
+				// the 82-archive corpus were being lost this way).
+				//
+				// The value is usually a small positive number, but a Rnd/Var prefix
+				// makes Args[0] signed; a negative value keeps its sign through
+				// /128%128, so none of these three are guaranteed in range. The
+				// emit* wrappers still surface any that the writer rejects.
+				emitCtrl(smfInsertControl(smf, absTime, track, track, SMF_CONTROL_BANKSELM, (i->second.Args[0] / 128 / 128) % 128), here);
+				emitCtrl(smfInsertControl(smf, absTime, track, track, SMF_CONTROL_BANKSELL, (i->second.Args[0] / 128) % 128), here);
+				emitProgram(smfInsertProgram(smf, absTime, track, track, i->second.Args[0] % 128), here);
 			}
 			else if (i->second.Cmd == 0x88)
 			{
@@ -737,31 +796,31 @@ bool Cseq::Convert(uint32_t startOffset)
 			}
 			else if (i->second.Cmd == 0xC0)
 			{
-				smfInsertControl(smf, absTime, track, track, SMF_CONTROL_PANPOT, i->second.Args[0]);
+				emitCtrl(smfInsertControl(smf, absTime, track, track, SMF_CONTROL_PANPOT, i->second.Args[0]), here);
 			}
 			else if (i->second.Cmd == 0xC1)
 			{
-				smfInsertControl(smf, absTime, track, track, SMF_CONTROL_VOLUME, i->second.Args[0]);
+				emitCtrl(smfInsertControl(smf, absTime, track, track, SMF_CONTROL_VOLUME, i->second.Args[0]), here);
 			}
 			else if (i->second.Cmd == 0xC2)
 			{
-				smfInsertMasterVolume(smf, absTime, 0, track, i->second.Args[0]);
+				emitCtrl(smfInsertMasterVolume(smf, absTime, 0, track, i->second.Args[0]), here);
 			}
 			else if (i->second.Cmd == 0xC3)
 			{
 				smfInsertControl(smf, absTime, track, track, SMF_CONTROL_RPNM, 0);
 				smfInsertControl(smf, absTime, track, track, SMF_CONTROL_RPNL, 2);
-				smfInsertControl(smf, absTime, track, track, SMF_CONTROL_DATAENTRYM, i->second.Args[0] + 64);
+				emitCtrl(smfInsertControl(smf, absTime, track, track, SMF_CONTROL_DATAENTRYM, i->second.Args[0] + 64), here);
 			}
 			else if (i->second.Cmd == 0xC4)
 			{
-				smfInsertPitchBend(smf, absTime, track, track, i->second.Args[0] * 64);
+				emitCtrl(smfInsertPitchBend(smf, absTime, track, track, i->second.Args[0] * 64), here);
 			}
 			else if (i->second.Cmd == 0xC5)
 			{
 				smfInsertControl(smf, absTime, track, track, SMF_CONTROL_RPNM, 0);
 				smfInsertControl(smf, absTime, track, track, SMF_CONTROL_RPNL, 0);
-				smfInsertControl(smf, absTime, track, track, SMF_CONTROL_DATAENTRYM, i->second.Args[0]);
+				emitCtrl(smfInsertControl(smf, absTime, track, track, SMF_CONTROL_DATAENTRYM, i->second.Args[0]), here);
 			}
 			else if (i->second.Cmd == 0xC6)
 			{
@@ -777,15 +836,15 @@ bool Cseq::Convert(uint32_t startOffset)
 			}
 			else if (i->second.Cmd == 0xC9)
 			{
-				smfInsertControl(smf, absTime, track, track, SMF_CONTROL_PORTAMENTOCTRL, i->second.Args[0]);
+				emitCtrl(smfInsertControl(smf, absTime, track, track, SMF_CONTROL_PORTAMENTOCTRL, i->second.Args[0]), here);
 			}
 			else if (i->second.Cmd == 0xCA)
 			{
-				smfInsertControl(smf, absTime, track, track, SMF_CONTROL_MODULATION, i->second.Args[0]);
+				emitCtrl(smfInsertControl(smf, absTime, track, track, SMF_CONTROL_MODULATION, i->second.Args[0]), here);
 			}
 			else if (i->second.Cmd == 0xCB)
 			{
-				smfInsertControl(smf, absTime, track, track, SMF_CONTROL_VIBRATORATE, (i->second.Args[0] / 2) + 64);
+				emitCtrl(smfInsertControl(smf, absTime, track, track, SMF_CONTROL_VIBRATORATE, (i->second.Args[0] / 2) + 64), here);
 			}
 			else if (i->second.Cmd == 0xCC)
 			{
@@ -793,7 +852,7 @@ bool Cseq::Convert(uint32_t startOffset)
 			}
 			else if (i->second.Cmd == 0xCD)
 			{
-				smfInsertControl(smf, absTime, track, track, SMF_CONTROL_VIBRATODEPTH, (i->second.Args[0] / 2) + 64);
+				emitCtrl(smfInsertControl(smf, absTime, track, track, SMF_CONTROL_VIBRATODEPTH, (i->second.Args[0] / 2) + 64), here);
 			}
 			else if (i->second.Cmd == 0xCE)
 			{
@@ -801,15 +860,15 @@ bool Cseq::Convert(uint32_t startOffset)
 			}
 			else if (i->second.Cmd == 0xCF)
 			{
-				smfInsertControl(smf, absTime, track, track, SMF_CONTROL_PORTAMENTOTIME, i->second.Args[0]);
+				emitCtrl(smfInsertControl(smf, absTime, track, track, SMF_CONTROL_PORTAMENTOTIME, i->second.Args[0]), here);
 			}
 			else if (i->second.Cmd == 0xD0)
 			{
-				smfInsertControl(smf, absTime, track, track, SMF_CONTROL_ATTACKTIME, (i->second.Args[0] / 2) + 64);
+				emitCtrl(smfInsertControl(smf, absTime, track, track, SMF_CONTROL_ATTACKTIME, (i->second.Args[0] / 2) + 64), here);
 			}
 			else if (i->second.Cmd == 0xD1)
 			{
-				smfInsertControl(smf, absTime, track, track, SMF_CONTROL_DECAYTIME, (i->second.Args[0] / 2) + 64);
+				emitCtrl(smfInsertControl(smf, absTime, track, track, SMF_CONTROL_DECAYTIME, (i->second.Args[0] / 2) + 64), here);
 			}
 			else if (i->second.Cmd == 0xD2)
 			{
@@ -817,7 +876,7 @@ bool Cseq::Convert(uint32_t startOffset)
 			}
 			else if (i->second.Cmd == 0xD3)
 			{
-				smfInsertControl(smf, absTime, track, track, SMF_CONTROL_RELEASETIME, (i->second.Args[0] / 2) + 64);
+				emitCtrl(smfInsertControl(smf, absTime, track, track, SMF_CONTROL_RELEASETIME, (i->second.Args[0] / 2) + 64), here);
 			}
 			else if (i->second.Cmd == 0xD4)
 			{
@@ -825,7 +884,7 @@ bool Cseq::Convert(uint32_t startOffset)
 			}
 			else if (i->second.Cmd == 0xD5)
 			{
-				smfInsertControl(smf, absTime, track, track, SMF_CONTROL_EXPRESSION, i->second.Args[0]);
+				emitCtrl(smfInsertControl(smf, absTime, track, track, SMF_CONTROL_EXPRESSION, i->second.Args[0]), here);
 			}
 			else if (i->second.Cmd == 0xD6)
 			{
@@ -866,19 +925,19 @@ bool Cseq::Convert(uint32_t startOffset)
 			}
 			else if (i->second.Cmd == 0xDF)
 			{
-			smfInsertControl(smf, absTime, track, track, 64, i->second.Args[0]);
+			emitCtrl(smfInsertControl(smf, absTime, track, track, 64, i->second.Args[0]), here);
 			}
 			else if (i->second.Cmd == 0xE0)
 			{
-				smfInsertControl(smf, absTime, track, track, SMF_CONTROL_VIBRATODELAY, (i->second.Args[0] / 2) + 64);
+				emitCtrl(smfInsertControl(smf, absTime, track, track, SMF_CONTROL_VIBRATODELAY, (i->second.Args[0] / 2) + 64), here);
 			}
 			else if (i->second.Cmd == 0xE1)
 			{
-				smfInsertTempoBPM(smf, absTime, track, i->second.Args[0]);
+				emitCtrl(smfInsertTempoBPM(smf, absTime, track, i->second.Args[0]), here);
 			}
 			else if (i->second.Cmd == 0xE3)
 			{
-				smfInsertControl(smf, absTime, track, track, SMF_CONTROL_VIBRATODELAY, i->second.Args[0]);
+				emitCtrl(smfInsertControl(smf, absTime, track, track, SMF_CONTROL_VIBRATODELAY, i->second.Args[0]), here);
 			}
 			else if (i->second.Cmd == 0xE4)
 			{
