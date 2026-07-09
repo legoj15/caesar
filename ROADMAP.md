@@ -142,12 +142,17 @@ entire audio codec, and more. Users can't tell what they didn't get.
       raw dump is byte-identical**, and within a changed SF2 only the `phdr`
       preset/bank numbers move (sample PCM byte-identical, file size unchanged). In
       FluidSynth's default mode the affected Mii Plaza SEs now play the intended
-      instrument (they differ from the old dropped-default render). **Still an audible
-      change — a console A/B on the New 3DS is wanted to confirm the recovered
-      instruments match hardware; a MeetSound SE A/B pack is staged at
-      `…/3DSWii Dumps/caesar_AB_MiiPlaza`.** Caveat: banked voices resolve in GS/GM
-      players; an XG/MMA-mode player reads the bank from the LSB and would need that
-      convention instead (documented in `Cseq.cpp`). Remaining surfaced drops: ~1,020
+      instrument (they differ from the old dropped-default render). **Console-validated
+      on the New 3DS (2026-07-08):** A/B of a six-effect MeetSound SE pack (staged at
+      `…/3DSWii Dumps/caesar_AB_MiiPlaza`) confirmed the pre-fix renders all collapse
+      onto the same wrong fallback patch while the fixed renders play the intended,
+      distinct instruments and match the console. Five of six were confirmed
+      positively by ear; the sixth (`SE_LEGEND_ENEMY_HEAL`) was subtle-by-design and
+      inconclusive only because two of its three instrument layers already used
+      in-range programs that never dropped, so the fix changes just one layer there.
+      Caveat: banked voices resolve in GS/GM players; an XG/MMA-mode player reads the
+      bank from the LSB and would need that convention instead (documented in
+      `Cseq.cpp`). Remaining surfaced drops: ~1,020
       control/parameter events corpus-wide (8-bit values > 127, or `Int16`
       vibrato-delay/tempo) — now *visible* rather than silent; some likely want 8-bit →
       7-bit scaling instead of dropping, tracked as a follow-up fidelity item below.
