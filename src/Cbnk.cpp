@@ -590,7 +590,15 @@ bool Cbnk::Convert()
 	{
 		if (insts[i].Exists && (instruments[i] != nullptr))
 		{
-			sf2.NewPreset(instruments[i]->name(), i, !insts[i].IsDrumKit ? 0 : 128, vector<SFPresetZone> { SFPresetZone(instruments[i]) });
+			// Instruments are indexed 0..N-1, but a MIDI program change only
+			// addresses 0-127, so an instrument at index >= 128 is unreachable
+			// unless it is placed in a higher SF2 bank. Split the index the same
+			// way the sequence's bank-select does: bank = i / 128, preset = i % 128
+			// (drum kits keep the GM drum bank 128 as their base). A sequence
+			// selecting instrument i then emits bank i/128 + program i%128 and lands
+			// on the matching preset. Banks with < 128 instruments are unaffected
+			// (i/128 == 0, i%128 == i), so their SF2 output is unchanged.
+			sf2.NewPreset(instruments[i]->name(), i % 128, (!insts[i].IsDrumKit ? 0 : 128) + i / 128, vector<SFPresetZone> { SFPresetZone(instruments[i]) });
 		}
 	}
 

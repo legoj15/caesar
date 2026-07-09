@@ -658,21 +658,26 @@ bool Cseq::Convert(uint32_t startOffset)
 			}
 			else if (i->second.Cmd == 0x81)
 			{
-				// Args[0] packs the voice as [bankMSB:7][bankLSB:7][program:7]: the
-				// two bank-select controls take the high 14 bits, so the program is
-				// the LOW 7 bits (Args[0] % 128). Previously the raw Args[0] was passed
-				// as the program number, so any banked voice (Args[0] >= 128) exceeded
-				// MIDI's 0-127 range and the program change was dropped entirely --
-				// the track then played the wrong/default instrument. Masking to the
-				// low 7 bits emits the intended program (6,422 program changes across
-				// the 82-archive corpus were being lost this way).
+				// Args[0] is a flat instrument index that can exceed 127. A MIDI
+				// program change only addresses 0-127, so a banked voice must be
+				// reached with a bank select + a masked program: bank = Args[0] / 128,
+				// program = Args[0] % 128 -- the same split Cbnk now uses to place the
+				// instrument (bank i/128, preset i%128), so the two line up.
 				//
-				// The value is usually a small positive number, but a Rnd/Var prefix
-				// makes Args[0] signed; a negative value keeps its sign through
-				// /128%128, so none of these three are guaranteed in range. The
-				// emit* wrappers still surface any that the writer rejects.
-				emitCtrl(smfInsertControl(smf, absTime, track, track, SMF_CONTROL_BANKSELM, (i->second.Args[0] / 128 / 128) % 128), here);
-				emitCtrl(smfInsertControl(smf, absTime, track, track, SMF_CONTROL_BANKSELL, (i->second.Args[0] / 128) % 128), here);
+				// The bank goes in the MSB control (CC0). Most SoundFont players
+				// (FluidSynth's default GS mode, GM) take the SF2 bank from CC0 and
+				// ignore the LSB, so the previous code -- which put the bank in the LSB
+				// (CC32) and left CC0 at 0 -- selected bank 0 and played the wrong
+				// instrument on those players; only XG/MMA-mode players read the LSB.
+				// CC0 = bank, CC32 = 0 makes the common players correct. For a normal
+				// (unbanked) voice, bank == 0, so this emits CC0=0 CC32=0 exactly as
+				// before -- unbanked program changes stay byte-identical.
+				//
+				// A Rnd/Var prefix can make Args[0] negative; a negative value keeps
+				// its sign through /128 and %128, so the emit* wrappers still surface
+				// anything the writer rejects.
+				emitCtrl(smfInsertControl(smf, absTime, track, track, SMF_CONTROL_BANKSELM, (i->second.Args[0] / 128) % 128), here);
+				emitCtrl(smfInsertControl(smf, absTime, track, track, SMF_CONTROL_BANKSELL, 0), here);
 				emitProgram(smfInsertProgram(smf, absTime, track, track, i->second.Args[0] % 128), here);
 			}
 			else if (i->second.Cmd == 0x88)

@@ -115,30 +115,42 @@ entire audio codec, and more. Users can't tell what they didn't get.
       attack/decay/release) are still emitted raw. An adversarial multi-agent audit
       (14 agents) confirmed the instrumentation and turned up the fixes below.
 
-      **Surfacing exposed a real pre-existing bug (fixed):** the `0x81` program
-      change passed the raw packed `Args[0]` to `smfInsertProgram` while the two
-      bank-select lines already take the high 14 bits, so every banked voice
-      (`Args[0] >= 128`) exceeded MIDI's 0-127 range, was rejected by the writer, and
-      the track fell back to the wrong/default instrument — **6,422 program changes
-      across the 82-archive corpus** (up to 2,038 in one). Fixed by masking the
-      program to its low 7 bits (`Args[0] % 128`), matching the surrounding
-      bank-select math; the two bank-select controls are now checked too, since a
-      `Rnd`/`Var` prefix can make `Args[0]` negative and `/128 % 128` does not keep a
-      negative dividend in range.
+      **Surfacing exposed a real pre-existing bug — banked instruments were
+      unreachable (fixed end-to-end).** A `.cbnk` can hold more than 128 instruments,
+      but caesar numbered every SF2 preset by its raw instrument index in a single
+      bank, while a MIDI program change only addresses 0-127 — so any instrument at
+      index ≥ 128 could not be selected at all. The `0x81` program change passed the
+      raw index to `smfInsertProgram`, which rejected it (> 127) and wrote nothing, so
+      the voice was dropped and the track fell back to the wrong/default instrument —
+      **6,422 program changes across the 82-archive corpus** (up to 2,038 in one).
+      The complete fix makes the soundfont and the sequence agree on a bank split:
+      `Cbnk` now places instrument *i* at (bank *i*/128, preset *i*%128), and `Cseq`
+      selects it with a bank select + masked program (bank *i*/128, program *i*%128).
+      The bank goes in the **MSB** control (CC0), because the common SF2 players —
+      FluidSynth's default GS mode, and GM — take the SF2 bank from CC0 and ignore the
+      LSB; a first LSB-only attempt selected bank 0 and played the wrong instrument on
+      those players (only XG/MMA read the LSB). Unbanked voices (bank 0) emit exactly
+      as before. The two bank-select controls are checked (`emitCtrl`) too, since a
+      `Rnd`/`Var` prefix can make `Args[0]` negative.
 
-      Verified two ways. The surfacing half is stderr-only — **byte-identical
-      extraction over 40,941 files** (the pre-bullet-2 build reported nothing; the
-      new build emits the summaries; `-w` still prints every per-item warning). The
-      program-mask half *does* change MIDI output, but the change is confined to it:
-      over a 10-archive ref-vs-fixed A/B the diff touches **only `.mid` files (zero
-      non-`.mid` diffs — every `.sf2`/`.wav`/`.log`/raw dump byte-identical)**, 1,192
-      sequences gain the program change they were dropping, and the program-drop
-      count falls **6,422 → 0**. **This is an audible change — a console A/B on the
-      New 3DS is still wanted to confirm the recovered instruments match hardware.**
-      Remaining surfaced drops: ~1,020 control/parameter events corpus-wide (8-bit
-      values > 127, or `Int16` vibrato-delay/tempo) — now *visible* rather than
-      silent; some likely want 8-bit → 7-bit scaling instead of dropping, tracked as
-      a follow-up fidelity item below.
+      Verified. The surfacing half is stderr-only — **byte-identical extraction over
+      40,941 files** (the pre-bullet-2 build reported nothing; the new build emits the
+      summaries; `-w` still prints every per-item warning). The banked-instrument half
+      changes SF2 + MIDI output but is surgically confined: over a 10-archive A/B vs
+      the original, only **1,192 `.mid` (sequences that reference a banked instrument)
+      and 6 `.sf2` (the only banks with > 127 instruments) differ; every `.wav`/`.log`/
+      raw dump is byte-identical**, and within a changed SF2 only the `phdr`
+      preset/bank numbers move (sample PCM byte-identical, file size unchanged). In
+      FluidSynth's default mode the affected Mii Plaza SEs now play the intended
+      instrument (they differ from the old dropped-default render). **Still an audible
+      change — a console A/B on the New 3DS is wanted to confirm the recovered
+      instruments match hardware; a MeetSound SE A/B pack is staged at
+      `…/3DSWii Dumps/caesar_AB_MiiPlaza`.** Caveat: banked voices resolve in GS/GM
+      players; an XG/MMA-mode player reads the bank from the LSB and would need that
+      convention instead (documented in `Cseq.cpp`). Remaining surfaced drops: ~1,020
+      control/parameter events corpus-wide (8-bit values > 127, or `Int16`
+      vibrato-delay/tempo) — now *visible* rather than silent; some likely want 8-bit →
+      7-bit scaling instead of dropping, tracked as a follow-up fidelity item below.
 
 ### 4. High-value fidelity & UX wins
 The cheapest changes with the most audible or visible payoff.
