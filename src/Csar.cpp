@@ -209,7 +209,13 @@ bool Csar::Extract(const string& outputDir)
 		{
 			case 0x220C:
 			{
-				if (!Common::Assert(pos, 0xC, ReadFixLen(pos, 8))) { return false; }
+				// 8-byte little-endian field: low word is the size (0xC), high
+				// word is reserved (0). Read it as two 32-bit halves — ReadFixLen
+				// is a 32-bit reader, so a width-8 call would shift by up to 56
+				// bits (undefined behaviour) and fold the top four bytes back into
+				// the low word under MSVC.
+				if (!Common::Assert(pos, 0xC, ReadFixLen(pos, 4))) { return false; }
+				if (!Common::Assert(pos, 0x0, ReadFixLen(pos, 4))) { return false; }
 				Common::Analyse("0x220C 0x08", ReadFixLen(pos, 4));
 
 				file.Offset = Data + fileOffset + 8 + ReadFixLen(pos, 4);
@@ -226,7 +232,11 @@ bool Csar::Extract(const string& outputDir)
 
 			case 0x220D:
 			{
-				if (!Common::Assert(pos, 0xC, ReadFixLen(pos, 8))) { return false; }
+				// Same 8-byte little-endian field as 0x220C (see above): low word
+				// is the size (0xC), high word is reserved (0). Read as two 32-bit
+				// halves to avoid the undefined width-8 shift.
+				if (!Common::Assert(pos, 0xC, ReadFixLen(pos, 4))) { return false; }
+				if (!Common::Assert(pos, 0x0, ReadFixLen(pos, 4))) { return false; }
 
 				while (true)
 				{

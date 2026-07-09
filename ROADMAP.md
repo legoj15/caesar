@@ -396,10 +396,18 @@ hazard. Not release-blocking on their own.
   under GCC 13 on Linux, but Linux functionality remains untested against real
   archives (see the open Linux/macOS build-verification item under section 1).
 - **32-bit reader invoked with an 8-byte width** (`Csar.cpp`, the `0x220C` and
-  `0x220D` file-record branches call `ReadFixLen(pos, 8)`). That shifts a 32-bit
-  value by up to 56 bits — undefined behavior — and silently discards the top
-  four bytes. It works under MSVC today; a sanitizer build or a different compiler
-  could flag or miscompile it.
+  `0x220D` file-record branches) (*fixed 2026-07-09*). Both branches called
+  `ReadFixLen(pos, 8)`, which accumulates into an `int32_t` via
+  `result |= *pos++ << (i * 8)`; for the 5th–8th bytes that shifts a 32-bit value
+  by 32–56 bits — undefined behavior — and silently folds the top four bytes back
+  into the low word. It worked under MSVC (whose shift is masked mod 32) only
+  because the field is a genuine 8-byte little-endian value whose low word is the
+  size (`0xC`) and whose high word is reserved (`0`). Each branch now reads the
+  field as two bounds-checked 32-bit halves — asserting the low word is `0xC` and
+  the high word is `0` — so no shift ever exceeds 24 bits. Verified with UBSan:
+  the old width-8 read reports `shift exponent 32 is too large for 32-bit type`,
+  while the two-halves read is clean and consumes the same 8 bytes, leaving the
+  cursor byte-identical for every real archive (high word always `0`).
 - **Tempo `bpm == 0` is undefined behavior** (vendored `libsmfcx.c`,
   `smfInsertTempoBPM`). A `0xE1` tempo command decodes bpm as a signed 16-bit
   value, so `bpm == 0` makes `60000000 / bpm` evaluate to `+inf` and the
