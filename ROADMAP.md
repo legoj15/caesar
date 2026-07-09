@@ -373,11 +373,22 @@ Concrete defects found while surveying and evolving the code. None crash the too
 on the archives tested so far, but each is a real correctness or portability
 hazard. Not release-blocking on their own.
 
-- **Group file-table desync** (`Cgrp.cpp`, the file-record loop). Each record's
-  offset is only consumed when the preceding marker equals `0x1F00`; on any other
-  marker the offset read is short-circuited away by the `?:`, so the length field
-  and every following record are read from the wrong position. A group containing
-  an external or absent file misparses everything after it.
+- **Group file-table desync** (`Cgrp.cpp`, the file-record loop) (*fixed
+  2026-07-09*). Each file record is a fixed 16 bytes — `Id`, a presence marker,
+  an offset, and a length — but the offset was read inside a short-circuiting
+  `?:` (`ReadFixLen(pos, 4) == 0x1F00 ? … + ReadFixLen(pos, 4) : nullptr`), so on
+  any marker other than `0x1F00` the offset `ReadFixLen` never ran and `pos`
+  advanced only 12 bytes. The `Length` field then picked up the offset word and
+  every following record was parsed 4 bytes early, so a group holding an external
+  or absent file misparsed everything after it. The offset is now read
+  unconditionally into a local and only *used* when the marker is `0x1F00`, so the
+  cursor always advances a full 16-byte record. Verified with a synthetic-group
+  A/B (old binary vs fixed) built from the vendored parser: with an absent record
+  preceding a present file, the old parse loses the following file entirely (it
+  resolves to `nullptr`) while the fixed parse finds and reports it; an all-present
+  group is unchanged (both report every file), confirming the fix is
+  behaviour-preserving on the common case and only repairs the desynced path.
+  The build also compiles cleanly under GCC 13 on Linux.
 - **32-bit reader invoked with an 8-byte width** (`Csar.cpp`, the `0x220C` and
   `0x220D` file-record branches call `ReadFixLen(pos, 8)`). That shifts a 32-bit
   value by up to 56 bits — undefined behavior — and silently discards the top

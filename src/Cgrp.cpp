@@ -128,9 +128,17 @@ bool Cgrp::Extract()
 
 	for (uint32_t i = 0; i < fileCount; ++i)
 	{
+		// Each record is a fixed 16 bytes: Id, a presence marker, an offset, and a
+		// length. The offset field must be consumed unconditionally -- reading it
+		// only when the marker is 0x1F00 (as a short-circuiting ?: did) left pos 4
+		// bytes short on any other marker, so Length picked up the offset field and
+		// every following record was parsed from the wrong position. A group holding
+		// an external or absent file (marker != 0x1F00) misparsed everything after it.
 		CgrpFile file{};
 		file.Id = ReadFixLen(pos, 4);
-		file.Offset = ReadFixLen(pos, 4) == 0x1F00 ? Data + fileOffset + 8 + ReadFixLen(pos, 4) : nullptr;
+		uint32_t marker = ReadFixLen(pos, 4);
+		uint32_t offset = ReadFixLen(pos, 4);
+		file.Offset = marker == 0x1F00 ? Data + fileOffset + 8 + offset : nullptr;
 		file.Length = ReadFixLen(pos, 4);
 
 		files.push_back(file);
