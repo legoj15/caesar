@@ -27,7 +27,10 @@ A single CMake build that works on current (2026) toolchains.
 - [x] Add `CMakePresets.json` for one-click Windows/MSVC builds.
 - [x] Repo hygiene: slim `.gitignore`, fix `.gitattributes`, document building.
 - [ ] Verify the build on Linux and macOS (the CMake is written to be portable;
-      only Windows/MSVC is tested so far).
+      only Windows/MSVC is tested so far). Partial: the source now *compiles*
+      cleanly with GCC 13 on Linux (plain `cmake -S . -B build`), but this is a
+      compile only — no Linux preset yet, and functionality is untested against
+      real archives (no end-to-end extraction run or output A/B on Linux).
 
 ### 2. Robustness — ✅ done
 A tool whose job is parsing files ripped from game images should treat malformed
@@ -388,7 +391,10 @@ hazard. Not release-blocking on their own.
   resolves to `nullptr`) while the fixed parse finds and reports it; an all-present
   group is unchanged (both report every file), confirming the fix is
   behaviour-preserving on the common case and only repairs the desynced path.
-  The build also compiles cleanly under GCC 13 on Linux.
+  Note the synthetic A/B exercises the parser logic directly (via the vendored
+  objects), not the shipped binary end-to-end; the source also *compiles* cleanly
+  under GCC 13 on Linux, but Linux functionality remains untested against real
+  archives (see the open Linux/macOS build-verification item under section 1).
 - **32-bit reader invoked with an 8-byte width** (`Csar.cpp`, the `0x220C` and
   `0x220D` file-record branches call `ReadFixLen(pos, 8)`). That shifts a 32-bit
   value by up to 56 bits — undefined behavior — and silently discards the top
