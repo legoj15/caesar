@@ -5,6 +5,7 @@
 #include <sf2cute.hpp>
 
 #include <cmath>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <ios>
@@ -124,6 +125,16 @@ double ConvertSustain(uint8_t sustain)
 	{
 		return 200 * abs(ChangeLogBase(pow((static_cast<double>(sustain) / 127.0f), 2), 10));
 	}
+}
+
+// The per-note tune field (Cbnk Note 0x24) is an f32 frequency ratio applied on
+// top of the root key -- 1.0 for almost every note, but some carry a genuine
+// detune (e.g. 0.9828 -> -30 cents, 1.0087 -> +15 cents). Convert the ratio to a
+// pitch offset in cents the SF2 coarse/fine tune generators can carry:
+// cents = 1200 * log2(ratio).
+double ConvertTune(float tune)
+{
+	return 1200 * ChangeLogBase(tune, 2);
 }
 
 Cbnk::Cbnk(const char* fileName, map<int, Cwar*>* cwars, const Options& opts) : FileName(fileName), Cwars(cwars), Opts(opts)
@@ -457,7 +468,16 @@ bool Cbnk::Convert()
 			insts[i].Notes[j].Volume = ReadFixLen(pos, 4);
 			insts[i].Notes[j].Pan = ReadFixLen(pos, 4);
 
-			Common::Analyse("Note 0x24", ReadFixLen(pos, 4));
+			// Note 0x24 is an f32 pitch ratio (frequency multiplier on top of the
+			// root key), stored as raw little-endian bits. Reinterpret those bits
+			// as a float and keep it; emitted as SF2 tune generators below.
+			uint32_t tuneBits = ReadFixLen(pos, 4);
+			Common::Analyse("Note 0x24", tuneBits);
+
+			float tune;
+			memcpy(&tune, &tuneBits, sizeof(tune));
+			insts[i].Notes[j].Tune = tune;
+
 			Common::Analyse("Note 0x28", ReadFixLen(pos, 2));
 
 			insts[i].Notes[j].Interpolation = ReadFixLen(pos, 1);
@@ -556,9 +576,48 @@ bool Cbnk::Convert()
 					}
 					SFGeneratorItem sampleModes(SFGenerator::kSampleModes, it->second->Cwavs[insts[i].Notes[j].Cwav->Id]->SampleMode);
 
+					// Emit the per-note tune (Note 0x24) as SF2 coarse (semitone) + fine
+					// (cent) tune, split so the fine part stays within +/-50 cents and the
+					// rest is whole semitones. A note at exactly 1.0 (>99% of notes) yields
+					// 0/0 and adds no generator, so its output stays byte-identical.
+					vector<SFGeneratorItem> tuneGens;
+
+					{
+						double tuneCents = ConvertTune(insts[i].Notes[j].Tune);
+
+						// A corrupt bank could store tune <= 0 or NaN, which makes the log
+						// non-finite and lround() undefined; treat that as no detune.
+						if (isfinite(tuneCents))
+						{
+							long coarse = lround(tuneCents / 100.0);
+							long fine = lround(tuneCents - coarse * 100.0);
+
+							if (coarse != 0)
+							{
+								tuneGens.push_back(SFGeneratorItem(SFGenerator::kCoarseTune, static_cast<int16_t>(coarse)));
+							}
+
+							if (fine != 0)
+							{
+								tuneGens.push_back(SFGeneratorItem(SFGenerator::kFineTune, static_cast<int16_t>(fine)));
+							}
+						}
+					}
+
+					// sf2cute sorts generators into their spec order on write, so appending
+					// the (possibly empty) tune generators here does not affect the byte
+					// layout of the fixed generators above.
+					auto zoneGens = [&](const SFGeneratorItem& panGen)
+					{
+						vector<SFGeneratorItem> gens { keyRange, overridingRootKey, initialAttenuation, panGen, attackVolEnv, holdVolEnv, decayVolEnv, releaseVolEnv, sustainVolEnv, sampleModes };
+						gens.insert(gens.end(), tuneGens.begin(), tuneGens.end());
+
+						return gens;
+					};
+
 					if (insts[i].Notes[j].Cwav->ChanCount == 1)
 					{
-						instrumentZones.push_back(SFInstrumentZone(leftSamples[insts[i].Notes[j].Cwav->Id], vector<SFGeneratorItem> { keyRange, overridingRootKey, initialAttenuation, pan, attackVolEnv, holdVolEnv, decayVolEnv, releaseVolEnv, sustainVolEnv, sampleModes }, vector<SFModulatorItem> { }));
+						instrumentZones.push_back(SFInstrumentZone(leftSamples[insts[i].Notes[j].Cwav->Id], zoneGens(pan), vector<SFModulatorItem> { }));
 					}
 					else
 					{
@@ -567,16 +626,16 @@ bool Cbnk::Convert()
 							SFGeneratorItem left(SFGenerator::kPan, -500);
 							SFGeneratorItem right(SFGenerator::kPan, 500);
 
-							instrumentZones.push_back(SFInstrumentZone(leftSamples[insts[i].Notes[j].Cwav->Id], vector<SFGeneratorItem> { keyRange, overridingRootKey, initialAttenuation, left, attackVolEnv, holdVolEnv, decayVolEnv, releaseVolEnv, sustainVolEnv, sampleModes }, vector<SFModulatorItem> { }));
-							instrumentZones.push_back(SFInstrumentZone(rightSamples[insts[i].Notes[j].Cwav->Id], vector<SFGeneratorItem> { keyRange, overridingRootKey, initialAttenuation, right, attackVolEnv, holdVolEnv, decayVolEnv, releaseVolEnv, sustainVolEnv, sampleModes }, vector<SFModulatorItem> { }));
+							instrumentZones.push_back(SFInstrumentZone(leftSamples[insts[i].Notes[j].Cwav->Id], zoneGens(left), vector<SFModulatorItem> { }));
+							instrumentZones.push_back(SFInstrumentZone(rightSamples[insts[i].Notes[j].Cwav->Id], zoneGens(right), vector<SFModulatorItem> { }));
 						}
 						else
 						{
 							SFGeneratorItem left(SFGenerator::kPan, ((static_cast<double>(insts[i].Notes[j].Pan) / 128.0f) * 500) - 500);
 							SFGeneratorItem right(SFGenerator::kPan, (static_cast<double>(insts[i].Notes[j].Pan) / 128.0f) * 500);
 
-							instrumentZones.push_back(SFInstrumentZone(leftSamples[insts[i].Notes[j].Cwav->Id], vector<SFGeneratorItem> { keyRange, overridingRootKey, initialAttenuation, left, attackVolEnv, holdVolEnv, decayVolEnv, releaseVolEnv, sustainVolEnv, sampleModes }, vector<SFModulatorItem> { }));
-							instrumentZones.push_back(SFInstrumentZone(rightSamples[insts[i].Notes[j].Cwav->Id], vector<SFGeneratorItem> { keyRange, overridingRootKey, initialAttenuation, right, attackVolEnv, holdVolEnv, decayVolEnv, releaseVolEnv, sustainVolEnv, sampleModes }, vector<SFModulatorItem> { }));
+							instrumentZones.push_back(SFInstrumentZone(leftSamples[insts[i].Notes[j].Cwav->Id], zoneGens(left), vector<SFModulatorItem> { }));
+							instrumentZones.push_back(SFInstrumentZone(rightSamples[insts[i].Notes[j].Cwav->Id], zoneGens(right), vector<SFModulatorItem> { }));
 						}
 					}
 				}

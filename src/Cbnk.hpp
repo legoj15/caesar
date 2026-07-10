@@ -47,6 +47,7 @@ struct CbnkNote
 	uint32_t RootKey;
 	uint32_t Volume;
 	uint32_t Pan;
+	float Tune = 1.0f;
 	uint8_t Interpolation;
 	uint8_t Attack;
 	uint8_t Decay;
