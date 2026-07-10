@@ -11,6 +11,7 @@
 #include <ios>
 #include <map>
 #include <memory>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -478,7 +479,20 @@ bool Cbnk::Convert()
 				return false;
 			}
 
-			Common::Analyse("Note 0x14", ReadFixLen(pos, 4));
+			uint32_t noteFlags = ReadFixLen(pos, 4);
+			Common::Analyse("Note 0x14", noteFlags);
+
+			// For ordinary (non-0x6001) notes this word is the note's flags, which
+			// is 0x21F across every observed bank; the field layout parsed below is
+			// hardcoded for that value. Surface a note whose flags differ, since its
+			// envelope/pitch/pan fields may then sit at other offsets and misparse.
+			if (id != 0x6001 && noteFlags != 0x21F)
+			{
+				ostringstream flagsMsg;
+				flagsMsg << "note flags 0x" << hex << uppercase << noteFlags << " (expected 0x21F)";
+
+				Common::Warning(pos - 4, flagsMsg.str(), "bank notes with an unrecognized flags word (envelope/pitch/pan may be misparsed)");
+			}
 
 			insts[i].Notes[j].RootKey = ReadFixLen(pos, 4);
 			insts[i].Notes[j].Cwav->Key = insts[i].Notes[j].RootKey;

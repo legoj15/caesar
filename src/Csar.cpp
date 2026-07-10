@@ -583,6 +583,14 @@ bool Csar::Extract(const string& outputDir)
 				return false;
 			}
 		}
+		else
+		{
+			// The group's data is not embedded in this archive -- it lives in an
+			// external sibling .bcgrp that caesar does not load yet, so the banks,
+			// wave archives and sequences it references stay absent (their named
+			// directories are left empty). Surface it instead of dropping silently.
+			Common::Warning(cgrps[i].Offset, "group " + cgrps[i].FileName + " lives in an external .bcgrp (not loaded)", "external group files not loaded (their banks/sequences are absent)");
+		}
 	}
 
 	Common::Dump((archiveDir / (stem.string() + ".log")).string());

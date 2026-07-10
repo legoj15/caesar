@@ -72,9 +72,12 @@ add_library(sf2cute STATIC
     "${SF2CUTE_DIR}/src/sf2cute/sample.cpp"
     "${SF2CUTE_DIR}/src/sf2cute/zone.cpp")
 
+# SYSTEM on the public include so caesar treats sf2cute's headers as third-party:
+# warnings from its (template) code are suppressed in caesar's build, which keeps
+# the caesar target's -Werror/WX honest without editing the vendored library.
 target_include_directories(sf2cute
-    PUBLIC  "${SF2CUTE_DIR}/include"
-    PRIVATE "${SF2CUTE_DIR}/src/sf2cute")
+    SYSTEM PUBLIC "${SF2CUTE_DIR}/include"
+    PRIVATE       "${SF2CUTE_DIR}/src/sf2cute")
 
 target_compile_features(sf2cute PUBLIC cxx_std_14)
 
@@ -97,8 +100,10 @@ target_link_libraries(caesar PRIVATE sf2cute libsmfc)
 # Make the project version available to the program (printed by --version).
 target_compile_definitions(caesar PRIVATE CAESAR_VERSION="${PROJECT_VERSION}")
 
+# Warnings are errors for caesar's own code (vendored libs are exempt: they build
+# as separate targets without these flags, and their headers are included SYSTEM).
 if(MSVC)
-    target_compile_options(caesar PRIVATE /W3)
+    target_compile_options(caesar PRIVATE /W3 /WX)
 else()
-    target_compile_options(caesar PRIVATE -Wall -Wextra)
+    target_compile_options(caesar PRIVATE -Wall -Wextra -Werror)
 endif()
