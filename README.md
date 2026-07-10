@@ -55,8 +55,8 @@ reported and skipped without affecting the others.
 
 ## Roadmap
 
-This fork is actively evolving. See [ROADMAP.md](ROADMAP.md) for the plan toward
-the first maintained release and beyond.
+This fork is actively evolving. See [docs/ROADMAP.md](docs/ROADMAP.md) for the plan
+toward the first maintained release and beyond.
 
 ## Licensing
 
