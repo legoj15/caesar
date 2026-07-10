@@ -180,11 +180,43 @@ The cheapest changes with the most audible or visible payoff.
       `BANK_206`, `WARC_390`, `SEQ_…` instead of bare numbers (issue #17's
       `206.sf2` → `BANK_206.sf2`). Verified content-preserving over real
       archives (only the SF2 embedded name and the `.log` change, as intended).
-- [ ] Deeper naming: groups keep symbol names too. Group-resident banks are
-      extracted under a number while the matching symbol-named directory from the
-      CSAR level sits empty (28 of 85 named dirs in MK7's `ctr_dash`). Mapping
-      the CSAR symbol names across the group boundary would fill those and drop
-      the numeric duplicates — belongs with the external-`.bcgrp` group work.
+- [x] Deeper naming: groups keep symbol names too. A group's own file table
+      carries only a numeric id for each bank/wave-archive/sequence, so
+      group-resident items were extracted under a number (`BANK_206`) even though
+      the CSAR INFO section already names the same file by its shared id. Fixed by
+      building a `namesById` map (file id → the type-prefixed name resolved at the
+      CSAR level, for every enumerated CWAR/CBNK/CSEQ) in `Csar::Extract` and
+      threading it into `Cgrp` (new ctor arg + `NamesFromCsar` member); a
+      `nameFor(id, type)` helper in `Cgrp::Extract` prefers the CSAR name and falls
+      back to the old numeric `TypedName` only for ids the CSAR did not enumerate.
+      So `BANK_206` now extracts as `BNK_SELECT_SINGLE_MULTI_G` — into the very
+      directory the CSAR level had already created for it (which also holds the
+      sequence that references the bank, `SEQ_MENU_SINGLE_MULTI`), instead of a
+      numeric duplicate beside it. Bank/sequence are now co-located under one
+      meaningful name.
+
+      **Correction to the original framing.** This item claimed the "28 of 85 empty
+      named dirs" in MK7 `ctr_dash` *were* the numerically-duplicated banks. They
+      are not — they are two disjoint sets. The numeric duplicates were a separate
+      **19** banks (`BANK_206`–`BANK_249`), whose data lives in the archive's
+      **embedded** group; those are what this fix relocates. The **28** empty
+      `BNK_*` dirs are banks whose data lives in an **external** sibling `.bcgrp`
+      that caesar does not load yet — there is no data to put in them, so they stay
+      empty and are untouched by this change. Filling them is the external-`.bcgrp`
+      group work (still open, under "After the first release").
+
+      Verified old-vs-new on `ctr_dash` (all group banks): the 19 numeric `BANK_*`
+      dirs are gone, the 28 external empties are unchanged, and content is
+      preserved — the `.wav` (864), `.mid` (1369), `.bcbnk` (19), `.bcseq` (1369)
+      and `.bcwar` (44) content multisets are byte-identical old-vs-new, and the
+      `.log` is byte-identical. The 19 `.sf2` differ **only in the embedded name**:
+      parsing each pair's RIFF chunks shows the sample audio (`sdta`) and all
+      preset/instrument/generator/sample data (`pdta`) byte-identical for all 19,
+      with only the `INFO`/`INAM` string changed (the SF2 name comes from the bank
+      file's stem, `Cbnk.cpp:482`). A group-free archive (`menu`) is fully
+      byte-identical old-vs-new (330 files), confirming zero collateral effect (the
+      change only runs inside `Cgrp`, which is constructed only when an archive has
+      groups).
 - [x] Implement whole-song loops. The sequence "jump" (`0x89`) command now ends a
       track at its loop-back and writes `loopStart`/`loopEnd` marker meta events
       spanning the looped region — honored by loop-aware players (e.g.

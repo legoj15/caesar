@@ -14,7 +14,7 @@
 using namespace std;
 using namespace filesystem;
 
-Cgrp::Cgrp(const char* fileName, map<int, Cwar*>* cwars, const map<int, bool>& cseqsFromCsar, const Options& opts) : FileName(fileName), Cwars(cwars), CseqsFromCsar(cseqsFromCsar), Opts(opts)
+Cgrp::Cgrp(const char* fileName, map<int, Cwar*>* cwars, const map<int, bool>& cseqsFromCsar, const map<int, string>& namesFromCsar, const Options& opts) : FileName(fileName), Cwars(cwars), CseqsFromCsar(cseqsFromCsar), NamesFromCsar(namesFromCsar), Opts(opts)
 {
 	ifstream ifs(FileName, ios::binary | ios::ate);
 
@@ -53,6 +53,24 @@ bool Cgrp::Extract()
 	// sequences sit directly in it. Compose everything from that base instead of
 	// changing the working directory.
 	path baseDir = path(FileName).parent_path();
+
+	// Resolve a group-resident file's output name. The group's own file table
+	// only carries a numeric id, but the CSAR INFO section already named the same
+	// file (by its shared id) -- and for banks it left an empty symbol-named
+	// directory at this level. Prefer that CSAR name so the extraction fills the
+	// empty directory instead of creating a numeric duplicate beside it; fall back
+	// to the numeric type-prefixed name for anything the CSAR did not enumerate.
+	auto nameFor = [&](uint32_t id, const string& type) -> string
+	{
+		auto it = NamesFromCsar.find(id);
+
+		if (it != NamesFromCsar.end() && !it->second.empty())
+		{
+			return it->second;
+		}
+
+		return Common::TypedName(to_string(id), type);
+	};
 
 	uint8_t* pos = Data;
 
@@ -170,7 +188,7 @@ bool Cgrp::Extract()
 
 				pos -= 16;
 
-				string name = Common::TypedName(to_string(files[i].Id), "WARC");
+				string name = nameFor(files[i].Id, "WARC");
 
 				path warcDir = baseDir / name;
 				create_directories(warcDir);
@@ -200,7 +218,7 @@ bool Cgrp::Extract()
 
 				pos -= 16;
 
-				string name = Common::TypedName(to_string(files[i].Id), "BANK");
+				string name = nameFor(files[i].Id, "BANK");
 
 				path bankDir = baseDir / name;
 				create_directories(bankDir);
@@ -225,7 +243,7 @@ bool Cgrp::Extract()
 
 				pos -= 16;
 
-				string name = Common::TypedName(to_string(files[i].Id), "SEQ");
+				string name = nameFor(files[i].Id, "SEQ");
 
 				Common::CheckBounds(pos, cseqLength);
 

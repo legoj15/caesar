@@ -268,6 +268,14 @@ bool Csar::Extract(const string& outputDir)
 		files.push_back(file);
 	}
 
+	// File id -> the (type-prefixed) symbol name resolved at this level, for every
+	// wave-archive/bank/sequence the INFO section enumerates. When a file's data
+	// actually lives in a group, this level still names it (banks even get an empty
+	// symbol-named directory), but the group's own file table carries only the
+	// numeric id -- so this map is handed to Cgrp to carry the name across that
+	// boundary and avoid a numeric-named duplicate.
+	map<int, string> namesById;
+
 	pos = Data + infoOffset + 8 + infoCwarOffset;
 
 	uint32_t cwarCount = ReadFixLen(pos, 4);
@@ -292,6 +300,8 @@ bool Csar::Extract(const string& outputDir)
 		uint32_t hasFileName = ReadFixLen(pos, 4);
 
 		string fileName = Common::TypedName(hasFileName  && (strgOffset != 0xFFFFFFFF) ? strgs[ReadFixLen(pos, 4)].String : to_string(id), "WARC");
+
+		namesById[id] = fileName;
 
 		if (files[id].Offset != nullptr)
 		{
@@ -351,6 +361,8 @@ bool Csar::Extract(const string& outputDir)
 		Common::Analyse("Cbnk 0x0C", ReadFixLen(pos, 4));
 
 		cbnks[i].FileName = Common::TypedName(strgOffset != 0xFFFFFFFF ? strgs[ReadFixLen(pos, 4)].String : to_string(cbnks[i].Id), "BANK");
+
+		namesById[cbnks[i].Id] = cbnks[i].FileName;
 
 		// Create the bank directory unconditionally (even when the bank has no
 		// data), matching the historical layout.
@@ -413,6 +425,8 @@ bool Csar::Extract(const string& outputDir)
 		Common::Analyse("Cseq 0x14", ReadFixLen(pos, 4));
 
 		cseqs[i].FileName = Common::TypedName(strgOffset != 0xFFFFFFFF ? strgs[ReadFixLen(pos, 4)].String : to_string(id), "SEQ");
+
+		namesById[id] = cseqs[i].FileName;
 
 		switch (type)
 		{
@@ -562,7 +576,7 @@ bool Csar::Extract(const string& outputDir)
 			ofs.write(reinterpret_cast<const char*>(pos), cgrpLength);
 			ofs.close();
 
-			Cgrp cgrp(grpFile.c_str(), &Cwars, cseqsFromCsar, Opts);
+			Cgrp cgrp(grpFile.c_str(), &Cwars, cseqsFromCsar, namesById, Opts);
 
 			if (!cgrp.Extract())
 			{

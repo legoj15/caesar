@@ -28,9 +28,15 @@ struct Cgrp
 	std::vector<Cbnk*> Cbnks;
 	std::vector<Cseq*> Cseqs;
 	std::map<int, bool> CseqsFromCsar;
+	// File id -> the symbol name the CSAR level gave that file. A group-resident
+	// bank/wave-archive/sequence carries only a numeric id in the group's own file
+	// table, but the CSAR INFO section names it (and, for banks, leaves an empty
+	// symbol-named directory). Looking the id up here lets the group extract into
+	// that name instead of a numeric duplicate.
+	std::map<int, std::string> NamesFromCsar;
 	Options Opts;
 
-	Cgrp(const char* fileName, std::map<int, Cwar*>* cwars, const std::map<int, bool>& cseqsFromCsar, const Options& opts);
+	Cgrp(const char* fileName, std::map<int, Cwar*>* cwars, const std::map<int, bool>& cseqsFromCsar, const std::map<int, std::string>& namesFromCsar, const Options& opts);
 	~Cgrp();
 	bool Extract();
 };
