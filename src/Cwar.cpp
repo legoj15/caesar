@@ -44,7 +44,7 @@ bool Cwar::Extract()
 	if (!Common::Assert(pos, 0xFEFF, ReadFixLen(pos, 2))) { return false; }
 	if (!Common::Assert(pos, 0x40, ReadFixLen(pos, 2))) { return false; }
 
-	uint32_t cwarVersion = ReadFixLen(pos, 4);
+	[[maybe_unused]] uint32_t cwarVersion = ReadFixLen(pos, 4);
 
 	if (!Common::Assert<uint64_t>(pos, Length, ReadFixLen(pos, 4))) { return false; }
 	if (!Common::Assert(pos, 0x2, ReadFixLen(pos, 4))) { return false; }

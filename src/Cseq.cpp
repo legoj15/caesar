@@ -212,7 +212,7 @@ bool Cseq::Convert(uint32_t startOffset)
 	if (!Common::Assert(pos, 0xFEFF, ReadFixLen(pos, 2))) { return false; }
 	if (!Common::Assert(pos, 0x40, ReadFixLen(pos, 2))) { return false; }
 
-	uint32_t cseqVersion = ReadFixLen(pos, 4);
+	[[maybe_unused]] uint32_t cseqVersion = ReadFixLen(pos, 4);
 
 	if (!Common::Assert<uint64_t>(pos, Length, ReadFixLen(pos, 4))) { return false; }
 	if (!Common::Assert(pos, 0x2, ReadFixLen(pos, 4))) { return false; }
@@ -268,7 +268,7 @@ bool Cseq::Convert(uint32_t startOffset)
 
 	while (pos < (Data + dataOffset + dataLength))
 	{
-		uint32_t offset = pos - 8 - dataOffset - Data;
+		uint32_t offset = static_cast<uint32_t>(pos - 8 - dataOffset - Data);
 		CseqCmd cmd;
 
 		if (labls.count(pos))
@@ -567,7 +567,7 @@ bool Cseq::Convert(uint32_t startOffset)
 	bool redirected = false;
 	uint32_t trackOffsets[16] = { 0 };
 	stack<uint32_t> sp;
-	bool trackEnabled[16] = { false };
+	[[maybe_unused]] bool trackEnabled[16] = { false };
 
 	// Absolute MIDI time at which each command offset was reached in the current
 	// track, so a backward jump can place its loop-start marker at the tick where

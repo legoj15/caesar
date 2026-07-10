@@ -93,7 +93,7 @@ bool Csar::Extract(const string& outputDir)
 	if (!Common::Assert(pos, 0x2002, ReadFixLen(pos, 4))) { return false; }
 
 	uint32_t fileOffset = ReadFixLen(pos, 4);
-	uint32_t fileLength = ReadFixLen(pos, 4);
+	[[maybe_unused]] uint32_t fileLength = ReadFixLen(pos, 4);
 
 	vector<CsarStrg> strgs;
 
@@ -105,11 +105,11 @@ bool Csar::Extract(const string& outputDir)
 		if (!Common::Assert<uint32_t>(pos, strgLength, ReadFixLen(pos, 4))) { return false; }
 		if (!Common::Assert(pos, 0x2400, ReadFixLen(pos, 4))) { return false; }
 
-		uint32_t strgStringsOffset = ReadFixLen(pos, 4);
+		[[maybe_unused]] uint32_t strgStringsOffset = ReadFixLen(pos, 4);
 
 		if (!Common::Assert(pos, 0x2401, ReadFixLen(pos, 4))) { return false; }
 
-		uint32_t strgUnknownOffset = ReadFixLen(pos, 4);
+		[[maybe_unused]] uint32_t strgUnknownOffset = ReadFixLen(pos, 4);
 		uint32_t strgCount = ReadFixLen(pos, 4);
 
 		for (uint32_t i = 0; i < strgCount; ++i)
@@ -144,7 +144,7 @@ bool Csar::Extract(const string& outputDir)
 	uint32_t infoSetOffset = 0;
 	uint32_t infoCgrpOffset = 0;
 	uint32_t infoFileOffset = 0;
-	uint32_t infoEndOffset = 0;
+	[[maybe_unused]] uint32_t infoEndOffset = 0;
 
 	for (uint8_t i = 0; i < 8; ++i)
 	{

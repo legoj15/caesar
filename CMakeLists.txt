@@ -30,9 +30,9 @@ if(MSVC)
 endif()
 
 # ---------------------------------------------------------------------------
-# Vendored: libsmfc — Standard MIDI File writer (C, by loveemu).
-# NOTE: this copy ships with no upstream license text; see README before
-# distributing binaries. Compiled as a static library the tool links against.
+# Vendored: libsmfc — Standard MIDI File writer (C, by loveemu, MIT license;
+# see src/libsmfc/LICENSE and the README's Licensing section). Compiled as a
+# static library the tool links against.
 # ---------------------------------------------------------------------------
 add_library(libsmfc STATIC
     src/libsmfc/libsmfc.c
@@ -93,6 +93,9 @@ add_executable(caesar
 
 target_compile_features(caesar PRIVATE cxx_std_17)
 target_link_libraries(caesar PRIVATE sf2cute libsmfc)
+
+# Make the project version available to the program (printed by --version).
+target_compile_definitions(caesar PRIVATE CAESAR_VERSION="${PROJECT_VERSION}")
 
 if(MSVC)
     target_compile_options(caesar PRIVATE /W3)

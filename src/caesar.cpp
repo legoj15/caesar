@@ -10,6 +10,11 @@
 
 using namespace std;
 
+// Set by the build from the CMake project version; fall back for non-CMake builds.
+#ifndef CAESAR_VERSION
+#define CAESAR_VERSION "unknown"
+#endif
+
 // Seconds used by --pad-sustain when it is given without a value. Matches the
 // value that was caesar's (incorrect) default before the envelope sentinel was
 // settled by disassembly.
@@ -23,13 +28,14 @@ int main(int argc, char* argv[])
 
 	if (argc == 1)
 	{
-		cout << "OVERVIEW: Caesar" << endl << endl;
+		cout << "OVERVIEW: Caesar " << CAESAR_VERSION << endl << endl;
 		cout << "USAGE: caesar [options] <inputs>" << endl << endl;
 		cout << "OPTIONS:" << endl;
 		cout << "\t-p\t\tDo not ignore pan values of stereo samples" << endl;
 		cout << "\t-w\t\tShow per-item warning detail (a summary of skipped/" << endl;
 		cout << "\t\t\tapproximated content is shown by default)" << endl;
 		cout << "\t-o <dir>\tWrite output under <dir> (default: beside each input)" << endl;
+		cout << "\t-v, --version\tPrint the version and exit" << endl;
 		cout << "\t--pad-sustain[=SECONDS]" << endl;
 		cout << "\t\t\tHold notes whose release is 127 open for SECONDS" << endl;
 		cout << "\t\t\t(default " << DefaultPadSustain << "). On hardware these stop instantly" << endl;
@@ -45,7 +51,13 @@ int main(int argc, char* argv[])
 
 	for (int i = 1; i < argc; ++i)
 	{
-		if (!strcmp(argv[i], "-p"))
+		if (!strcmp(argv[i], "-v") || !strcmp(argv[i], "--version"))
+		{
+			cout << "caesar " << CAESAR_VERSION << endl;
+
+			return 0;
+		}
+		else if (!strcmp(argv[i], "-p"))
 		{
 			opts.Pan = true;
 		}

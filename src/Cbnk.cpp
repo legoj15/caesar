@@ -55,18 +55,24 @@ double ConvertPan(uint32_t pan)
 	return sf2Pan < -500 ? -500 : sf2Pan;
 }
 
+// AttackTable/HoldTable/DecayTable each hold 128 entries indexed by the 0-127
+// parameter byte; the parameters are read as raw 0-255 bytes, so a corrupt bank
+// could index past the table. Clamp to the last entry (127 is the "instant"
+// sentinel the decay/release curves already special-case). A no-op on valid data.
 double ConvertAttack(uint8_t attack)
 {
-	return ConvertTime(AttackTable[attack] / 1000);
+	return ConvertTime(AttackTable[attack > 127 ? 127 : attack] / 1000);
 }
 
 double ConvertHold(uint8_t hold)
 {
-	return ConvertTime(HoldTable[hold] / 1000);
+	return ConvertTime(HoldTable[hold > 127 ? 127 : hold] / 1000);
 }
 
 double ConvertDecay(uint8_t decay, uint8_t sustain)
 {
+	if (decay > 127) { decay = 127; }
+
 	double sustainVolume = 20 * ChangeLogBase(pow((static_cast<double>(sustain) / 127.0f), 2), 10);
 
 	if (decay == 127)
@@ -88,6 +94,8 @@ double ConvertDecay(uint8_t decay, uint8_t sustain)
 
 double ConvertRelease(uint8_t release, uint8_t sustain, double padSustainSeconds)
 {
+	if (release > 127) { release = 127; }
+
 	double sustainVolume = 20 * ChangeLogBase(pow((static_cast<double>(sustain) / 127.0f), 2), 10);
 
 	if (release == 127)
@@ -167,7 +175,7 @@ bool Cbnk::Convert()
 	if (!Common::Assert(pos, 0xFEFF, ReadFixLen(pos, 2))) { return false; }
 	if (!Common::Assert(pos, 0x20, ReadFixLen(pos, 2))) { return false; }
 
-	uint32_t cbnkVersion = ReadFixLen(pos, 4);
+	[[maybe_unused]] uint32_t cbnkVersion = ReadFixLen(pos, 4);
 
 	if (!Common::Assert<uint64_t>(pos, Length, ReadFixLen(pos, 4))) { return false; }
 	if (!Common::Assert(pos, 0x1, ReadFixLen(pos, 4))) { return false; }
@@ -268,16 +276,16 @@ bool Cbnk::Convert()
 			{
 				if (ReadFixLen(pos, 4, false) == 0x736D706C)
 				{
-					uint32_t smplLength = ReadFixLen(pos, 4);
-					uint32_t manufacturer = ReadFixLen(pos, 4);
-					uint32_t product = ReadFixLen(pos, 4);
-					uint32_t samplePeriod = ReadFixLen(pos, 4);
-					uint32_t midiUnityNote = ReadFixLen(pos, 4);
-					uint32_t midiPitchFraction = ReadFixLen(pos, 4);
-					uint32_t smpteFormat = ReadFixLen(pos, 4);
-					uint32_t smpteOffset = ReadFixLen(pos, 4);
+					[[maybe_unused]] uint32_t smplLength = ReadFixLen(pos, 4);
+					[[maybe_unused]] uint32_t manufacturer = ReadFixLen(pos, 4);
+					[[maybe_unused]] uint32_t product = ReadFixLen(pos, 4);
+					[[maybe_unused]] uint32_t samplePeriod = ReadFixLen(pos, 4);
+					[[maybe_unused]] uint32_t midiUnityNote = ReadFixLen(pos, 4);
+					[[maybe_unused]] uint32_t midiPitchFraction = ReadFixLen(pos, 4);
+					[[maybe_unused]] uint32_t smpteFormat = ReadFixLen(pos, 4);
+					[[maybe_unused]] uint32_t smpteOffset = ReadFixLen(pos, 4);
 					uint32_t sampleLoops = ReadFixLen(pos, 4);
-					uint32_t samplerData = ReadFixLen(pos, 4);
+					[[maybe_unused]] uint32_t samplerData = ReadFixLen(pos, 4);
 
 					vector<WaveSmpl> smpls;
 
@@ -305,7 +313,7 @@ bool Cbnk::Convert()
 			if (!cwav.Loop)
 			{
 				cwav.LoopStart = 0;
-				cwav.LoopEnd = cwav.LeftSamples.size();
+				cwav.LoopEnd = static_cast<uint32_t>(cwav.LeftSamples.size());
 			}
 
 			Common::Pop();
@@ -324,7 +332,7 @@ bool Cbnk::Convert()
 
 	for (uint32_t i = 0; i < instCount; ++i)
 	{
-		CbnkInst inst;
+		CbnkInst inst{};
 
 		if (ReadFixLen(pos, 4) != 0x5900)
 		{
@@ -454,11 +462,20 @@ bool Cbnk::Convert()
 			{
 				insts[i].Notes[j].Cwav = &cwavs[cwav];
 			}
-			else
+			else if (!cwavs.empty())
 			{
 				Common::Warning(pos - 4, "CWAV " + to_string(cwav) + " does not exist", "instrument notes referencing a missing sample (substituted the first sample)");
 
 				insts[i].Notes[j].Cwav = &cwavs[0];
+			}
+			else
+			{
+				// The bank has no samples at all, so there is nothing to substitute
+				// and every following field dereferences Cwav. Fail this bank cleanly
+				// (the per-input handler isolates it) rather than deref an empty vector.
+				Common::Error(pos - 4, "a bank containing at least one sample", cwav);
+
+				return false;
 			}
 
 			Common::Analyse("Note 0x14", ReadFixLen(pos, 4));
@@ -555,13 +572,13 @@ bool Cbnk::Convert()
 
 					SFGeneratorItem keyRange(SFGenerator::kKeyRange, RangesType(insts[i].Notes[j].StartNote, insts[i].Notes[j].EndNote));
 					SFGeneratorItem overridingRootKey(SFGenerator::kOverridingRootKey, insts[i].Notes[j].RootKey);
-					SFGeneratorItem initialAttenuation(SFGenerator::kInitialAttenuation, ConvertVolume(insts[i].Notes[j].Volume));
-					SFGeneratorItem pan(SFGenerator::kPan, ConvertPan(insts[i].Notes[j].Pan));
-					SFGeneratorItem attackVolEnv(SFGenerator::kAttackVolEnv, ConvertAttack(insts[i].Notes[j].Attack));
-					SFGeneratorItem holdVolEnv(SFGenerator::kHoldVolEnv, ConvertHold(insts[i].Notes[j].Hold));
-					SFGeneratorItem decayVolEnv(SFGenerator::kDecayVolEnv, ConvertDecay(insts[i].Notes[j].Decay, insts[i].Notes[j].Sustain));
-					SFGeneratorItem releaseVolEnv(SFGenerator::kReleaseVolEnv, ConvertRelease(insts[i].Notes[j].Release, insts[i].Notes[j].Sustain, Opts.PadSustainSeconds));
-					SFGeneratorItem sustainVolEnv(SFGenerator::kSustainVolEnv, ConvertSustain(insts[i].Notes[j].Sustain));
+					SFGeneratorItem initialAttenuation(SFGenerator::kInitialAttenuation, static_cast<int16_t>(ConvertVolume(insts[i].Notes[j].Volume)));
+					SFGeneratorItem pan(SFGenerator::kPan, static_cast<int16_t>(ConvertPan(insts[i].Notes[j].Pan)));
+					SFGeneratorItem attackVolEnv(SFGenerator::kAttackVolEnv, static_cast<int16_t>(ConvertAttack(insts[i].Notes[j].Attack)));
+					SFGeneratorItem holdVolEnv(SFGenerator::kHoldVolEnv, static_cast<int16_t>(ConvertHold(insts[i].Notes[j].Hold)));
+					SFGeneratorItem decayVolEnv(SFGenerator::kDecayVolEnv, static_cast<int16_t>(ConvertDecay(insts[i].Notes[j].Decay, insts[i].Notes[j].Sustain)));
+					SFGeneratorItem releaseVolEnv(SFGenerator::kReleaseVolEnv, static_cast<int16_t>(ConvertRelease(insts[i].Notes[j].Release, insts[i].Notes[j].Sustain, Opts.PadSustainSeconds)));
+					SFGeneratorItem sustainVolEnv(SFGenerator::kSustainVolEnv, static_cast<int16_t>(ConvertSustain(insts[i].Notes[j].Sustain)));
 
 					// A release-127 voice stops instantly on hardware; its audible tail is
 					// DSP reverb, which no soundfont can carry. Say so either way: by
@@ -631,8 +648,8 @@ bool Cbnk::Convert()
 						}
 						else
 						{
-							SFGeneratorItem left(SFGenerator::kPan, ((static_cast<double>(insts[i].Notes[j].Pan) / 128.0f) * 500) - 500);
-							SFGeneratorItem right(SFGenerator::kPan, (static_cast<double>(insts[i].Notes[j].Pan) / 128.0f) * 500);
+							SFGeneratorItem left(SFGenerator::kPan, static_cast<int16_t>(((static_cast<double>(insts[i].Notes[j].Pan) / 128.0f) * 500) - 500));
+							SFGeneratorItem right(SFGenerator::kPan, static_cast<int16_t>((static_cast<double>(insts[i].Notes[j].Pan) / 128.0f) * 500));
 
 							instrumentZones.push_back(SFInstrumentZone(leftSamples[insts[i].Notes[j].Cwav->Id], zoneGens(left), vector<SFModulatorItem> { }));
 							instrumentZones.push_back(SFInstrumentZone(rightSamples[insts[i].Notes[j].Cwav->Id], zoneGens(right), vector<SFModulatorItem> { }));

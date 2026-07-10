@@ -78,7 +78,7 @@ bool Cgrp::Extract()
 	if (!Common::Assert(pos, 0xFEFF, ReadFixLen(pos, 2))) { return false; }
 	if (!Common::Assert(pos, 0x40, ReadFixLen(pos, 2))) { return false; }
 
-	uint32_t cgrpVersion = ReadFixLen(pos, 4);
+	[[maybe_unused]] uint32_t cgrpVersion = ReadFixLen(pos, 4);
 
 	if (!Common::Assert<uint64_t>(pos, Length, ReadFixLen(pos, 4))) { return false; }
 
@@ -88,10 +88,10 @@ bool Cgrp::Extract()
 	uint32_t infoLength = 0;
 
 	uint32_t fileOffset = 0;
-	uint32_t fileLength = 0;
+	[[maybe_unused]] uint32_t fileLength = 0;
 
 	uint32_t infxOffset = 0;
-	uint32_t infxLength = 0;
+	[[maybe_unused]] uint32_t infxLength = 0;
 
 	for (uint32_t i = 0; i < chunkCount; ++i)
 	{

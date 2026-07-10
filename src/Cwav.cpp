@@ -41,7 +41,7 @@ bool Cwav::Convert()
 	if (!Common::Assert(pos, 0xFEFF, ReadFixLen(pos, 2))) { return false; }
 	if (!Common::Assert(pos, 0x40, ReadFixLen(pos, 2))) { return false; }
 
-	uint32_t cwavVersion = ReadFixLen(pos, 4);
+	[[maybe_unused]] uint32_t cwavVersion = ReadFixLen(pos, 4);
 
 	if (!Common::Assert<uint64_t>(pos, Length, ReadFixLen(pos, 4))) { return false; }
 	if (!Common::Assert(pos, 0x2, ReadFixLen(pos, 4))) { return false; }
@@ -53,7 +53,7 @@ bool Cwav::Convert()
 	if (!Common::Assert(pos, 0x7001, ReadFixLen(pos, 4))) { return false; }
 
 	uint32_t dataOffset = ReadFixLen(pos, 4);
-	uint32_t dataLength = ReadFixLen(pos, 4);
+	[[maybe_unused]] uint32_t dataLength = ReadFixLen(pos, 4);
 
 	pos = Data + infoOffset;
 
@@ -68,10 +68,19 @@ bool Cwav::Convert()
 	uint32_t sampleRate = ReadFixLen(pos, 4);
 	uint32_t loopStart = ReadFixLen(pos, 4);
 	uint32_t loopEnd = ReadFixLen(pos, 4);
-	uint32_t unalignedLoopStart = ReadFixLen(pos, 4);
+	[[maybe_unused]] uint32_t unalignedLoopStart = ReadFixLen(pos, 4);
 	uint16_t chanCount = ReadFixLen(pos, 2);
 
 	if (!Common::Assert(pos, 0x0, ReadFixLen(pos, 2))) { return false; }
+
+	// A malformed wave with zero channels would later index chans[0] on an empty
+	// vector; reject it cleanly instead of over-reading.
+	if (chanCount == 0)
+	{
+		Common::Error(Data + infoOffset + 8, "at least one channel", chanCount);
+
+		return false;
+	}
 
 	vector<CwavChan> chans;
 
@@ -79,7 +88,7 @@ bool Cwav::Convert()
 	{
 		if (!Common::Assert(pos, 0x7100, ReadFixLen(pos, 4))) { return false; }
 
-		CwavChan chan;
+		CwavChan chan{};
 		chan.Offset = Data + infoOffset + 28 + ReadFixLen(pos, 4);
 
 		chans.push_back(chan);
@@ -160,12 +169,16 @@ bool Cwav::Convert()
 				for (uint32_t j = 0; j < ceil(loopEnd / 14.0f); ++j)
 				{
 					predScal = ReadFixLen(pos, 1);
-					int32_t pred = (predScal >> 4) & 0xF;
+					// The predictor selects one of 8 coefficient pairs, so mask to 3
+					// bits: valid data is already 0-7 (identical result), while a
+					// corrupt high nibble of 8-15 would otherwise index DspCoeffs
+					// (16 entries) out of bounds at pred*2+1.
+					int32_t pred = (predScal >> 4) & 0x7;
 					int32_t scal = 1 << (predScal & 0xF);
 					int16_t coef1 = chans[i].DspCoeffs[pred * 2];
 					int16_t coef2 = chans[i].DspCoeffs[(pred * 2) + 1];
 
-					uint32_t samplesToRead = min<uint32_t>(14, loopEnd - chans[i].PcmSamples.size());
+					uint32_t samplesToRead = min<uint32_t>(14, static_cast<uint32_t>(loopEnd - chans[i].PcmSamples.size()));
 
 					for (uint32_t k = 0; k < samplesToRead; ++k)
 					{
@@ -217,7 +230,7 @@ bool Cwav::Convert()
 	uint16_t bitsPerSample = 16;
 	uint32_t byteRate = (sampleRate * chanCount) * (bitsPerSample / 8);
 	uint16_t blockAlign = chanCount * (bitsPerSample / 8);
-	uint32_t waveDataLength = (chans[0].PcmSamples.size() * chanCount) * (bitsPerSample / 8);
+	uint32_t waveDataLength = static_cast<uint32_t>((chans[0].PcmSamples.size() * chanCount) * (bitsPerSample / 8));
 	uint32_t length = 36 + waveDataLength;
 
 	uint32_t smplLength = 60;
