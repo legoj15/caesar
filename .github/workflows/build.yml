@@ -43,7 +43,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       # One incantation works on all three images. CMAKE_BUILD_TYPE is honored by the
       # single-config generators (Unix Makefiles on Linux/macOS) and harmlessly ignored

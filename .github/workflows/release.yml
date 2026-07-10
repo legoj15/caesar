@@ -31,7 +31,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Configure
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
@@ -69,7 +69,7 @@ jobs:
           Compress-Archive -Path "dist/$env:ASSET" -DestinationPath "dist/$env:ASSET.zip"
 
       - name: Upload build artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: ${{ matrix.asset }}
           path: dist/${{ matrix.asset }}.zip
@@ -84,7 +84,7 @@ jobs:
       contents: write
     steps:
       - name: Download all build artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: artifacts
           merge-multiple: true
@@ -93,9 +93,9 @@ jobs:
         run: ls -R artifacts
 
       - name: Publish release
-        # Pinned to the commit the v2 tag points at (this job holds contents: write).
+        # Pinned to the commit v3.0.1 points at (this job holds contents: write).
         # Dependabot (.github/dependabot.yml) bumps this via reviewable PRs.
-        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3.0.1
         with:
           files: artifacts/*.zip
           generate_release_notes: true
