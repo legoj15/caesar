@@ -1,5 +1,7 @@
 # caesar
 
+[![CI](https://github.com/legoj15/caesar/actions/workflows/build.yml/badge.svg)](https://github.com/legoj15/caesar/actions/workflows/build.yml)
+
 A command-line tool that extracts the contents of Nintendo 3DS **BCSAR** sound
 archives (`.bcsar`), converting the instrument banks into **SoundFont 2** (`.sf2`)
 files and the music sequences into **MIDI** (`.mid`) files, and dumping the raw
@@ -30,8 +32,28 @@ cmake --build --preset release
 The executable lands in `build/Release/caesar.exe`. Use `--preset debug` for a
 debug build.
 
-> The CMake build is written to be portable, but only Windows/MSVC is tested at
-> present. Linux and macOS support is a future goal.
+### Linux / macOS
+
+Any C++17 toolchain (GCC, Clang, or AppleClang) and CMake 3.21+ work — no extra
+dependencies to install. Either use the preset:
+
+```
+cmake --preset linux    # or: --preset macos
+cmake --build --preset linux
+```
+
+or configure directly (what CI does):
+
+```
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --config Release
+```
+
+The executable lands in `build/caesar`.
+
+> Every push is built on Windows, Linux, and macOS by CI (see the badge above).
+> Windows and Linux output is verified byte-for-byte identical on real archives;
+> macOS builds in CI and is not yet output-verified.
 
 ## Usage
 

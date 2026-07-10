@@ -1,0 +1,98 @@
+name: Release
+
+# On a version tag (v*), build the binary on every hosted OS, zip each one, and
+# publish a single GitHub Release with all three archives attached.
+
+on:
+  push:
+    tags: ['v*']
+
+# Least-privilege default; only the publish job re-grants contents: write.
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build (${{ matrix.asset }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            asset: caesar-windows-x64
+            bin: build/Release/caesar.exe   # VS multi-config: --config selects Release
+          - os: ubuntu-latest
+            asset: caesar-linux-x64
+            bin: build/caesar                # Unix Makefiles: single-config
+          - os: macos-latest
+            asset: caesar-macos-arm64
+            bin: build/caesar                # macos-latest is arm64 (Apple Silicon)
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      # Stage the binary alongside the licence + readme, then zip the folder so
+      # every archive expands to a single caesar-<os>-<arch>/ directory.
+      - name: Package (Unix)
+        if: runner.os != 'Windows'
+        env:
+          BIN: ${{ matrix.bin }}
+          ASSET: ${{ matrix.asset }}
+        run: |
+          mkdir -p "dist/$ASSET"
+          cp "$BIN" "dist/$ASSET/"
+          cp LICENSE README.md "dist/$ASSET/"
+          (cd dist && zip -r "$ASSET.zip" "$ASSET")
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          BIN: ${{ matrix.bin }}
+          ASSET: ${{ matrix.asset }}
+        run: |
+          New-Item -ItemType Directory -Force "dist/$env:ASSET" | Out-Null
+          Copy-Item "$env:BIN" "dist/$env:ASSET/"
+          Copy-Item LICENSE, README.md "dist/$env:ASSET/"
+          Compress-Archive -Path "dist/$env:ASSET" -DestinationPath "dist/$env:ASSET.zip"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: dist/${{ matrix.asset }}.zip
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    # Only this job writes: it creates the Release and uploads assets.
+    permissions:
+      contents: write
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: List gathered assets
+        run: ls -R artifacts
+
+      - name: Publish release
+        # Pinned to the commit the v2 tag points at (this job holds contents: write).
+        # Dependabot (.github/dependabot.yml) bumps this via reviewable PRs.
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        with:
+          files: artifacts/*.zip
+          generate_release_notes: true
+          fail_on_unmatched_files: true

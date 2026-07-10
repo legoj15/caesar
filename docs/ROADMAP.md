@@ -37,10 +37,37 @@ A single CMake build that works on current (2026) toolchains.
 - [x] Add `CMakePresets.json` for one-click Windows/MSVC builds.
 - [x] Repo hygiene: slim `.gitignore`, fix `.gitattributes`, document building.
 - [ ] Verify the build on Linux and macOS (the CMake is written to be portable;
-      only Windows/MSVC is tested so far). Partial: the source now *compiles*
-      cleanly with GCC 13 on Linux (plain `cmake -S . -B build`), but this is a
-      compile only — no Linux preset yet, and functionality is untested against
-      real archives (no end-to-end extraction run or output A/B on Linux).
+      only Windows/MSVC is tested so far). **Linux is now fully verified
+      end-to-end (2026-07-10); macOS/Clang is the only remainder.**
+
+      **Linux — ✅ DONE (end-to-end, output A/B).** On a Debian 13 (trixie) VM,
+      GCC 14.2.0 / CMake 3.31.6, configured with a plain `cmake -S . -B build
+      -DCMAKE_BUILD_TYPE=Release` (no preset — the only preset is Windows-gated;
+      Ninja absent so the default Make generator is used) and built in ~17 s. The
+      clone→configure→build→extract chain ran clean. Extracted three archives
+      spanning the main code paths — `menu` (no groups, 331 files), `MeetSound`
+      (banked instruments + release-127 notices, 1074), `ctr_dash` (MK7, embedded
+      **groups** via `Cgrp`, 4595) — identical file counts to Windows. **A/B vs a
+      Windows/MSVC build of the identical commit (`4c451e4`): every `.wav` (1198),
+      `.mid` (1721), `.sf2` (27) and every raw sub-file dump
+      (`.bcbnk`/`.bcgrp`/`.bcseq`/`.bcwar`/`.bcwav`) is byte-identical across
+      platforms.** The SF2 envelope float math (`log`/`pow`/`lround`) matched to
+      the bit — no glibc-vs-MSVC-CRT libm divergence, no FP-contraction or
+      endianness bug. The *only* cross-platform differences were in the human-
+      readable `.log` (the analysis CSV): its first column echoes the input path
+      as spelled on the command line (I gave different paths per box), and it is
+      written in text mode so line endings are CRLF vs LF — both expected; after
+      normalising those two, the logs hash-match exactly. Note: GCC surfaced a
+      `-Wmaybe-uninitialized` that MSVC hid — `Cwav.cpp:82` default-constructs
+      `CwavChan chan;` (not `chan{}`), so `DspCoeffs`/`DspCntx`/`DspLoopCntx` are
+      copied uninitialised into the channel vector. It is harmless today (those
+      fields are overwritten from the file before use in codec 2 and unused in
+      codec 0/1 — hence the byte-identical `.wav`), but it is real UB; the
+      one-token fix `CwavChan chan{};` value-initialises with identical output and
+      should be folded in. **macOS/Clang (libc++) remains untested** — its libc++
+      (vs libstdc++) is the most likely place a latent `std::filesystem` / float-
+      formatting / `memcpy` issue would surface. Still no Linux/macOS CMake preset
+      (CI can configure without one, as done here).
 
 ### 2. Robustness — ✅ done
 A tool whose job is parsing files ripped from game images should treat malformed
@@ -170,7 +197,7 @@ entire audio codec, and more. Users can't tell what they didn't get.
       vibrato-delay/tempo) — now *visible* rather than silent; some likely want 8-bit →
       7-bit scaling instead of dropping, tracked as a follow-up fidelity item below.
 
-### 4. High-value fidelity & UX wins
+### 4. High-value fidelity & UX wins — ✅ done
 The cheapest changes with the most audible or visible payoff.
 
 - [x] Give numeric output names a type prefix so numbered items are
@@ -271,12 +298,36 @@ The cheapest changes with the most audible or visible payoff.
       before the table), so old/new render bit-identical; that track's wrongness
       was the release-127 cutoff and dropped reverb (both below), not decay.
       Console A/B still worthwhile for the many tracks that do use the table.
-- [ ] Emit the per-note **tune** field, currently dropped. `Cbnk.cpp`'s `Note 0x24`
-      (velocity-region `+0x14`) is an `f32` pitch ratio that caesar reads and discards —
-      it is not even stored in `CbnkNote`. It is `1.0` for ~99 % of notes, but real
-      detunes occur (`0x3F7B9A21` ≈ 0.982 ≈ −31 cents; `0x3F811D26` ≈ 1.0087 ≈ +15
-      cents). Map it to SF2 `kFineTune`/`kCoarseTune` via `cents = 1200·log2(tune)`.
-      This is the *only* discarded per-note field carrying lost musical intent: the three
+- [x] Emit the per-note **tune** field, previously dropped. `Cbnk.cpp`'s `Note 0x24`
+      (velocity-region `+0x14`) is an `f32` pitch ratio that caesar read and discarded —
+      it was not even stored in `CbnkNote`. It is `1.0` for ~99 % of notes, but real
+      detunes occur (`0x3F7B9A21` = 0.9828 = −30 cents; `0x3F811D26` = 1.0087 = +15
+      cents). Now stored as `CbnkNote::Tune` (raw bits `memcpy`'d to `float`) and emitted
+      via a new `ConvertTune` (`cents = 1200·log2(tune)`) as SF2 `kCoarseTune` (semitone)
+      + `kFineTune` (cent), split so the fine part stays within ±50 cents and the
+      remainder becomes whole semitones. A note at exactly 1.0 (the >99 % case) yields
+      0/0 and adds no generator; sf2cute sorts generators into spec order on write, so the
+      new tune generators never disturb the byte layout of the untouched notes. A corrupt
+      bank's tune ≤ 0 / NaN is guarded (non-finite cents → no detune) so `lround()` stays
+      defined. The logic lives entirely in `Cbnk::Convert`, so it covers both direct-CSAR
+      and group-resident banks with no second code path.
+
+      **Verified** by A/B against the pre-change build over **19 archives (~74,500 output
+      files)**: every `.wav`, `.mid`, `.log`, and raw sub-file dump (`.bcbnk`/`.bcgrp`/
+      `.bcseq`/`.bcwar`/`.bcwav`) is byte-identical, and **only 24 of 1,222 `.sf2` differ**
+      — each solely by inserted `kCoarseTune`/`kFineTune` generators (sample audio `sdta`
+      byte-identical), 569 tune generators total. The sparsity (only detuned notes change;
+      24 of 1,222 banks) independently confirms the field offset — a misread would perturb
+      nearly every note. Both cited example bytes reproduce exactly in the output:
+      `0x3F811D26` → MeetSound `BANK_BGM` `fineTune 15`; `0x3F7B9A21` → GardenSound
+      `BANK_BGM_DJ_FAMICOM` `fineTune −30` (the roadmap's earlier "−31" was a loose
+      approximation; precise value is −30.0). The shared Kirby `B_ST_FGM` bank carries the
+      same ~25 detunes across all four Kirby titles tested. Remaining nuance: the `0x28`
+      interpolation byte is still read-and-dropped (fine — SF2 playback is always
+      interpolated). Console A/B not required: the change only *adds* pitch data the engine
+      itself applies, and the two ground-truth byte patterns round-trip exactly.
+
+      This was the *only* discarded per-note field carrying lost musical intent: the three
       4-byte fields at `Note 0x2C`/`0x30`/`0x34`, long suspected of holding LFO / graph-
       envelope / randomizer tables, were resolved (2026-07-09) to be the self-referential
       `DataRef` chain that points at the ADSHR envelope caesar already reads at `0x38`
@@ -569,11 +620,38 @@ conflict with caesar's GPL-3.0.
       third-party licenses in the README. Binaries are now distributable.
 
 ### 6. Continuous integration & first release — final step
-- [ ] GitHub Actions workflow: build on every push (start with Windows/MSVC).
-- [ ] Release workflow: attach built binaries to a GitHub Release when a version
-      tag is pushed.
-- [ ] Add a CI status badge to the README.
-- [ ] Cut **v0.5.0** — the first maintained release.
+- [x] GitHub Actions workflow: build on every push. Scope grew from the original
+      "start with Windows/MSVC" to a **three-OS matrix** (`windows-latest`,
+      `ubuntu-latest`, `macos-latest`), since the Linux path is now proven and
+      macOS runners are free on public repos. `.github/workflows/build.yml`:
+      push/PR-to-`master` + `workflow_dispatch`, `permissions: contents: read`,
+      concurrency-cancel of superseded runs, `fail-fast: false`, the verified
+      portable incantation (`cmake -S . -B build -DCMAKE_BUILD_TYPE=Release` then
+      `cmake --build build --config Release --parallel`), and a `shell: bash`
+      usage/liveness smoke that tolerates caesar's by-design non-zero no-input exit
+      while failing if the banner is absent (a crash signature). Runs on
+      **GitHub-hosted runners**, not self-hosted: caesar is a public repo, so a
+      self-hosted runner would let a fork PR execute code on the always-on
+      server/VM — a documented RCE risk with nothing to gain (hosted is free and
+      the build is ~17 s). The user's own Windows server + Debian VM stay the
+      *private* A/B bench against copyrighted archives, which can't enter public CI.
+- [x] Release workflow: `.github/workflows/release.yml`, triggered on `v*` tags.
+      Build matrix (same three OSes) → per-OS `caesar-<os>-<arch>.zip`
+      (binary + `LICENSE` + `README.md`) → `upload-artifact@v4` → a single gather
+      job (`needs: build`, `permissions: contents: write`) that downloads all zips
+      and publishes one GitHub Release via `softprops/action-gh-release`, **pinned
+      to a commit SHA** (it holds the only write token) with
+      `generate_release_notes`. `.github/dependabot.yml` keeps the actions current.
+- [x] Add a CI status badge to the README (links to the `build.yml` runs).
+- [ ] Cut **v0.5.0** — the first maintained release. (Everything above is in
+      place; cutting the release is pushing a `v0.5.0` tag, which fires
+      `release.yml`. Recommend doing it once the tune fix + this CI are on
+      `master` and the first `build.yml` run is green on all three OSes.)
+
+      Validation before first push: both workflows pass `actionlint` 1.7.12 clean
+      and parse as valid YAML; the build commands are the same ones verified
+      end-to-end on Debian today. The live green run across all three hosted OSes
+      is the final confirmation.
 
 ---
 

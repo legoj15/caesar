@@ -1,0 +1,71 @@
+name: CI
+
+# Build the caesar executable on every hosted OS on each push/PR to master.
+# Correctness bar is "if it builds, it builds", plus a no-input usage/liveness
+# smoke check. There are no external/system dependencies (sf2cute and libsmfc are
+# vendored and built from source), so git + CMake + a C++17 compiler — all of
+# which ship on the hosted images — are everything the build needs.
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+# Least privilege: this workflow only reads the repository.
+permissions:
+  contents: read
+
+# A newer push to the same branch/PR cancels the stale in-progress run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # Keep building the other platforms if one breaks, for full cross-platform signal.
+      fail-fast: false
+      matrix:
+        # `bin` is where the compiled binary lands, which differs by generator:
+        # Visual Studio is multi-config (Release subdir + .exe); Unix Makefiles is
+        # single-config (binary in the build/ root).
+        include:
+          - os: ubuntu-latest
+            bin: build/caesar
+          - os: macos-latest
+            bin: build/caesar
+          - os: windows-latest
+            bin: build/Release/caesar.exe
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # One incantation works on all three images. CMAKE_BUILD_TYPE is honored by the
+      # single-config generators (Unix Makefiles on Linux/macOS) and harmlessly ignored
+      # by the multi-config Visual Studio generator (Windows), which takes the config
+      # from --config at build time.
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      # caesar prints its usage banner to STDOUT and exits non-zero when given no
+      # inputs, so the non-zero exit is EXPECTED. Capture combined output (keep the
+      # 2>&1 — the banner is on stdout, but capturing both is future-proof) and fail
+      # only if the banner is absent, which is what a real crash would look like.
+      # `shell: bash` is available on every hosted runner (Git Bash on Windows).
+      - name: Smoke test (usage/liveness)
+        shell: bash
+        env:
+          CAESAR_BIN: ${{ matrix.bin }}
+        run: |
+          output="$("$CAESAR_BIN" 2>&1 || true)"
+          printf '%s\n' "$output"
+          printf '%s\n' "$output" | grep -qE 'USAGE|OVERVIEW: Caesar' \
+            || { echo "::error::caesar did not print its usage banner (crash?)"; exit 1; }

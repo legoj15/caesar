@@ -1,0 +1,8 @@
+version: 2
+updates:
+  # Keep the GitHub Actions (incl. the SHA-pinned release action) current via
+  # small, reviewable PRs instead of letting version tags silently drift.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

@@ -18,10 +18,28 @@
       "generator": "Ninja Multi-Config",
       "architecture": { "value": "x64", "strategy": "external" },
       "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows" }
+    },
+    {
+      "name": "linux",
+      "displayName": "Linux (GCC/Clang)",
+      "description": "Single-config Release build with the system default compiler.",
+      "inherits": "base",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release" },
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux" }
+    },
+    {
+      "name": "macos",
+      "displayName": "macOS (AppleClang)",
+      "description": "Single-config Release build with AppleClang.",
+      "inherits": "base",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release" },
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Darwin" }
     }
   ],
   "buildPresets": [
     { "name": "debug",   "displayName": "Debug",   "configurePreset": "windows", "configuration": "Debug" },
-    { "name": "release", "displayName": "Release", "configurePreset": "windows", "configuration": "Release" }
+    { "name": "release", "displayName": "Release", "configurePreset": "windows", "configuration": "Release" },
+    { "name": "linux",   "displayName": "Linux",   "configurePreset": "linux" },
+    { "name": "macos",   "displayName": "macOS",   "configurePreset": "macos" }
   ]
 }
