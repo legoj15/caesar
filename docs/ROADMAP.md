@@ -16,6 +16,16 @@ published binaries.
 
 ---
 
+====OVERARCHING GOALS====
+The plan is big, and the roadmap shows a slice. Here's what's represented now, each being their own large step:
+- Get the caesar midi/SF2 debugged to the best effort (AKA fix the known bugs and apply the obvious UX fixes, ship it as version 0.5) <-- We are here, at the beginning
+- Rebrand the repo as "caesar salad", a play on the mix of things this repo strives to bring
+- Make an honest, accurate to console player
+- Make said player play at a higher fidelity than console [Ultimate Goal]
+- Add PC compatible tracker format exporting (choose the best format or have multiple available)
+- Editor [Low priority]
+========
+
 ## Road to first release (v0.5.0)
 
 ### 1. Modern build system — ✅ done
@@ -302,7 +312,42 @@ The cheapest changes with the most audible or visible payoff.
       `EnvGenerator::CalcRelease`, including `if (x == 127) return 65535.0f;` — 65535 is
       the *fastest* per-ms rate, i.e. an effectively instant cutoff. So byte 127 is the
       instant/fastest sentinel at the driver level (same as DS/Wii), and the seconds-long
-      tail is **DSP reverb**, not note release. **`decay == 127` is the same branch and
+      tail is **DSP reverb**, not note release.
+
+      **✅ APPLIED (2026-07-09, session 3). Default is now instant; `--pad-sustain` keeps
+      the old behaviour opt-in.** The listening A/B that gated the flip was finally run
+      properly (instant + CC91 reverb, which had never been rendered — every prior test
+      compared instant *dry*). Findings, on `BGM_MAIN_Mii_Only_One`'s 1.62 s
+      all-voices-off gap at 50.90 s:
+        - Instant release sounds **console-correct** to the user, both dry and with reverb.
+          The long tail the 3.5 s value was inventing simply is not in the console output
+          the way `ConvertTime(3.5)` renders it.
+        - A GM player's reverb cannot stand in for the DSP's. At the game's own CC91=60
+          send, FluidSynth's freeverb contributes ~1 dB and leaves the gap silent
+          (−85 dB at +0.5 s vs the 3.5 s render's −36 dB). Boosting it (room 0.85) only
+          reaches −54 dB and, per the user's ear, "sounds like a real room — the 3DS's
+          reverb goes in a different direction". **Do not try to compensate by raising the
+          send level or the player's reverb; the shape is wrong, not the level.**
+        - **`BGM_DEN_EMPTY_LANDSCAPE` cannot settle this question and never could** — it is
+          dense enough that a voice is always sounding, so instant and 3.5 s differ only
+          marginally (peak −8.8 vs −8.1 dB, no near-silent frames either way). Months of
+          argument used the one repro that does not discriminate. `Only_One` is the
+          discriminating track because it has the only exposed tail. The user accepts that
+          EMPTY_LANDSCAPE's pads now read short — they *are* short, and the console's
+          sustain there is carried heavily by DSP processing that a soundfont cannot encode.
+        - Implementation: `Options` struct (`src/Options.hpp`) threaded
+          `Caesar` → `Csar` → `Cgrp` → `Cbnk`, replacing the loose `bool P`.
+          `--pad-sustain[=SECONDS]` (bare flag defaults to 3.5) is named for the deviation,
+          not for correctness, and its help text says so. A default-visible notice now
+          fires on any bank containing release-127 voices, worded differently per mode
+          (default: the tail is DSP reverb, use a reverb-capable player; with the flag: the
+          tail is faked). Verified: default output is byte-identical to a hardcoded-instant
+          build; `--pad-sustain` is byte-identical to the old 3.5 s build; across 26
+          archives the flag moves **only `.sf2` bytes** (never `.mid`/`.wav`/`.log`), and on
+          a sentinel-free archive it emits no notice and is a no-op. Invalid values
+          (`abc`, `-1`, `0`, `3.5s`) are rejected.
+
+      **`decay == 127` is the same branch and
       also instant → caesar's decay-127 handling is already correct.** **Recommended
       (needs user sign-off — reverses the committed `b078932`):** change
       `ConvertRelease`'s `release == 127` from `ConvertTime(3.5)` to instant/fastest
@@ -349,8 +394,8 @@ The cheapest changes with the most audible or visible payoff.
       loop lengths 225…28k samples) and the **per-note reverb sends**. So byte 127
       is one global behaviour; caesar is being asked to fake, with one release knob,
       a variation that physically lives in the samples + reverb. Accurate-fix
-      options, best→cheapest (user wants these documented; decided to keep 3.5 s
-      for now):
+      options, best→cheapest (option 1 is now done and option 4 is now the shipped
+      default; the rest stand):
         1. **RE the ARM11 `code.bin` (`nw::snd` over `nn::snd`)** — settles the
            *envelope* half. The whole BCSEQ/BCBNK interpreter (sequence parse, note
            alloc, ADSR, LFO, pitch, bank lookup) runs in game-side ARM11 code, so the
@@ -399,18 +444,11 @@ The cheapest changes with the most audible or visible payoff.
       `→ 65535.0f` fastest-rate branch. caesar's existing instant treatment of decay-127
       is correct and needs no change.
 
-      **Remaining decision (needs the user's ear — reverses committed `b078932`).** Make
-      the faithful value the default: `ConvertRelease`'s `release == 127` branch returns
-      `-12000` timecents (instant), mirroring `ConvertDecay`. Keep the pleasant-but-wrong
-      3.5 s behaviour reachable behind an opt-in flag — name it for the deviation, not for
-      correctness (e.g. `--pad-sustain[=SECONDS]`, default 3.5), threaded into `Cbnk`
-      alongside the existing `bool P` constructor arg (worth growing into a small options
-      struct). Be aware the flip *will* make casual dry-FluidSynth renders of the R=127
-      pads sound chopped: the 3.5 s hack was faking the missing DSP reverb tail by
-      over-holding the note, and two wrongs were partially cancelling. The correct model is
-      instant release plus the CC91 send caesar already emits, which needs a reverb-capable
-      player. Do **not** also set an SF2 `reverbEffectsSend` generator: the known send
-      levels live in the sequence, not the bank, so it would only double-count CC91.
+      ~~**Remaining decision (needs the user's ear — reverses committed `b078932`).**~~
+      **Done — see "✅ APPLIED" above.** One caveat from that work survives as a standing
+      rule: do **not** set an SF2 `reverbEffectsSend` generator to compensate for the
+      missing tail. The known send levels live in the sequence, not the bank, so it would
+      only double-count the CC91 that `Cseq` already emits.
 
       **Disassembly prep — target selection & toolchain (2026-07-09).** Before
       committing to a target we checked whether "engine version drift across titles"

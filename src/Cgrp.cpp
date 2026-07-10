@@ -14,7 +14,7 @@
 using namespace std;
 using namespace filesystem;
 
-Cgrp::Cgrp(const char* fileName, map<int, Cwar*>* cwars, const map<int, bool>& cseqsFromCsar, bool p) : FileName(fileName), Cwars(cwars), CseqsFromCsar(cseqsFromCsar), P(p)
+Cgrp::Cgrp(const char* fileName, map<int, Cwar*>* cwars, const map<int, bool>& cseqsFromCsar, const Options& opts) : FileName(fileName), Cwars(cwars), CseqsFromCsar(cseqsFromCsar), Opts(opts)
 {
 	ifstream ifs(FileName, ios::binary | ios::ate);
 
@@ -212,7 +212,7 @@ bool Cgrp::Extract()
 				ofs.write(reinterpret_cast<const char*>(pos), cbnkLength);
 				ofs.close();
 
-				Cbnks.push_back(new Cbnk(bankFile.c_str(), Cwars, P));
+				Cbnks.push_back(new Cbnk(bankFile.c_str(), Cwars, Opts));
 
 				break;
 			}

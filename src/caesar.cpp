@@ -1,16 +1,23 @@
 #include "Common.hpp"
 #include "Csar.hpp"
+#include "Options.hpp"
 
 #include <cstring>
 #include <exception>
 #include <iostream>
+#include <stdexcept>
 #include <string>
 
 using namespace std;
 
+// Seconds used by --pad-sustain when it is given without a value. Matches the
+// value that was caesar's (incorrect) default before the envelope sentinel was
+// settled by disassembly.
+static const double DefaultPadSustain = 3.5;
+
 int main(int argc, char* argv[])
 {
-	bool p = false;
+	Options opts;
 	string outputDir;
 	bool haveInput = false;
 
@@ -23,6 +30,13 @@ int main(int argc, char* argv[])
 		cout << "\t-w\t\tShow per-item warning detail (a summary of skipped/" << endl;
 		cout << "\t\t\tapproximated content is shown by default)" << endl;
 		cout << "\t-o <dir>\tWrite output under <dir> (default: beside each input)" << endl;
+		cout << "\t--pad-sustain[=SECONDS]" << endl;
+		cout << "\t\t\tHold notes whose release is 127 open for SECONDS" << endl;
+		cout << "\t\t\t(default " << DefaultPadSustain << "). On hardware these stop instantly" << endl;
+		cout << "\t\t\tand their audible tail is DSP reverb, which a soundfont" << endl;
+		cout << "\t\t\tcannot carry; this fakes that tail by over-holding the" << endl;
+		cout << "\t\t\tnote. Inaccurate, but stops such pads sounding cut off" << endl;
+		cout << "\t\t\tin players without reverb." << endl;
 
 		return 1;
 	}
@@ -33,11 +47,36 @@ int main(int argc, char* argv[])
 	{
 		if (!strcmp(argv[i], "-p"))
 		{
-			p = true;
+			opts.Pan = true;
 		}
 		else if (!strcmp(argv[i], "-w"))
 		{
 			Common::ShowWarnings = true;
+		}
+		else if (!strcmp(argv[i], "--pad-sustain"))
+		{
+			opts.PadSustainSeconds = DefaultPadSustain;
+		}
+		else if (!strncmp(argv[i], "--pad-sustain=", 14))
+		{
+			const char* value = argv[i] + 14;
+
+			try
+			{
+				size_t consumed = 0;
+				opts.PadSustainSeconds = stod(value, &consumed);
+
+				if (consumed != strlen(value) || opts.PadSustainSeconds <= 0)
+				{
+					throw invalid_argument("");
+				}
+			}
+			catch (const exception&)
+			{
+				cerr << "ERROR\t\t--pad-sustain expects a positive number of seconds, got \"" << value << "\"" << endl;
+
+				return 1;
+			}
 		}
 		else if (!strcmp(argv[i], "-o") || !strcmp(argv[i], "--output-dir"))
 		{
@@ -58,7 +97,7 @@ int main(int argc, char* argv[])
 			// still process, instead of aborting the whole run.
 			try
 			{
-				Csar csar(argv[i], p);
+				Csar csar(argv[i], opts);
 
 				if (!csar.Extract(outputDir))
 				{

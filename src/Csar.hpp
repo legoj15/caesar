@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Cwar.hpp"
+#include "Options.hpp"
 
 #include <cstdint>
 #include <ios>
@@ -53,9 +54,9 @@ struct Csar
 	uint8_t* Data = nullptr;
 
 	std::map<int, Cwar*> Cwars;
-	bool P;
+	Options Opts;
 
-	Csar(const char* fileName, bool p);
+	Csar(const char* fileName, const Options& opts);
 	~Csar();
 
 	// outputDir is the base directory to extract into. When empty (the default),

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Cwar.hpp"
+#include "Options.hpp"
 
 #include <ios>
 #include <cstdint>
@@ -72,9 +73,9 @@ struct Cbnk
 	uint8_t* Data = nullptr;
 
 	std::map<int, Cwar*>* Cwars;
-	bool P;
+	Options Opts;
 
-	Cbnk(const char* fileName, std::map<int, Cwar*>* cwars, bool p);
+	Cbnk(const char* fileName, std::map<int, Cwar*>* cwars, const Options& opts);
 	~Cbnk();
 	bool Convert();
 };

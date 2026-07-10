@@ -85,22 +85,21 @@ double ConvertDecay(uint8_t decay, uint8_t sustain)
 	}
 }
 
-double ConvertRelease(uint8_t release, uint8_t sustain)
+double ConvertRelease(uint8_t release, uint8_t sustain, double padSustainSeconds)
 {
 	double sustainVolume = 20 * ChangeLogBase(pow((static_cast<double>(sustain) / 127.0f), 2), 10);
 
 	if (release == 127)
 	{
-		// Release 127 is a long-release sentinel, NOT "instant". The old
-		// -12000 (~1 ms) chopped notes dead at note-off, which was wrong: on
-		// 3DS these voices (e.g. the R=127 pads in MeetSound's
-		// BGM_DEN_EMPTY_LANDSCAPE) ring out for seconds. Calibrated to ~3.5 s
-		// by A/B against a Citra capture; the exact driver value still wants
-		// console/LLE confirmation. NOTE: decay 127 (ConvertDecay above) is
-		// still treated as instant -- likely the same sentinel, but unverified
-		// (every instrument seen with decay 127 also had full sustain, so its
-		// decay is unobservable), so it is left alone until there is evidence.
-		return ConvertTime(3.5);
+		// 127 is the fastest-rate sentinel, i.e. an effectively instant cutoff.
+		// The NW4C rate conversion (Mii Plaza code.bin @ 0x201E3C) is the Wii
+		// NW4R EnvGenerator::CalcRelease verbatim, including
+		// `if (x == 127) return 65535.0f;` -- 65535 being the fastest per-ms
+		// rate. The seconds-long tail heard on R=127 pads is the DSP reverb,
+		// which the sequence carries as a CC91 send, not note release.
+		//
+		// --pad-sustain deliberately breaks that to fake the tail; see Options.
+		return padSustainSeconds > 0 ? ConvertTime(padSustainSeconds) : -12000;
 	}
 	else
 	{
@@ -127,7 +126,7 @@ double ConvertSustain(uint8_t sustain)
 	}
 }
 
-Cbnk::Cbnk(const char* fileName, map<int, Cwar*>* cwars, bool p) : FileName(fileName), Cwars(cwars), P(p)
+Cbnk::Cbnk(const char* fileName, map<int, Cwar*>* cwars, const Options& opts) : FileName(fileName), Cwars(cwars), Opts(opts)
 {
 	ifstream ifs(FileName, ios::binary | ios::ate);
 
@@ -541,8 +540,20 @@ bool Cbnk::Convert()
 					SFGeneratorItem attackVolEnv(SFGenerator::kAttackVolEnv, ConvertAttack(insts[i].Notes[j].Attack));
 					SFGeneratorItem holdVolEnv(SFGenerator::kHoldVolEnv, ConvertHold(insts[i].Notes[j].Hold));
 					SFGeneratorItem decayVolEnv(SFGenerator::kDecayVolEnv, ConvertDecay(insts[i].Notes[j].Decay, insts[i].Notes[j].Sustain));
-					SFGeneratorItem releaseVolEnv(SFGenerator::kReleaseVolEnv, ConvertRelease(insts[i].Notes[j].Release, insts[i].Notes[j].Sustain));
+					SFGeneratorItem releaseVolEnv(SFGenerator::kReleaseVolEnv, ConvertRelease(insts[i].Notes[j].Release, insts[i].Notes[j].Sustain, Opts.PadSustainSeconds));
 					SFGeneratorItem sustainVolEnv(SFGenerator::kSustainVolEnv, ConvertSustain(insts[i].Notes[j].Sustain));
+
+					// A release-127 voice stops instantly on hardware; its audible tail is
+					// DSP reverb, which no soundfont can carry. Say so either way: by
+					// default the tail is simply absent (the sequence's CC91 send needs a
+					// reverb-capable player), and under --pad-sustain it is faked.
+					if (insts[i].Notes[j].Release == 127)
+					{
+						Common::Warning(insts[i].Notes[j].Offset, "instrument " + to_string(i) + " note " + to_string(j) + " has release 127",
+							Opts.PadSustainSeconds > 0
+								? "instrument tails faked with a held release (--pad-sustain; not hardware behaviour)"
+								: "instrument tails that are console DSP reverb, not release (play the MIDI's CC91 send through a reverb-capable player, or approximate it with --pad-sustain)");
+					}
 					SFGeneratorItem sampleModes(SFGenerator::kSampleModes, it->second->Cwavs[insts[i].Notes[j].Cwav->Id]->SampleMode);
 
 					if (insts[i].Notes[j].Cwav->ChanCount == 1)
@@ -551,7 +562,7 @@ bool Cbnk::Convert()
 					}
 					else
 					{
-						if (!P)
+						if (!Opts.Pan)
 						{
 							SFGeneratorItem left(SFGenerator::kPan, -500);
 							SFGeneratorItem right(SFGenerator::kPan, 500);

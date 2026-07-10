@@ -3,6 +3,7 @@
 #include "Cbnk.hpp"
 #include "Cseq.hpp"
 #include "Cwar.hpp"
+#include "Options.hpp"
 
 #include <cstdint>
 #include <ios>
@@ -27,9 +28,9 @@ struct Cgrp
 	std::vector<Cbnk*> Cbnks;
 	std::vector<Cseq*> Cseqs;
 	std::map<int, bool> CseqsFromCsar;
-	bool P;
+	Options Opts;
 
-	Cgrp(const char* fileName, std::map<int, Cwar*>* cwars, const std::map<int, bool>& cseqsFromCsar, bool p);
+	Cgrp(const char* fileName, std::map<int, Cwar*>* cwars, const std::map<int, bool>& cseqsFromCsar, const Options& opts);
 	~Cgrp();
 	bool Extract();
 };

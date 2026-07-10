@@ -15,7 +15,7 @@
 using namespace std;
 using namespace filesystem;
 
-Csar::Csar(const char* fileName, bool p) : FileName(fileName), P(p)
+Csar::Csar(const char* fileName, const Options& opts) : FileName(fileName), Opts(opts)
 {
 	ifstream ifs(FileName, ios::binary | ios::ate);
 
@@ -372,7 +372,7 @@ bool Csar::Extract(const string& outputDir)
 			ofs.write(reinterpret_cast<const char*>(pos), cbnkLength);
 			ofs.close();
 
-			Cbnk cbnk(bankFile.c_str(), &Cwars, P);
+			Cbnk cbnk(bankFile.c_str(), &Cwars, Opts);
 
 			if (!cbnk.Convert())
 			{
@@ -562,7 +562,7 @@ bool Csar::Extract(const string& outputDir)
 			ofs.write(reinterpret_cast<const char*>(pos), cgrpLength);
 			ofs.close();
 
-			Cgrp cgrp(grpFile.c_str(), &Cwars, cseqsFromCsar, P);
+			Cgrp cgrp(grpFile.c_str(), &Cwars, cseqsFromCsar, Opts);
 
 			if (!cgrp.Extract())
 			{
