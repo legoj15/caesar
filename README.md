@@ -64,8 +64,15 @@ USAGE: caesar [options] <inputs>
 
 OPTIONS:
 	-p		Do not ignore pan values of stereo samples
-	-w		Show warnings
+	-w		Show per-item warning detail (a summary of skipped/
+			approximated content is shown by default)
 	-o <dir>	Write output under <dir> (default: beside each input)
+	-v, --version	Print the version and exit
+	--pad-sustain[=SECONDS]
+			Hold release-127 notes open for SECONDS (default 3.5).
+			These stop instantly on hardware; their audible tail is
+			DSP reverb a soundfont can't carry, so this fakes it by
+			over-holding the note. Off by default.
 ```
 
 For each input archive, caesar creates an output folder named after the archive

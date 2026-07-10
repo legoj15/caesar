@@ -47,9 +47,11 @@ jobs:
           BIN: ${{ matrix.bin }}
           ASSET: ${{ matrix.asset }}
         run: |
-          mkdir -p "dist/$ASSET"
+          mkdir -p "dist/$ASSET/licenses"
           cp "$BIN" "dist/$ASSET/"
           cp LICENSE README.md "dist/$ASSET/"
+          cp src/libsmfc/LICENSE "dist/$ASSET/licenses/libsmfc-LICENSE.txt"
+          cp src/sf2cute-0.2/LICENSE "dist/$ASSET/licenses/sf2cute-LICENSE.txt"
           (cd dist && zip -r "$ASSET.zip" "$ASSET")
 
       - name: Package (Windows)
@@ -59,9 +61,11 @@ jobs:
           BIN: ${{ matrix.bin }}
           ASSET: ${{ matrix.asset }}
         run: |
-          New-Item -ItemType Directory -Force "dist/$env:ASSET" | Out-Null
+          New-Item -ItemType Directory -Force "dist/$env:ASSET/licenses" | Out-Null
           Copy-Item "$env:BIN" "dist/$env:ASSET/"
           Copy-Item LICENSE, README.md "dist/$env:ASSET/"
+          Copy-Item src/libsmfc/LICENSE "dist/$env:ASSET/licenses/libsmfc-LICENSE.txt"
+          Copy-Item src/sf2cute-0.2/LICENSE "dist/$env:ASSET/licenses/sf2cute-LICENSE.txt"
           Compress-Archive -Path "dist/$env:ASSET" -DestinationPath "dist/$env:ASSET.zip"
 
       - name: Upload build artifact

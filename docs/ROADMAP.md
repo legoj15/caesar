@@ -57,14 +57,13 @@ A single CMake build that works on current (2026) toolchains.
       readable `.log` (the analysis CSV): its first column echoes the input path
       as spelled on the command line (I gave different paths per box), and it is
       written in text mode so line endings are CRLF vs LF — both expected; after
-      normalising those two, the logs hash-match exactly. Note: GCC surfaced a
-      `-Wmaybe-uninitialized` that MSVC hid — `Cwav.cpp:82` default-constructs
-      `CwavChan chan;` (not `chan{}`), so `DspCoeffs`/`DspCntx`/`DspLoopCntx` are
-      copied uninitialised into the channel vector. It is harmless today (those
-      fields are overwritten from the file before use in codec 2 and unused in
-      codec 0/1 — hence the byte-identical `.wav`), but it is real UB; the
-      one-token fix `CwavChan chan{};` value-initialises with identical output and
-      should be folded in. **macOS/Clang (libc++) remains untested** — its libc++
+      normalising those two, the logs hash-match exactly. Note: GCC surfaced two
+      `-Wmaybe-uninitialized` that MSVC hid — `Cwav.cpp` default-constructed
+      `CwavChan chan;` and `Cbnk.cpp` `CbnkInst inst;` (not `{}`), copying
+      uninitialised members into the channel/instrument vectors. Harmless in
+      practice (the fields are overwritten before use, hence the byte-identical
+      output), but real UB; **both fixed** to `chan{}` / `inst{}` in the v0.5.0
+      hardening pass. **macOS/Clang (libc++) remains untested** — its libc++
       (vs libstdc++) is the most likely place a latent `std::filesystem` / float-
       formatting / `memcpy` issue would surface. Still no Linux/macOS CMake preset
       (CI can configure without one, as done here).
