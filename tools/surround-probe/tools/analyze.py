@@ -125,7 +125,10 @@ def align(a, b, sr):
     fa = a[:seg] - a[:seg].mean()
     fb = b[:seg] - b[:seg].mean()
     xc = np.correlate(fa, fb, mode="full")
-    lag = int(np.argmax(np.abs(xc)) - (seg - 1))
+    # Lock onto the IN-PHASE (positive) correlation peak, not argmax(|xc|):
+    # for a pure tone the latter can latch the anti-phase (negative) peak and
+    # then report a spurious ~+6 dB "difference" for two identical signals.
+    lag = int(np.argmax(xc) - (seg - 1))
     if lag > 0:
         b2 = np.concatenate([np.zeros(lag), b])[:a.size]
     elif lag < 0:

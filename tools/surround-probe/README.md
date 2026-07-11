@@ -17,37 +17,44 @@ the real console to close that gap. It settles **Part A** (the DSP physics via
 `ndspChnSetMix` routing); the register-level **Part B** (dumping live
 `gain[3][4]` while a real sequence plays) is intentionally out of scope.
 
-## What it does
+## What it does (v2)
 
-Plays a steady **440 Hz mono sine at the DSP-native 32728 Hz** (no resampler in
-the path) on one NDSP channel, and lets you flip, live:
+Plays a periodic, band-limited **Schroeder-phase pink multitone** (100 Hz–14 kHz)
+at the DSP-native 32728 Hz (no resampler), embedded as `source/probe_buf.h`. The
+one-button **AUTO run** (d-pad RIGHT) plays a 10-segment matrix hands-off as one
+continuous recording, hard-panning the source to a single quad corner —
+front-left (FL) vs back-left (BL) — across Stereo / Surround / Mono, with a depth
+positive-control (0x7FFF vs 0xFFFF). Each segment is announced by a countable pip
+burst (segment N = N pips). See [`AUTO-RUN.md`](AUTO-RUN.md).
 
-- **Output mode** (`ndspSetOutputMode`): Stereo / Surround / Mono
-- **Routing**: front-only (`mix[0]=mix[1]=1`) vs rear-only (`mix[2]=mix[3]=1`),
-  or a continuous front↔rear blend
-- **Surround params**: speaker position (SQUARE/WIDE), rear ratio
+Why v2: v1 used a steady, L/R-symmetric 440 Hz tone and mono-summed analysis, and
+came back inconclusive — a centered pure tone is blind to front/back
+virtualization (HRTF coloration + crosstalk), and symmetric routing is collapsed
+by the naive stereo fold. v2 uses broadband content + a single-corner (asymmetric)
+route + strictly per-channel analysis so the effect is resolvable.
 
-On every setting change it drops a **~200 ms silence marker** so separate PC
-recordings of the headphone jack can be sample-aligned. It also displays the
-System Settings sound mode (cfg block `0x00070001`), the live headphone-detect
-state (`DSP_GetHeadphoneStatus`), and the volume-slider level — so you can see
-the OS setting vs the mode the app forces.
+The app also shows the System Settings sound mode (cfg block `0x00070001`), the
+live headphone-detect state, and the volume slider. Manual controls (A corner, X
+mode, Y position, L/R depth) remain for spot checks.
 
-**Hypothesis:** in Stereo, front-only and rear-only null deeply (rear folds into
-front at unity → `span` inaudible); in Surround they do not (the firmware
-virtualizes them → `span` audible). The *relative* gap between the two null
-depths is the proof.
+**Hypothesis:** in Stereo, front (FL) and rear (BL) fold identically → no
+difference; in Surround the front-left/back-left HRTF reshapes the spectrum and
+bleeds crosstalk into R, growing with the depth knob → `span` is audible. The
+*relative* Stereo-vs-Surround gap, gated by the depth control, is the proof.
 
 ## Layout
 
 | Path | What |
 |---|---|
 | `source/main.c`        | the homebrew (single file, libctru) |
+| `source/probe_buf.h`   | embedded broadband probe table (generated; do not hand-edit) |
 | `Makefile`             | devkitARM build (stock 3ds template + SMDH metadata) |
 | `AUTO-RUN.md`          | **the recommended one-recording process** (press RIGHT) |
-| `tools/split_run.py`   | cut one AUTO-run recording into the per-condition WAVs (numpy only) |
-| `tools/analyze.py`     | host-side null-test / difference analyzer (numpy only) |
-| `CAPTURE-PROTOCOL.md`  | manual fallback: step-by-step recording matrix + predictions |
+| `tools/gen_probe.py`   | regenerate `source/probe_buf.h` (Schroeder-phase pink probe) |
+| `tools/split_run.py`   | cut one AUTO-run recording into the per-condition WAVs + `noise_floor.wav` |
+| `tools/analyze_surround.py` | **v2 per-channel verdict** (MAGDEV + crosstalk, depth-gated) |
+| `tools/analyze.py`     | v1 pairwise null/difference diagnostic (numpy only) |
+| `CAPTURE-PROTOCOL.md`  | manual v1 fallback: recording matrix + predictions |
 | `RESULTS-TEMPLATE.md`  | fill-in results sheet |
 
 ## Build
@@ -78,25 +85,23 @@ Then launch it from the Homebrew Launcher.
 
 ## Run & analyze
 
-**Recommended — one hands-off recording.** Follow [`AUTO-RUN.md`](AUTO-RUN.md):
-start the PC recording, press **RIGHT** on the d-pad, and the app plays the whole
-8-condition matrix by itself (~85 s), tagging each segment with a countable pip
-burst. Then cut the single take into the standard files and analyze:
+**Recommended — one hands-off recording** (full details in
+[`AUTO-RUN.md`](AUTO-RUN.md)): set System Settings sound = Surround, start the PC
+recording, press **RIGHT**, let the ~105 s / 10-segment matrix play, stop, save as
+`run.wav`. Then:
 
 ```sh
-python3 tools/split_run.py run.wav                                       # -> the 8 WAVs
-python3 tools/analyze.py stereo_front.wav   stereo_rear.wav   --expect null
-python3 tools/analyze.py surround_front.wav surround_rear.wav --expect differ
-python3 tools/analyze.py stereo_front.wav   surround_front.wav
+python3 tools/split_run.py run.wav        # -> the 10 WAVs + noise_floor.wav
+python3 tools/analyze_surround.py .        # -> per-channel metrics + VERDICT
 ```
 
-This shares one clock across all segments, so the null test aligns
-sample-accurately — the reason to prefer it over separate manual takes. The
-split→analyze chain is verified against a synthetic run; only the console
-capture is left.
+The verdict is relative (Stereo-vs-Surround) and gated by the depth
+positive-control, so a null can be told apart from residual blindness. The whole
+probe→split→analyze chain is validated on a synthetic run (it correctly CONFIRMS a
+simulated effect and REFUTES a null); only the console capture remains.
 
-**Manual fallback.** [`CAPTURE-PROTOCOL.md`](CAPTURE-PROTOCOL.md) records the four
-core captures (Stereo/Surround × Front/Rear) one at a time with the X/A keys —
-use it if you'd rather drive it by hand.
+**Manual / v1 fallback.** [`CAPTURE-PROTOCOL.md`](CAPTURE-PROTOCOL.md) +
+`tools/analyze.py` drive one condition at a time with the tone probe; kept for
+reference but it cannot resolve surround — prefer the AUTO run.
 
 Record the numbers in [`RESULTS-TEMPLATE.md`](RESULTS-TEMPLATE.md).

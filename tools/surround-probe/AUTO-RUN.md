@@ -1,89 +1,88 @@
-# surround-probe — the definitive AUTO run
+# surround-probe v2 — the definitive AUTO run
 
-This is the recommended, low-effort, high-rigor process. Instead of hand-timing
-one capture per condition (see CAPTURE-PROTOCOL.md for that manual fallback), you
-make **one continuous recording** while the app plays the whole condition matrix
-by itself. Because every segment shares one clock, the null test aligns
-sample-accurately — which is exactly what the manual method can't guarantee.
+One hands-off recording answers the question: does the 3DS **Surround** output
+mode actually reposition a voice front vs back — i.e. is the NW4C `span`
+(SurroundPan / 0xD7) command audible on real hardware?
 
-## Why one recording matters
-The headline result is a *null test*: FRONT-only vs REAR-only should cancel to
-near-silence in Stereo and clearly **not** cancel in Surround. A null is ruined by
-even a fraction of a millisecond of misalignment, and two separately-started
-recordings are never that aligned. One take of all conditions removes the problem.
+v1 (a steady, L/R-symmetric 440 Hz mono tone, mono-summed analysis) came back
+inconclusive: a centered pure tone is blind to front/back virtualization, which
+shows up as HRTF spectral coloration and inter-channel **crosstalk**, needing
+BROADBAND content and an OFF-CENTER source. v2 fixes the probe design and the
+analysis; the software chain is validated end-to-end on a synthetic run (it
+correctly CONFIRMS a simulated effect and REFUTES a null).
 
-## What the AUTO run plays
-Press **RIGHT** on the d-pad. The app steps through these 8 segments hands-off.
-Each segment is announced by a **countable pip burst** (segment 3 = 3 pips), then
-~0.6 s of silence, then ~8 s of steady 440 Hz tone:
+## What v2 does differently
+- **Signal**: a periodic, band-limited (100 Hz–14 kHz) Schroeder-phase pink
+  multitone, embedded in the app (`source/probe_buf.h`, made by
+  `tools/gen_probe.py`). Periodic ⇒ the wave buffer loops seamlessly and every
+  recorded segment holds the same realization (the analysis is power-spectrum
+  based, so per-segment phase offsets are harmless).
+- **Routing**: the source is hard-panned to ONE quad corner — front-left (FL)
+  vs back-left (BL). Same side, so a naive stereo fold makes them identical in
+  Stereo but the front-left/back-left HRTF makes them differ in Surround, and
+  the R output channel becomes a clean crosstalk meter.
+- **Depth positive-control**: the matrix includes 0x7FFF and 0xFFFF depth rows
+  so a null can be told apart from residual blindness (a real effect grows with
+  the depth knob).
 
-| Seg | Pips | Output mode | Routing | Pos    | Split file                |
-|-----|------|-------------|---------|--------|---------------------------|
-| 1   | ●    | STEREO      | FRONT   | SQUARE | `stereo_front.wav`        |
-| 2   | ●●   | STEREO      | REAR    | SQUARE | `stereo_rear.wav`         |
-| 3   | ●●●  | SURROUND    | FRONT   | SQUARE | `surround_front.wav`      |
-| 4   | ●●●● | SURROUND    | REAR    | SQUARE | `surround_rear.wav`       |
-| 5   | ×5   | SURROUND    | FRONT   | WIDE   | `surround_front_wide.wav` |
-| 6   | ×6   | SURROUND    | REAR    | WIDE   | `surround_rear_wide.wav`  |
-| 7   | ×7   | MONO        | FRONT   | SQUARE | `mono_front.wav`          |
-| 8   | ×8   | MONO        | REAR    | SQUARE | `mono_rear.wav`           |
+## The 10-segment matrix (pip count = segment number)
+| Seg | Pips | Mode | Corner | Pos | Depth | Split file |
+|-----|------|------|--------|-----|-------|------------|
+| 1 | ● | STEREO | FL (front) | SQ | – | `stereo_front.wav` |
+| 2 | ●● | STEREO | BL (back) | SQ | – | `stereo_rear.wav` |
+| 3 | ×3 | SURROUND | FL | SQ | 0x7FFF | `surround_front.wav` |
+| 4 | ×4 | SURROUND | BL | SQ | 0x7FFF | `surround_rear.wav` |
+| 5 | ×5 | SURROUND | FL | SQ | **0xFFFF** | `surround_front_deep.wav` |
+| 6 | ×6 | SURROUND | BL | SQ | **0xFFFF** | `surround_rear_deep.wav` |
+| 7 | ×7 | SURROUND | FL | WIDE | 0x7FFF | `surround_front_wide.wav` |
+| 8 | ×8 | SURROUND | BL | WIDE | 0x7FFF | `surround_rear_wide.wav` |
+| 9 | ×9 | MONO | FL | SQ | – | `mono_front.wav` |
+| 10 | ×10 | MONO | BL | SQ | – | `mono_rear.wav` |
 
-Whole run is ~85 s. Surround params stay at ndsp defaults (depth 0x7FFF,
-rear 0x8000); the rear-ratio sweep stays manual (it's a continuum — see the
-optional section of CAPTURE-PROTOCOL.md).
+Whole run ≈ 105 s.
 
 ## Do this
-1. Cable the 3DS **headphone jack** to a **line input**. Recorder at **48 kHz,
-   stereo, 24-bit** (24-bit gives a deeper measurable null floor than 16).
-2. Set the 3DS **volume slider to ~60–70% and DO NOT touch it again.** Same for
-   the interface input gain. The loudest moment is a Stereo front tone — make sure
-   even that peaks around −6 dBFS so nothing clips.
-3. **Start the PC recording.** Then press **RIGHT** on the 3DS.
-4. Leave it alone for the full ~85 s. The top screen shows `AUTO n/8` and the
-   current phase; it returns to "idle (manual)" when done.
-5. **Stop the recording.** Save it as `run.wav` in the `surround-probe` folder.
-   (LEFT aborts mid-run if you need to restart; just re-record from step 3.)
+1. **Set System Settings → Sound → output to `Surround`** before capturing. The
+   app forces the ndsp mode itself, but matching System Settings removes any
+   firmware gating ambiguity. The top screen shows the System Settings value —
+   confirm it reads `SURROUND` during the take.
+2. Cable the 3DS **headphone jack → line input**; recorder **48 kHz, 24-bit,
+   stereo**. Volume slider ~60–70 % and input gain so the loudest peak sits ~−6
+   dBFS — then **do not touch either again**.
+3. **Start the PC recording**, then press **RIGHT** on the 3DS. Leave it for the
+   full ≈105 s (top screen shows `AUTO n/10`); it returns to "idle" when done.
+   LEFT aborts if you need to restart.
+4. **Stop the recording**, save as `run.wav` in the `surround-probe` folder.
 
-Record it **twice** if you can: once with headphones/target plugged as normal,
-and — for the headphone-coefficient question — note that recording *from the jack*
-always reads as "plugged in" (the app shows the live state). A true
-plugged-vs-unplugged test needs mic'ing the speakers; treat that as a later,
-lower-rigor experiment.
+Recording from the jack always reads as "headphones inserted"; a true
+plugged-vs-unplugged (speaker) comparison is a separate, lower-rigor experiment.
 
 ## Then split + analyze
 From the `surround-probe` folder (needs `python3` + numpy):
 
 ```
-python3 tools/split_run.py run.wav
+python3 tools/split_run.py run.wav        # -> the 10 WAVs + noise_floor.wav
+python3 tools/analyze_surround.py .        # -> per-channel metrics + VERDICT
 ```
 
-That writes the 8 files above. Now the standard analysis (identical to the manual
-protocol):
+`analyze_surround.py` computes, per output mode, comparing the FRONT vs REAR
+capture: **D** (front-vs-rear spectral reshaping, level-independent) and
+**XTALK** (energy bleeding into the silent channel), and prints a verdict.
 
-```
-# THE headline test — does routing matter in each mode?
-python3 tools/analyze.py stereo_front.wav   stereo_rear.wav   --expect null
-python3 tools/analyze.py surround_front.wav surround_rear.wav --expect differ
+## What confirms / refutes
+- **CONFIRMED** (span is audible in Surround): stereo front-vs-rear is flat
+  (D_stereo ≤ 1 dB), and in Surround either the crosstalk lifts ≥ 10 dB above
+  the stereo floor **or** the spectrum reshapes ≥ 3 dB front-vs-rear — **and the
+  effect grows/holds at 0xFFFF depth** (the positive control).
+- **REFUTED** (headphone-surround does not reposition front/back): no reshaping,
+  no crosstalk, no growth with depth → a level/EQ enhancement or a speaker-only
+  effect; `span` would be inaudible via headphones.
+- **MONO** front-vs-rear must null (quad collapse sanity).
 
-# Does Surround color even a front-only voice vs plain Stereo?
-python3 tools/analyze.py stereo_front.wav   surround_front.wav
+Paste the `analyze_surround.py` output into `RESULTS-TEMPLATE.md` and bring it
+back to the caesar project — it closes the "Surround-mode A/B probe" roadmap
+item and settles the `span` verdict in `docs/HISTORY.md`.
 
-# Secondary: speaker-position effect
-python3 tools/analyze.py surround_front.wav surround_front_wide.wav
-
-# Sanity: Mono routing should be identical
-python3 tools/analyze.py mono_front.wav     mono_rear.wav     --expect null
-```
-
-## What confirms the hypothesis
-- **stereo_front vs stereo_rear → deep null** (< −25 dB, likely much deeper). Rear
-  folds into front at unity → routing inaudible → `span` is a no-op in Stereo/Mono.
-- **surround_front vs surround_rear → no/shallow null** (> −15 dB). The virtualizer
-  repositions the voice → routing audible → `span` is real in Surround.
-- **The decisive evidence is RELATIVE:** Stereo must null *far deeper* than
-  Surround. That gap is the proof, more than either absolute number.
-- **stereo_front vs surround_front** difference-spectrum = the fingerprint of the
-  Surround fold-down filter, which the future caesar player needs to reproduce.
-
-Paste the analyze.py outputs into RESULTS-TEMPLATE.md and bring it back to the
-caesar project — it closes the "Surround-mode A/B probe" item on the roadmap.
+*(The old one-condition-at-a-time manual method is still in
+[`CAPTURE-PROTOCOL.md`](CAPTURE-PROTOCOL.md) as a fallback; it uses the v1
+tone/analysis and cannot resolve surround — prefer the AUTO run above.)*
