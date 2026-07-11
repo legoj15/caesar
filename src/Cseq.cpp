@@ -204,6 +204,75 @@ static set<uint32_t> ReachableNotes(const map<uint32_t, CseqCmd>& commands, bool
 	return reaches;
 }
 
+// The set of track indices this entry uses, marked into trackUsed[16]. These
+// archives pack many independent sequences into one shared DATA blob, so the
+// tracks are gathered by following only the control flow reachable from this
+// entry's start offset -- calls, jumps, conditional branches, and the tracks
+// opened by 0x88 -- until each path ends at Fin/Return. A bank-wide scan would
+// fold in OpenTracks belonging to unrelated entries: for a one-track sound
+// effect sharing a bank with 16-track songs that wrongly reports 16 tracks in
+// use, which would relocate track 9 or emit a rhythm-off SysEx and materialise
+// empty SMF tracks the old converter never wrote. Track 0 (the entry's own
+// start) is always in use. Over-approximates only along dead conditional
+// branches, which is harmless for channel assignment.
+static void collectEntryTracks(const map<uint32_t, CseqCmd>& commands, uint32_t startOffset, bool trackUsed[16])
+{
+	trackUsed[0] = true;
+
+	set<uint32_t> visited;
+	vector<uint32_t> stack;
+	stack.push_back(startOffset);
+
+	while (!stack.empty())
+	{
+		auto it = commands.find(stack.back());
+		stack.pop_back();
+
+		while ((it != commands.end()) && !visited.count(it->first))
+		{
+			visited.insert(it->first);
+
+			const CseqCmd& cmd = it->second;
+			auto nextIt = next(it, 1);
+
+			if (!cmd.Extended && (cmd.Cmd == 0x88))
+			{
+				if (!cmd.Args.empty() && (cmd.Args[0] >= 0) && (cmd.Args[0] < 16))
+				{
+					trackUsed[cmd.Args[0]] = true;     // OpenTrack: this index plays
+				}
+				if (cmd.Args.size() >= 2)
+				{
+					stack.push_back(cmd.Args[1]);      // explore the opened track
+				}
+				it = nextIt;
+			}
+			else if (!cmd.Extended && (cmd.Cmd == 0x89) && (cmd.Suffix3 != SuffixType::If))
+			{
+				it = commands.find(cmd.Args[0]);       // unconditional jump
+			}
+			else if (!cmd.Extended && (cmd.Cmd == 0x89) && (cmd.Suffix3 == SuffixType::If))
+			{
+				stack.push_back(cmd.Args[0]);          // conditional: the branch and
+				it = nextIt;                           // the fall-through
+			}
+			else if (!cmd.Extended && (cmd.Cmd == 0x8A))
+			{
+				stack.push_back(cmd.Args[0]);          // call the subroutine, and
+				it = nextIt;                           // continue after it returns
+			}
+			else if (!cmd.Extended && ((cmd.Cmd == 0xFF) || (cmd.Cmd == 0xFD)))
+			{
+				break;                                 // Fin / Return: path ends
+			}
+			else
+			{
+				it = nextIt;
+			}
+		}
+	}
+}
+
 bool Cseq::Convert(uint32_t startOffset)
 {
 	uint8_t* pos = Data;
@@ -589,6 +658,64 @@ bool Cseq::Convert(uint32_t startOffset)
 		i = commands.begin();
 	}
 
+	// MIDI channel assignment. The CSEQ track index has been used directly as the
+	// MIDI channel on every emitted event, so a sequence's 10th track (index 9)
+	// lands on channel 9 -- the channel GM/GS players reserve for percussion --
+	// and its melodic notes render as a drum kit, or as silence since caesar SF2s
+	// carry no bank-128 drum preset. Decouple the channel from the SMF track
+	// number (which stays equal to the track index, so the file's track layout is
+	// unchanged and any sequence that never uses track 9 converts byte-identically):
+	// keep every channel equal to its index, but relocate track 9 to a free
+	// channel whenever this entry leaves one. Only when the entry uses all 16
+	// tracks -- no channel is free -- does track 9 stay on channel 9, and then a
+	// GS "rhythm part off" SysEx (emitted lazily below, at track 9's first note)
+	// keeps it melodic on GS-aware players (FluidSynth). trackUsed is scoped to
+	// this entry (from i->first, the resolved start), not the shared bank.
+	static constexpr int DRUM_CHANNEL = 9;
+
+	bool trackUsed[16] = { false };
+	collectEntryTracks(commands, i->first, trackUsed);
+
+	int channelOf[16];
+
+	for (int t = 0; t < 16; ++t)
+	{
+		channelOf[t] = t;
+	}
+
+	bool rhythmOffPending = false;
+
+	if (trackUsed[DRUM_CHANNEL])
+	{
+		int freeChannel = -1;
+
+		for (int c = 0; c < 16; ++c)
+		{
+			if (!trackUsed[c])
+			{
+				freeChannel = c;
+				break;
+			}
+		}
+
+		if (freeChannel >= 0)
+		{
+			channelOf[DRUM_CHANNEL] = freeChannel;
+		}
+		else
+		{
+			rhythmOffPending = true;
+		}
+	}
+
+	// Roland GS DT1 (F0 41 10 42 12 <addr> <data> <sum> F7): address 40 10 15 is
+	// part 10's "Use for Rhythm Part", data 00 = OFF (a normal melodic part);
+	// checksum 1B = (128 - ((0x40+0x10+0x15+0x00) & 0x7F)) & 0x7F. Emitted lazily
+	// (see the note handler), just before track 9's first note, so it never
+	// materialises an SMF track the note itself would not have created.
+	static const uint8_t gsRhythmPartOff[] =
+		{ 0xF0, 0x41, 0x10, 0x42, 0x12, 0x40, 0x10, 0x15, 0x00, 0x1B, 0xF7 };
+
 	// End the current track and move to the next allocated one (registered by an
 	// earlier 0x88 in trackOffsets). Shared by three "this track is done here"
 	// cases: Fin (0xFF), a whole-song loop's loop-back, and a stray Return.
@@ -625,6 +752,10 @@ bool Cseq::Convert(uint32_t startOffset)
 		// Position of the command now being emitted, for any dropped-event notice.
 		uint8_t* here = Data + dataOffset + 8 + i->first;
 
+		// MIDI channel for this track's channel-voice messages (see channelOf).
+		// The SMF track number stays == track, so only the channel nibble moves.
+		int chan = channelOf[track];
+
 		if (!i->second.Label.empty())
 		{
 			smfInsertMetaText(smf, absTime, track, SMF_META_TEXT, i->second.Label.c_str());
@@ -634,11 +765,25 @@ bool Cseq::Convert(uint32_t startOffset)
 		{
 			if (i->second.Cmd < 0x80)
 			{
+				// This entry saturates all 16 tracks, so track 9 could not be
+				// relocated off the GM drum channel; emit the GS rhythm-part-off
+				// SysEx immediately before track 9's first note. Doing it lazily
+				// (rather than up front) means a track 9 that is opened but plays
+				// no note never gains the SysEx or a stray SMF track, so such a
+				// sequence stays byte-identical. The SysEx is inserted first at
+				// this tick, so libsmfc's stable equal-tick ordering keeps it
+				// ahead of the note.
+				if (rhythmOffPending && (track == DRUM_CHANNEL))
+				{
+					smfInsertSysex(smf, absTime, 0, track, gsRhythmPartOff, sizeof(gsRhythmPartOff));
+					rhythmOffPending = false;
+				}
+
 				// key is Cmd (< 0x80, always valid); a note is only rejected on its
 				// velocity. Velocity 0 is a legitimate silent note (the writer skips
 				// it and timing below still advances), so surface a drop only when
 				// the velocity is genuinely out of MIDI range, not merely zero.
-				if (!smfInsertNote(smf, absTime, track, track, i->second.Cmd, i->second.Args[0], i->second.Args[1])
+				if (!smfInsertNote(smf, absTime, chan, track, i->second.Cmd, i->second.Args[0], i->second.Args[1])
 					&& i->second.Args[0] > 127)
 				{
 					Common::Warning(here, "note velocity out of MIDI range; note dropped",
@@ -676,9 +821,9 @@ bool Cseq::Convert(uint32_t startOffset)
 				// A Rnd/Var prefix can make Args[0] negative; a negative value keeps
 				// its sign through /128 and %128, so the emit* wrappers still surface
 				// anything the writer rejects.
-				emitCtrl(smfInsertControl(smf, absTime, track, track, SMF_CONTROL_BANKSELM, (i->second.Args[0] / 128) % 128), here);
-				emitCtrl(smfInsertControl(smf, absTime, track, track, SMF_CONTROL_BANKSELL, 0), here);
-				emitProgram(smfInsertProgram(smf, absTime, track, track, i->second.Args[0] % 128), here);
+				emitCtrl(smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_BANKSELM, (i->second.Args[0] / 128) % 128), here);
+				emitCtrl(smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_BANKSELL, 0), here);
+				emitProgram(smfInsertProgram(smf, absTime, chan, track, i->second.Args[0] % 128), here);
 			}
 			else if (i->second.Cmd == 0x88)
 			{
@@ -769,7 +914,7 @@ bool Cseq::Convert(uint32_t startOffset)
 			}
 			else if (i->second.Cmd == 0xB2)
 			{
-				smfInsertControl(smf, absTime, track, track, i->second.Args[0] ? SMF_CONTROL_MONO : SMF_CONTROL_POLY, 0);
+				smfInsertControl(smf, absTime, chan, track, i->second.Args[0] ? SMF_CONTROL_MONO : SMF_CONTROL_POLY, 0);
 			}
 			else if (i->second.Cmd == 0xB3)
 			{
@@ -801,11 +946,11 @@ bool Cseq::Convert(uint32_t startOffset)
 			}
 			else if (i->second.Cmd == 0xC0)
 			{
-				emitCtrl(smfInsertControl(smf, absTime, track, track, SMF_CONTROL_PANPOT, i->second.Args[0]), here);
+				emitCtrl(smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_PANPOT, i->second.Args[0]), here);
 			}
 			else if (i->second.Cmd == 0xC1)
 			{
-				emitCtrl(smfInsertControl(smf, absTime, track, track, SMF_CONTROL_VOLUME, i->second.Args[0]), here);
+				emitCtrl(smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_VOLUME, i->second.Args[0]), here);
 			}
 			else if (i->second.Cmd == 0xC2)
 			{
@@ -813,19 +958,19 @@ bool Cseq::Convert(uint32_t startOffset)
 			}
 			else if (i->second.Cmd == 0xC3)
 			{
-				smfInsertControl(smf, absTime, track, track, SMF_CONTROL_RPNM, 0);
-				smfInsertControl(smf, absTime, track, track, SMF_CONTROL_RPNL, 2);
-				emitCtrl(smfInsertControl(smf, absTime, track, track, SMF_CONTROL_DATAENTRYM, i->second.Args[0] + 64), here);
+				smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_RPNM, 0);
+				smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_RPNL, 2);
+				emitCtrl(smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_DATAENTRYM, i->second.Args[0] + 64), here);
 			}
 			else if (i->second.Cmd == 0xC4)
 			{
-				emitCtrl(smfInsertPitchBend(smf, absTime, track, track, i->second.Args[0] * 64), here);
+				emitCtrl(smfInsertPitchBend(smf, absTime, chan, track, i->second.Args[0] * 64), here);
 			}
 			else if (i->second.Cmd == 0xC5)
 			{
-				smfInsertControl(smf, absTime, track, track, SMF_CONTROL_RPNM, 0);
-				smfInsertControl(smf, absTime, track, track, SMF_CONTROL_RPNL, 0);
-				emitCtrl(smfInsertControl(smf, absTime, track, track, SMF_CONTROL_DATAENTRYM, i->second.Args[0]), here);
+				smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_RPNM, 0);
+				smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_RPNL, 0);
+				emitCtrl(smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_DATAENTRYM, i->second.Args[0]), here);
 			}
 			else if (i->second.Cmd == 0xC6)
 			{
@@ -841,15 +986,15 @@ bool Cseq::Convert(uint32_t startOffset)
 			}
 			else if (i->second.Cmd == 0xC9)
 			{
-				emitCtrl(smfInsertControl(smf, absTime, track, track, SMF_CONTROL_PORTAMENTOCTRL, i->second.Args[0]), here);
+				emitCtrl(smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_PORTAMENTOCTRL, i->second.Args[0]), here);
 			}
 			else if (i->second.Cmd == 0xCA)
 			{
-				emitCtrl(smfInsertControl(smf, absTime, track, track, SMF_CONTROL_MODULATION, i->second.Args[0]), here);
+				emitCtrl(smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_MODULATION, i->second.Args[0]), here);
 			}
 			else if (i->second.Cmd == 0xCB)
 			{
-				emitCtrl(smfInsertControl(smf, absTime, track, track, SMF_CONTROL_VIBRATORATE, (i->second.Args[0] / 2) + 64), here);
+				emitCtrl(smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_VIBRATORATE, (i->second.Args[0] / 2) + 64), here);
 			}
 			else if (i->second.Cmd == 0xCC)
 			{
@@ -857,23 +1002,23 @@ bool Cseq::Convert(uint32_t startOffset)
 			}
 			else if (i->second.Cmd == 0xCD)
 			{
-				emitCtrl(smfInsertControl(smf, absTime, track, track, SMF_CONTROL_VIBRATODEPTH, (i->second.Args[0] / 2) + 64), here);
+				emitCtrl(smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_VIBRATODEPTH, (i->second.Args[0] / 2) + 64), here);
 			}
 			else if (i->second.Cmd == 0xCE)
 			{
-				smfInsertControl(smf, absTime, track, track, SMF_CONTROL_PORTAMENTO, i->second.Args[0] ? 127 : 0);
+				smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_PORTAMENTO, i->second.Args[0] ? 127 : 0);
 			}
 			else if (i->second.Cmd == 0xCF)
 			{
-				emitCtrl(smfInsertControl(smf, absTime, track, track, SMF_CONTROL_PORTAMENTOTIME, i->second.Args[0]), here);
+				emitCtrl(smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_PORTAMENTOTIME, i->second.Args[0]), here);
 			}
 			else if (i->second.Cmd == 0xD0)
 			{
-				emitCtrl(smfInsertControl(smf, absTime, track, track, SMF_CONTROL_ATTACKTIME, (i->second.Args[0] / 2) + 64), here);
+				emitCtrl(smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_ATTACKTIME, (i->second.Args[0] / 2) + 64), here);
 			}
 			else if (i->second.Cmd == 0xD1)
 			{
-				emitCtrl(smfInsertControl(smf, absTime, track, track, SMF_CONTROL_DECAYTIME, (i->second.Args[0] / 2) + 64), here);
+				emitCtrl(smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_DECAYTIME, (i->second.Args[0] / 2) + 64), here);
 			}
 			else if (i->second.Cmd == 0xD2)
 			{
@@ -881,15 +1026,15 @@ bool Cseq::Convert(uint32_t startOffset)
 			}
 			else if (i->second.Cmd == 0xD3)
 			{
-				emitCtrl(smfInsertControl(smf, absTime, track, track, SMF_CONTROL_RELEASETIME, (i->second.Args[0] / 2) + 64), here);
+				emitCtrl(smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_RELEASETIME, (i->second.Args[0] / 2) + 64), here);
 			}
 			else if (i->second.Cmd == 0xD4)
 			{
-				smfInsertControl(smf, absTime, track, track, 116, 0);
+				smfInsertControl(smf, absTime, chan, track, 116, 0);
 			}
 			else if (i->second.Cmd == 0xD5)
 			{
-				emitCtrl(smfInsertControl(smf, absTime, track, track, SMF_CONTROL_EXPRESSION, i->second.Args[0]), here);
+				emitCtrl(smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_EXPRESSION, i->second.Args[0]), here);
 			}
 			else if (i->second.Cmd == 0xD6)
 			{
@@ -909,12 +1054,12 @@ bool Cseq::Convert(uint32_t startOffset)
 				// value in these sequences (observed 0-120 across MeetSound);
 				// clamp defensively so an unexpected value can't push the control
 				// out of MIDI range and get silently dropped by the writer.
-				smfInsertControl(smf, absTime, track, track, SMF_CONTROL_REVERB, clamp(i->second.Args[0], 0, 127));
+				smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_REVERB, clamp(i->second.Args[0], 0, 127));
 			}
 			else if (i->second.Cmd == 0xDA)
 			{
 				// FX send B -> chorus depth (CC93), same 0-127 convention.
-				smfInsertControl(smf, absTime, track, track, SMF_CONTROL_CHORUS, clamp(i->second.Args[0], 0, 127));
+				smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_CHORUS, clamp(i->second.Args[0], 0, 127));
 			}
 			else if (i->second.Cmd == 0xDB)
 			{
@@ -930,11 +1075,11 @@ bool Cseq::Convert(uint32_t startOffset)
 			}
 			else if (i->second.Cmd == 0xDF)
 			{
-			emitCtrl(smfInsertControl(smf, absTime, track, track, 64, i->second.Args[0]), here);
+			emitCtrl(smfInsertControl(smf, absTime, chan, track, 64, i->second.Args[0]), here);
 			}
 			else if (i->second.Cmd == 0xE0)
 			{
-				emitCtrl(smfInsertControl(smf, absTime, track, track, SMF_CONTROL_VIBRATODELAY, (i->second.Args[0] / 2) + 64), here);
+				emitCtrl(smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_VIBRATODELAY, (i->second.Args[0] / 2) + 64), here);
 			}
 			else if (i->second.Cmd == 0xE1)
 			{
@@ -942,7 +1087,7 @@ bool Cseq::Convert(uint32_t startOffset)
 			}
 			else if (i->second.Cmd == 0xE3)
 			{
-				emitCtrl(smfInsertControl(smf, absTime, track, track, SMF_CONTROL_VIBRATODELAY, i->second.Args[0]), here);
+				emitCtrl(smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_VIBRATODELAY, i->second.Args[0]), here);
 			}
 			else if (i->second.Cmd == 0xE4)
 			{
@@ -954,7 +1099,7 @@ bool Cseq::Convert(uint32_t startOffset)
 			}
 			else if (i->second.Cmd == 0xFC)
 			{
-				smfInsertControl(smf, absTime, track, track, 117, 0);
+				smfInsertControl(smf, absTime, chan, track, 117, 0);
 			}
 			else if (i->second.Cmd == 0xFD)
 			{

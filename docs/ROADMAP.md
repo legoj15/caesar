@@ -70,20 +70,11 @@ should show every `.sf2`/`.wav`/`.log`/raw dump unchanged and `.mid` diffs
 confined to the affected sequences, which is itself the verification signal.
 Ranked by priority:
 
-- [ ] **Fix the GM percussion-channel collision.** *(Highest priority — a
-      long-standing, user-confirmed pain: affected songs could previously only
-      be salvaged by working around the drum channel in FluidSynth.)* The CSEQ
-      track index is used directly as the MIDI channel on every emitted event,
-      and channel 9 (1-based "channel 10") is reserved for drums by GM/GS
-      players — so the 10th track of any large sequence renders as a drum kit,
-      or as silence, since caesar SF2s carry no bank-128 drum preset. A corpus
-      scan found **418 of 12,308 MIDIs with melodic note-ons on channel 9**
-      (697 sequences use ≥ 10 channels), including Animal Crossing's museum and
-      Kapp'n BGM and all of 3DS Photos' music. Fix: remap tracks to skip
-      channel 9 whenever ≤ 15 channels are in use; for sequences using all 16,
-      additionally emit the GS "rhythm part off" SysEx for part 10 (honored by
-      FluidSynth) since no free channel exists. Ear repro:
-      `GardenSound\BANK_BGM_IND_MUSEUM\SEQ_BGM_IND_MUSEUM.mid`.
+- [x] **Fixed the GM percussion-channel collision** — track 9 now relocates off
+      GM channel 9 to a free channel (or, when all 16 tracks are used, stays put
+      with a GS "rhythm part off" SysEx for part 10); the SMF track layout is
+      unchanged, so sequences without a 10th track are byte-identical. Full
+      narrative and A/B in [HISTORY.md](HISTORY.md#fixed-bugs).
 - [ ] **Triage the ~1,020 surfaced controller/parameter drops.** Clamp plain
       out-of-range volume/pan/expression values (`Uint8` 128-255) to 127
       instead of dropping them; keep dropping-with-notice values that are
@@ -217,10 +208,10 @@ Hard-won conclusions — do not re-litigate without new evidence. Full stories i
 Fixed bugs and their verification stories are in
 [HISTORY.md](HISTORY.md#fixed-bugs).
 
-The MIDI-converter discrepancies found in the 2026-07-10 post-release audit
-(GM drum-channel collision, controller-range drops, mis-wired `0xE3`/`0xE0`,
-discarded loop counts, tempo-zero UB) are scoped as work items under
-**v0.5.1** above rather than listed here twice.
+The remaining MIDI-converter discrepancies found in the 2026-07-10 post-release
+audit (controller-range drops, mis-wired `0xE3`/`0xE0`, discarded loop counts,
+tempo-zero UB) are scoped as work items under **v0.5.1** above rather than
+listed here twice. (The GM drum-channel collision from that audit is fixed.)
 
 - **Bank note fields are read at hardcoded offsets** (`Cbnk.cpp`, the
   note-parse loop). The format actually locates the ADSHR envelope through a

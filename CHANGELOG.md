@@ -30,6 +30,18 @@ House rules:
   (tool-suite design); `docs/ROADMAP.md` slimmed to goals + open work, with a
   v0.5.1 MIDI-fidelity patch scoped. (docs only — output-identical)
 
+### Fixed
+
+- GM percussion-channel collision: the CSEQ track index was used directly as the
+  MIDI channel, so a sequence's 10th track (index 9) landed on channel 9 — the
+  channel GM/GS players reserve for drums — and its melodic notes rendered as a
+  drum kit or (with no drum-bank preset in the SF2) as silence. The MIDI channel
+  is now decoupled from the SMF track number: track 9 is relocated to a free
+  channel, and only when all 16 tracks are in use does it stay on channel 9,
+  with a Roland GS "Use for Rhythm Part: OFF" SysEx for part 10 emitted so
+  GS-aware players (e.g. FluidSynth) treat it melodically. (changes `.mid` only;
+  sequences that never open a 10th track are byte-identical)
+
 ## [0.5.0] — 2026-07-10
 
 The first maintained release, continuing

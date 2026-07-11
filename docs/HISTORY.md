@@ -643,6 +643,39 @@ conflict with caesar's GPL-3.0.
 Concrete defects found while surveying and evolving the code, since fixed.
 Still-open defects are tracked under "Known bugs" in ROADMAP.md.
 
+- **GM percussion-channel collision: melodic 10th tracks rendered as drums**
+  (`Cseq.cpp`, the sequence-to-MIDI walk) (*fixed 2026-07-10*). Every emitted
+  MIDI event used the CSEQ track index directly as the MIDI channel — the channel
+  and SMF-track arguments of every `smfInsert*` were passed the same `track`.
+  Channel 9 is the GM/GS percussion channel, so a sequence's 10th track (index 9)
+  played as a drum kit or, since caesar SF2s carry no bank-128 drum preset, as
+  silence. The channel is now decoupled from the SMF track number (which stays
+  equal to the index, so the file's track layout is unchanged): `channelOf[]` is
+  the identity map except track 9, which relocates to the lowest channel the
+  entry leaves free. Only when the entry genuinely uses all 16 tracks — no free
+  channel — does track 9 stay on channel 9, and then a Roland GS "Use for Rhythm
+  Part: OFF" SysEx for part 10 (`F0 41 10 42 12 40 10 15 00 1B F7`) is emitted
+  lazily, just before that track's first note, so GS-aware players (FluidSynth)
+  treat channel 9 melodically. The tracks an entry uses are gathered by
+  control-flow reachability from the entry's own start offset
+  (`collectEntryTracks`), **not** a scan of the shared bank's whole command map:
+  the first attempt used the bank-wide scan and the full-corpus A/B caught the
+  regression it caused — a one-track sound-effect entry sharing a bank whose
+  siblings collectively open all 16 tracks was told "16 tracks used," emitting a
+  spurious rhythm-off SysEx that materialised nine empty SMF tracks (a 1-track
+  MIDI became 10). An independent 13-agent adversarial code review reached the
+  same root cause in parallel and confirmed the rest of the change (identity map,
+  channel kept in 0–15 so the port stays 0, master-volume/tempo/meta/marker/
+  end-timing calls left on the SMF-track argument) was sound. Verified with a
+  byte-identical old-vs-new A/B over all 81 corpus archives (241,893 files):
+  every `.sf2`/`.wav`/`.log`/raw dump is byte-identical, no file is added or
+  removed, and of 37,864 MIDIs the 1,004 that changed are each identical to the
+  old output except that channel 9's events moved to a free channel — verified
+  event-by-event by an independent SMF parser (only channel 9 ever remaps,
+  note-on totals preserved). 85,111 melodic note-ons were rescued off the drum
+  channel and 87 all-16-track sequences took the GS-SysEx path. Ear repro:
+  `GardenSound\BANK_BGM_IND_MUSEUM\SEQ_BGM_IND_MUSEUM.mid`, whose 65 channel-9
+  notes now play on channel 13.
 - **Group file-table desync** (`Cgrp.cpp`, the file-record loop) (*fixed
   2026-07-09*). Each file record is a fixed 16 bytes — `Id`, a presence marker,
   an offset, and a length — but the offset was read inside a short-circuiting
