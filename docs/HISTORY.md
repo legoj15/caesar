@@ -676,6 +676,18 @@ Still-open defects are tracked under "Known bugs" in ROADMAP.md.
   channel and 87 all-16-track sequences took the GS-SysEx path. Ear repro:
   `GardenSound\BANK_BGM_IND_MUSEUM\SEQ_BGM_IND_MUSEUM.mid`, whose 65 channel-9
   notes now play on channel 13.
+- **`OpenTrack` index out-of-bounds write** (`Cseq.cpp`, the `0x88` handler)
+  (*fixed 2026-07-11*). The handler stored a sibling track's start offset as
+  `trackOffsets[Args[0]]`, but `Args[0]` is a full byte while the array holds 16
+  entries; an index ≥ 16 wrote past it onto the stack. Found while answering
+  "does any sequence use more than 16 tracks?" during the channel-collision work:
+  an instrumented pass over all 81 archives found **zero** `OpenTrack` opcodes
+  with an index ≥ 16, confirming the format's 16-track cap (the `0xFE` enable
+  mask is 16-bit) and that the write is safe on every real archive — but a
+  malformed one could corrupt the stack. Now guarded like the other bounds
+  checks from the v0.5.0 hardening pass, emitting a default-visible
+  "OpenTrack index out of range" notice instead. Output-identical on the corpus
+  (the guarded branch is never taken).
 - **Group file-table desync** (`Cgrp.cpp`, the file-record loop) (*fixed
   2026-07-09*). Each file record is a fixed 16 bytes — `Id`, a presence marker,
   an offset, and a length — but the offset was read inside a short-circuiting

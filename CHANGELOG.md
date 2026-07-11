@@ -32,6 +32,12 @@ House rules:
 
 ### Fixed
 
+- Out-of-bounds guard on the sequence `OpenTrack` (`0x88`) handler: the track
+  index is a full byte but the format has only 16 tracks (the `0xFE` enable mask
+  is 16-bit), and an index ≥ 16 wrote past the 16-entry `trackOffsets` stack
+  array. No real archive uses such an index (verified across the corpus), so this
+  only hardens against malformed input and surfaces it as a skipped-content
+  notice. (output-identical)
 - GM percussion-channel collision: the CSEQ track index was used directly as the
   MIDI channel, so a sequence's 10th track (index 9) landed on channel 9 — the
   channel GM/GS players reserve for drums — and its melodic notes rendered as a

@@ -827,7 +827,21 @@ bool Cseq::Convert(uint32_t startOffset)
 			}
 			else if (i->second.Cmd == 0x88)
 			{
-				trackOffsets[i->second.Args[0]] = i->second.Args[1];
+				// OpenTrack: register a sibling track's start offset. The track
+				// index is a full byte, but the format only has 16 tracks (the
+				// enable mask at 0xFE is 16-bit, and every track array is [16]).
+				// No real archive uses an index >= 16 (verified across the corpus),
+				// so guard the array write rather than let a malformed one corrupt
+				// the stack, and surface it like other skipped content.
+				if (i->second.Args[0] < 16)
+				{
+					trackOffsets[i->second.Args[0]] = i->second.Args[1];
+				}
+				else
+				{
+					Common::Warning(here, "OpenTrack index out of range (>= 16); track ignored",
+						"OpenTrack index out of range");
+				}
 			}
 			else if (i->second.Cmd == 0x89)
 			{
