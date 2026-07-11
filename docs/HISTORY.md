@@ -643,6 +643,51 @@ conflict with caesar's GPL-3.0.
 Concrete defects found while surveying and evolving the code, since fixed.
 Still-open defects are tracked under "Known bugs" in ROADMAP.md.
 
+- **The two mis-wired vibrato/pitch controls: `0xE3` sweep pitch and `0xE0`
+  mod delay** (`Cseq.cpp`, the `0xE0`/`0xE3` handlers) (*fixed 2026-07-11*).
+  Implements the second v0.5.1 work item; both commands were emitted as CC78
+  "vibrato delay". `0xE3` is SweepPitch — a signed-16 intra-note pitch ramp in
+  1/64-semitone units that glides from the offset to the note's nominal pitch
+  (confirmed against GotaSequenceLib's sweep implementation), independent of
+  and *additive with* the portamento commands — so CC78 was doubly wrong:
+  mis-targeted, and sweeps of two semitones or more (|value| ≥ 128) also fell
+  out of MIDI range, forming the bulk of the census's 1,020 out-of-range
+  drops. No static CC expresses a per-note pitch ramp (the faithful form is a
+  pitch-bend ramp — stage-2 flattening territory; a one-shot bend at note-on
+  was considered and rejected: channel-global, needs resets, collides with
+  real `0xC4` bends), so it now drops with a default-visible "sweep pitch
+  dropped (no MIDI equivalent)" notice. `0xE0` is ModDelay — the per-note
+  delay before the track LFO engages. The research pass *corrected the
+  triage's unit claim*: the argument is in **5 ms units**, not milliseconds
+  (NW4R decomp `snd_MmlParser.cpp`: `lfoParam.delay = arg * 5`, accumulated
+  against real milliseconds in `snd_Lfo.cpp`; NW4C is its documented port, so
+  the exact ×5 is Wii-confirmed, 3DS-presumed — the mapping's shape survives
+  either constant). An instrumented corpus census (4,780 plain events over 40
+  archives) found median arg = 1 (5 ms), p90 = 25 (125 ms), p99 = 100
+  (500 ms), max = 230 (1,150 ms). The old `(x/2)+64` treated the time value
+  as a signed ±64 parameter — meaningless — and pushed delays ≥ 640 ms out of
+  MIDI range entirely. New mapping: `CC78 = 64 + min(ms·63/1000, 63)` with
+  `ms = max(arg, 0)·5`. CC78 is a GM2/XG *relative* control (64 = patch
+  default), and caesar's SF2s program no LFO delay, so 64 is the honest 0 ms
+  baseline; the delay scales into the upper half, saturating at 1 s (above
+  the corpus p99); delays ≤ 15 ms — including the corpus median — collapse to
+  the neutral 64, far below onset-perception thresholds. Rnd/Var-prefixed
+  `0xE0` keeps the old path bit-identically (3 corpus events, values 0–1) so
+  unevaluated stand-ins still drop when out of range rather than being scaled
+  into plausible-looking delays. A 13-agent adversarial review (3 lenses,
+  every finding independently verified) returned zero confirmed findings.
+  Verified with the full-corpus A/B: 257,097 files per tree, all 164 runs
+  exit 0; exactly 1,772 `.mid` files differ and nothing else; an independent
+  SMF event parser proved every difference is CC78-only — 86 events removed
+  (the bogus `0xE3` emissions), 2,233 rescaled, 5 added (the ≥ 640 ms delays
+  the old transform dropped) — matching the census prediction
+  event-for-event, with all note streams untouched. The notice ledger
+  reconciles exactly: "out of range" drops fell 1,020 → 230 (the remainder is
+  unevaluated `Rnd`/`Var` garbage, correct until the convert-time VM), and
+  all 871 sweep-pitch commands now surface under the honest new category.
+  Side finding filed under Known bugs: `0xC9` portamento may under-serve the
+  engine's "also turns portamento on" semantics, pending CC84-interpretation
+  checks.
 - **Out-of-range controller values dropped instead of clamped, and a zero-BPM
   tempo UB** (`Cseq.cpp`, the plain-controller emit sites and the `0xE1`
   handler) (*fixed 2026-07-11*). Implements the first v0.5.1 triage work item.

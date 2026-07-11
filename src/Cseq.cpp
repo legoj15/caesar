@@ -1112,7 +1112,28 @@ bool Cseq::Convert(uint32_t startOffset)
 			}
 			else if (i->second.Cmd == 0xE0)
 			{
-				emitCtrl(smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_VIBRATODELAY, (i->second.Args[0] / 2) + 64), here);
+				if (i->second.Suffix1 == SuffixType::None)
+				{
+					// Mod delay: time from note-on before the track LFO engages,
+					// in 5 ms units (NW4R reads it as lfoParam.delay = arg * 5 ms;
+					// NW4C is its port). CC78 "vibrato delay" is relative to the
+					// patch default (64 = no change), and these SF2s program no
+					// LFO delay, so 64 is the 0 ms baseline: scale the delay into
+					// the upper half, saturating at 1000 ms (corpus p99 = 500 ms,
+					// max = 1150 ms). The old (x/2)+64 treated the time as a
+					// signed +/-64 parameter and pushed delays >= 640 ms out of
+					// MIDI range entirely.
+					int32_t ms = max(i->second.Args[0], 0) * 5;
+
+					smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_VIBRATODELAY, 64 + min(ms * 63 / 1000, 63));
+				}
+				else
+				{
+					// Unevaluated Rnd/Var stand-in: keep the raw-value path so
+					// out-of-range garbage still drops with the notice instead of
+					// being scaled into a plausible-looking delay.
+					emitCtrl(smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_VIBRATODELAY, (i->second.Args[0] / 2) + 64), here);
+				}
 			}
 			else if (i->second.Cmd == 0xE1)
 			{
@@ -1125,7 +1146,15 @@ bool Cseq::Convert(uint32_t startOffset)
 			}
 			else if (i->second.Cmd == 0xE3)
 			{
-				emitCtrl(smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_VIBRATODELAY, i->second.Args[0]), here);
+				// Sweep pitch: a signed intra-note pitch ramp (1/64-semitone
+				// units) that glides from the offset to the note's nominal
+				// pitch, independent of (and additive with) portamento. No
+				// static MIDI control expresses it — the faithful form is a
+				// pitch-bend ramp, which is player/stage-2 territory. It was
+				// previously mis-emitted as CC78 "vibrato delay", where sweeps
+				// of two semitones or more also fell out of MIDI range.
+				Common::Warning(here, "sweep pitch (intra-note pitch ramp) has no MIDI equivalent; dropped",
+					"sweep pitch dropped (no MIDI equivalent)");
 			}
 			else if (i->second.Cmd == 0xE4)
 			{

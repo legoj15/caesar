@@ -38,6 +38,18 @@ House rules:
 
 ### Fixed
 
+- `0xE3` "sweep pitch" — an intra-note pitch ramp — is no longer mis-emitted
+  as CC78 vibrato delay. It has no static MIDI equivalent (the faithful form
+  is a pitch-bend ramp — future-player territory), so it now drops with a
+  default-visible notice. Removes the 86 bogus CC78 events corpus-wide and
+  surfaces all 871 sweep-pitch commands honestly instead of as generic
+  out-of-range drops. (changes `.mid` only in sequences using sweep pitch)
+- `0xE0` mod delay (vibrato onset delay; signed-16 in 5 ms units per the NW4R
+  decomp) now scales into CC78's relative upper half — 64 = no delay,
+  saturating at 1 s, above the corpus's largest real value — replacing the
+  `(x/2)+64` transform that treated the time as a signed ±64 parameter and
+  pushed delays ≥ 640 ms out of MIDI range. (changes `.mid` only in sequences
+  using mod delays ≥ 10 ms)
 - Plain (un-prefixed) out-of-range values for pan, volume, master volume, and
   expression (`Uint8` 128–255) now clamp to 127 and emit — surfaced by a
   default-visible "clamped" approximation notice — instead of being dropped;

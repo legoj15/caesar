@@ -82,14 +82,14 @@ Ranked by priority:
       guard closes the vendored `libsmfcx.c` zero-BPM division UB. Corpus A/B
       byte-identical (82 archives, 257,097 files) — full narrative in
       [HISTORY.md](HISTORY.md#fixed-bugs).
-- [ ] **Fix the two mis-wired vibrato/pitch controls.** `0xE3` (sweep pitch, a
-      signed-16 pitch-sweep amount) is emitted as CC78 "vibrato delay" — a
-      mis-targeted control whose values also routinely exceed 127 and get
-      dropped as part of the ~1,020. Stop emitting the wrong CC (the faithful
-      treatment is a pitch-bend ramp — player/stage-2 territory; until then,
-      drop with an honest notice). Sibling `0xE0` (mod delay, s16
-      **milliseconds**) goes through the Int8-style `(x/2)+64` transform,
-      which is meaningless for millisecond values; scale it sensibly.
+- [x] **Fixed the two mis-wired vibrato/pitch controls** — `0xE3` sweep pitch
+      no longer masquerades as CC78 (it drops with an honest notice until the
+      stage-2 player can render pitch-bend ramps), and `0xE0` mod delay — s16
+      in **5 ms units** per the NW4R decomp, correcting the triage's
+      "milliseconds" — scales into CC78's relative upper half (64 = no delay,
+      saturating at 1 s). A/B: 1,772 `.mid` diffs, every one CC78-only by
+      independent SMF parse; out-of-range drops fell 1,020 → 230. Narrative in
+      [HISTORY.md](HISTORY.md#fixed-bugs).
 - [ ] **Pass finite loop repeat counts through.** `0xD4`/`0xFC` loop pairs are
       emitted as EMIDI CC116/CC117 but always with value 0 — which means
       *infinite* in that convention, so an EMIDI-aware player loops a
@@ -315,3 +315,11 @@ are fixed.)
   narrow `char*` / `std::string` into `std::filesystem`, so non-ASCII names
   (common for Japanese titles) can be mangled or throw. Illegal-character
   sanitizing is done; character encoding is not.
+- **`0xC9` portamento may under-serve the engine semantics** (unverified). On
+  hardware the command sets the portamento start key *and* turns portamento
+  on; caesar emits only CC84 (portamento control), never CC65. Whether that
+  loses the glide depends on the synth's CC84 interpretation (Roland's
+  one-shot portamento-control works without CC65; others may gate on it).
+  Surfaced by the 2026-07-11 `0xE3` research (sweep pitch and portamento are
+  independent, additive mechanisms). Verify CC84 semantics across target
+  players before changing anything.
