@@ -44,8 +44,10 @@ depths is the proof.
 |---|---|
 | `source/main.c`        | the homebrew (single file, libctru) |
 | `Makefile`             | devkitARM build (stock 3ds template + SMDH metadata) |
+| `AUTO-RUN.md`          | **the recommended one-recording process** (press RIGHT) |
+| `tools/split_run.py`   | cut one AUTO-run recording into the per-condition WAVs (numpy only) |
 | `tools/analyze.py`     | host-side null-test / difference analyzer (numpy only) |
-| `CAPTURE-PROTOCOL.md`  | step-by-step recording matrix + predictions |
+| `CAPTURE-PROTOCOL.md`  | manual fallback: step-by-step recording matrix + predictions |
 | `RESULTS-TEMPLATE.md`  | fill-in results sheet |
 
 ## Build
@@ -76,13 +78,25 @@ Then launch it from the Homebrew Launcher.
 
 ## Run & analyze
 
-Follow [`CAPTURE-PROTOCOL.md`](CAPTURE-PROTOCOL.md): record the four core
-captures (Stereo/Surround × Front/Rear) at 48 kHz, then:
+**Recommended — one hands-off recording.** Follow [`AUTO-RUN.md`](AUTO-RUN.md):
+start the PC recording, press **RIGHT** on the d-pad, and the app plays the whole
+8-condition matrix by itself (~85 s), tagging each segment with a countable pip
+burst. Then cut the single take into the standard files and analyze:
 
 ```sh
+python3 tools/split_run.py run.wav                                       # -> the 8 WAVs
 python3 tools/analyze.py stereo_front.wav   stereo_rear.wav   --expect null
 python3 tools/analyze.py surround_front.wav surround_rear.wav --expect differ
 python3 tools/analyze.py stereo_front.wav   surround_front.wav
 ```
+
+This shares one clock across all segments, so the null test aligns
+sample-accurately — the reason to prefer it over separate manual takes. The
+split→analyze chain is verified against a synthetic run; only the console
+capture is left.
+
+**Manual fallback.** [`CAPTURE-PROTOCOL.md`](CAPTURE-PROTOCOL.md) records the four
+core captures (Stereo/Surround × Front/Rear) one at a time with the X/A keys —
+use it if you'd rather drive it by hand.
 
 Record the numbers in [`RESULTS-TEMPLATE.md`](RESULTS-TEMPLATE.md).
