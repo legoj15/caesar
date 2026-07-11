@@ -404,7 +404,7 @@ offsets may shift in other titles.
 > speaker. Under that scope this verdict inverts: the reverb is *required*, and the ARM11
 > `nw::snd` **sequence runtime** (voice stealing, LFO, variables/conditionals/random, tie,
 > portamento) becomes the critical path — none of which an exporter ever needed. See
-> "Beyond the converter: the BCSEQ tool suite" in `ROADMAP.md`.
+> `SUITE-DESIGN.md` (formerly the "Beyond the converter" section of `ROADMAP.md`).
 >
 > What survives unchanged: **Teak disassembly is still not the way in.** Recover the reverb
 > behaviourally by running the real firmware in `teakra` offline, impulsing the aux bus, and
