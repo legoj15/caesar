@@ -781,3 +781,178 @@ Still-open defects are tracked under "Known bugs" in ROADMAP.md.
   crashes. Sequences that emitted no notes were either those silent entries or
   dispatchers that select a section via conditional (`[If]`) jumps; the latter
   were resolved next (see the `[If]`-dispatcher item in §4 above).
+
+## Investigations
+
+### 2026-07-11 — Dropped-parameter triage (full census + provenance)
+
+Triggered by a user observation that `caesar -w` reports "pan" and "sustain"
+as not implemented on `mset.bcsar`. Method: (1) a corpus census running the
+stock binary with `-w` over all 82 BCSAR archives, aggregating every warning
+message; (2) a second census with a scratch-instrumented build that also
+tallies content the stock converter drops **with no warning at all**
+(parse-time counters; the instrumentation was never committed); (3) parallel
+research/adversarial-verify agents pinning each opcode's hardware semantics
+against **Gota7/GotaSequenceLib `CtrCafe.cs`** — established here as the
+authoritative CTR byte→command map (the NitroStudio2 enum is SSEQ-ordered and
+does *not* match CSEQ bytes) — plus the byte-matched NW4R decomps
+(doldecomp/ogws, zeldaret/ss), gbatek, and this repo's disasm handoff.
+
+**Headline: the warned drops (~140k events) are the tip of an iceberg —
+~2.4M additional sequence events convert wrong or vanish silently.**
+
+Warned drops, census-ranked (occurrences / distinct sub-files / archives):
+
+| Warning | Occ | Files | Archives | Verdict |
+|---|---|---|---|---|
+| span (0xD7) | 55,291 | 417 | 49 | **No MIDI target.** SurroundPan: front/rear axis of the DSP's quad voice-gain matrix. Silent in Mono/Stereo output modes, **audible under the System Settings *Surround* mode** — see the same-day addendum below. MIDI has no surround axis, so demote to a benign notice; the future player must model it. |
+| sustain (0xD2) | 19,188 | 10,397 | 63 | Correctly dropped — ADSR sustain *level*; no GM2/GS CC exists for it. Not the pedal (that is 0xDF). |
+| tie (0xC8) | 13,948 | 6,617 | 33 | Real articulation loss (notes re-attack); already the v0.5.1 stretch item. |
+| conditional jump | 13,871 | 2,260 | 26 | Superseded by the convert-time VM plan (below). |
+| bank select (0xB6) | 8,778 | 2,934 | 41 | Real: mid-sequence bank switch → wrong instrument. Needs Cbnk SF2-layout co-design. Top users: WarioWare Gold `SoundData1` (4,585), Majora `JokerSound`, `GreenCube`, Fire Emblem. |
+| init pan (0xDC) | 8,438 | 1,212 | 46 | **Exact one-line fix**: CC10 at the tick (engine sums init_pan+pan; set-once-before-notes is the common case). |
+| mod type (0xCC) | 8,006 | 4,512 | 64 | Linchpin: LFO target select (0 pitch / 1 volume / 2 pan). caesar emits vibrato CCs unconditionally, so tremolo/auto-pan tracks render as pitch wobble. Fix = gate CC1/76/77/78 on tracked type. |
+| biquad value/type (0xB5/0xB4) | 8,057 | ~1,030 | 27 | No audible MIDI target (filter response select + blend). Keep dropped; CC30/31 only if lossless round-trip ever matters. |
+| front bypass (0xBF) | 7,129 | 550 | 15 | Surround-path routing bool — only meaningful under the Surround output mode (addendum below); no MIDI target. Demote. |
+| lpf cutoff (0xD8) | 4,672 | 2,157 | 35 | Cheap approximate fix: CC74 brightness, near-identity 0–127 (GM2 default 64 matches NW4R neutral 64). |
+| envelope hold (0xB1) | 3,709 | 2,439 | 21 | NW4C ADSHR hold-stage override; no CC exists. Keep dropped. |
+| priority (0xC6) | 3,161 | 1,005 | 35 | Voice-steal priority; meaningless in MIDI (demote), but must be preserved as state for the future player. |
+| mute (0xDD) | 512 | 4 | 2 | Mode byte (off/no-stop/release/stop). Faithful handling = per-track flag suppressing note emission (+CC120/123); fully doable in the one-pass walk. Rare — low priority. |
+| print var / env reset / main send | 12 / 1 / 1 | — | — | Negligible. |
+| velocity range (0xB3), mod phase/curve/period (0xBD/0xBE/0xE4) | **0** | 0 | 0 | Never occur in the corpus. Off the list. |
+
+Silent drops (instrumented census; **no warning fires today for any of
+these**):
+
+- **`_t` (Time-suffix) ramps flattened to instant jumps**: 375,316 volume
+  fades, 76,362 pan sweeps, 10,725 pitch-bend ramps, plus span/expression —
+  the single largest fidelity gap in the converter, and completely silent.
+- **Extended (0xF0) command space is 100% silently dropped**: the walker's
+  extended branch is dead code (`cmd.Cmd` is never updated past `0xF0`, so
+  none of its "not implemented" warnings can fire). Corpus: 353k `setvar`,
+  210k `cmp_eq`, 64k `addvar`, 55k `randvar`, 42k `subvar`, 17k `cmp_ne`…
+  Notably **zero** occurrences of the entire mod2/3/4 multi-LFO family
+  (extended 0xA0–0xB1, 0xE1–0xE6) — NW4C's one genuine engine unknown is
+  unused by every game in the corpus. (Also: caesar's mod4 warning labels
+  0xAC–0xB1 are scrambled vs CtrCafe — cosmetic, since they never print.)
+- **`Rnd`-prefixed values collapse to the range minimum**: 196k volume,
+  177k pitch-bend, 94k rest durations (timing bias!), 71k transpose.
+  Midpoint would be the honest deterministic choice.
+- **`Var`-prefixed values emit the variable INDEX as the value** (e.g.
+  volume=var[3] emits CC7=3): 59k transpose, 27k setvar operands, 15k
+  pitch-bend, 13k volume. Garbage data, silent.
+- **`[If]` on non-jump commands executes unconditionally**: 34k transpose,
+  30k conditional Calls, and — control-flow-corrupting — **33k conditional
+  Returns + 8.5k conditional Fins** that can truncate tracks early, plus
+  ~11k conditional notes that always play. Concentrated in the adaptive-music
+  engines: GardenSound (AC), Alice (Triforce Heroes), Jack (ALBW), ctr_dash.
+- **`0xDE` = FxSendC** (third aux send, a real CTR command): parsed, no
+  convert branch, no warning. Zero corpus occurrences, but the plain switch
+  has no final `else`, so any future gap is silent too.
+- **Latent desync**: the Time-suffix trailing s16 is consumed only for
+  0xB0–0xDF; a `_t` on tempo/sweep/notes/extended leaves 2 bytes unread and
+  misframes the rest of the track. Zero corpus hits (all ~473k observed `_t`
+  sit in the safe range) — but it is the one genuine wrong-arg-count hazard.
+- `0x90`/`0x96` (not in the CTR map; the original author's `Analyse` probes,
+  2-byte length guessed) and `0xB7–0xBC` (also not real opcodes): zero corpus
+  occurrences; if they ever appear it means an upstream desync, so they
+  should fail fast rather than swallow bytes.
+
+Audit of the *implemented* mappings (each finding adversarially verified):
+
+- **`0xDF` Damper bool bug (new)**: the argument is a Bool (0/1) but the raw
+  value goes to CC64, and CC64 < 64 means pedal **off** — so "damper on"
+  never engages on any GM/GS synth and ringing notes get cut. The sibling
+  bool 0xCE is already normalized `? 127 : 0`; 0xDF was simply missed.
+  One-line fix, output-changing for sequences using damper.
+- **`0xE3` → CC78 confirmed wrong** (it is SweepPitch, s16, units of 1/64
+  semitone — the roadmap's existing v0.5.1 item stands, now provenance-backed:
+  CtrCafe + GotaSequenceLib `Channel.SweepMain`); sweeps ≥ 2 semitones exceed
+  127 and are the bulk of the ~1,020 "out of MIDI range" drops (census total
+  for that notice: exactly 1,020, matching the roadmap figure).
+- **`0xE0` ModDelay** transform `(v/2)+64` overflows for delays ≥ 128 ticks →
+  spurious out-of-range notices; clamp (also already scoped in v0.5.1).
+- **`(v/2)+64` on 0xCB/0xCD/0xD0/0xD1/0xD3** compresses 0–127 args into
+  64–127 (can never say "faster/shorter than default"). Root cause: the
+  parse phase types 0xD0/D1/D3 as *signed* Int8 under a mistaken signed
+  model, so a fix must touch both phases. Low priority — FluidSynth-class
+  players ignore CC72–79 entirely.
+- Clean bill (verified correct, no change): 0xC9→CC84 portamento control,
+  timebase, mono/poly, pan, volume, master volume, transpose→RPN2,
+  bend→14-bit, bend range→RPN0, notewait, expression→CC11, FX A/B→CC91/93,
+  loop CC116/117 (finite-count pass-through stays a v0.5.1 item).
+
+The variable/conditional machinery ("vm-flow") conclusion, feeding the
+roadmap's sequence-fidelity plan: a small deterministic convert-time VM —
+three variable scopes initialised to 0 (matching power-on hardware state), the
+12 arithmetic ops, the 6 comparisons setting a per-track flag, `[If]` gating
+*every* command type, the existing revisit guard for backward jumps, a fixed
+documented value for `randvar` — resolves sequence-internal `[If]`s
+bit-exactly and defaults game-driven globals to the same "default section" the
+heuristic aims for. It strictly supersedes the two-reachability heuristic
+(which ignores the comparison operator and cannot handle 3-way dispatch), and
+it is a direct down-payment on suite stage 4.
+
+#### Addendum (2026-07-11): the 3DS *Surround* mode — span verdict corrected
+
+The user pointed out that System Settings offers Mono/Stereo/**Surround**, and
+asked whether span relates to it. It does. Research pass (Azahar DSP-HLE
+source, libctru ndsp headers, doldecomp/ogws NW4R decomp, Pokémon Sun/Moon's
+gflib2 wrapper over `nw::snd`, all adversarially verified) established:
+
+- **The 3DS DSP mix model is quad end-to-end.** Every voice carries a
+  3-bus × 4-channel gain matrix (`SourceConfiguration.gain[3][4]`: front-L/R
+  + rear-L/R on main, aux A, aux B — Azahar `shared_memory.h:156`; mirrored
+  by libctru's `ndspChnSetMix(float mix[12])`). The intermediate mix buffers
+  are `QuadFrame32`. The earlier "3DS mixes to a stereo main bus" reading of
+  our handoff was an over-simplification — the *final* output is 2-channel,
+  the buses are not.
+- **Surround is a DSP-firmware virtualization, selected by
+  `DspConfiguration.output_format` (Mono=0/Stereo=1/Surround=2)** with live
+  parameters `surround_depth`, `surround_speaker_position` (SQUARE/WIDE),
+  `rear_ratio`, two "surround biquad filters" (3dbrew), and a
+  `headphones_connected` flag that swaps the coefficient set (speaker
+  crosstalk-cancellation vs headphone virtualization). No Dolby/SRS branding
+  found; unlike the Wii's real DPL2 *encode*, the 3DS folds the quad field
+  down for its own two transducers. libctru exposes the same controls
+  (`NDSP_OUTPUT_SURROUND`, `ndspSurroundSetDepth/Pos/RearRatio`).
+- **Corrected mechanism for span's silence in Stereo/Mono**: it is *not*
+  that rear channels get dropped — Azahar's stereo fold-down **sums** rear
+  into front (`L = FL+RL`, `R = FR+RR`). It is the *sequence runtime* that
+  zeroes the rear sends outside Surround/DPL2 modes: NW4R's
+  `Voice::CalcMixParam` computes the front/rear split from surroundPan but
+  forces the surround term to 0 in `OUTPUT_MODE_STEREO`/`MONO`
+  (ogws `snd_Voice.cpp:1001-1089`); span's byte scales as `/63 → 0.0–2.0`,
+  1.0 = center (`snd_SeqTrack.cpp UpdateChannelParam`). Right verdict, wrong
+  reason — now fixed above.
+- **In Surround mode span IS a real, audible front/rear positioning
+  command** (confirmed on Wii; inference-grade on 3DS — the one missing link
+  is the un-decompiled NW4C ARM11 mix routine, but Sun/Moon's headers prove
+  `nw::snd` carries `OUTPUT_MODE_SURROUND` and `SetSurroundPan` on 3DS, and
+  the DSP plumbing is confirmed). Under the constant-power pan curves
+  (`PAN_CURVE_SQRT`/`SINCOS`) a front↔rear move is not even level-neutral
+  after fold-down.
+- **Citra/Azahar are not an oracle here**: `mixers.cpp` has
+  `case OutputFormat::Surround: // TODO(merry) … fallthrough` to Stereo —
+  surround has never been emulated. Recovering the real virtualization means
+  the same offline-`teakra` impulse method already planned for reverb.
+- **Circumstantial gem from the census**: the heaviest span user in the
+  corpus (12,602 of 55,291 occurrences, in just 6 sequence files) is
+  `mset.bcsar` — **System Settings itself**, the applet hosting the
+  Mono/Stereo/Surround selector. Its sound-config demo music appears to
+  sweep voices through the surround field deliberately. Games use span far
+  less (cplay 5.5k, cardboard 4.2k, Fire Emblem 460, Animal Crossing 203).
+- **Hardware test (New 3DS + CFW) that settles the residual inference**,
+  in order of rigor: (A) libctru homebrew playing a steady tone with
+  `ndspChnSetMix` front-only vs rear-only under `NDSP_OUTPUT_STEREO` vs
+  `SURROUND`, capturing line-out — prediction: bit-identical in Stereo,
+  measurably different (level / L-R correlation / difference spectrum) in
+  Surround; also A/B the headphone-detect state. (B) Dump the live
+  `SourceConfiguration.gain[3][4]` while a span-sweeping `.bcseq` plays
+  under each System Settings mode — rear lanes zero in Stereo but
+  span-dependent in Surround confirms the whole chain at the source.
+
+Converter impact: none (MIDI has no surround axis; the demote-to-benign call
+stands, with corrected wording). Player impact (suite stages 2–3): span must
+be preserved as voice state and the Surround virtualization captured
+behaviourally via `teakra`, exactly like reverb.

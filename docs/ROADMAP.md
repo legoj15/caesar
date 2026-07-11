@@ -99,6 +99,49 @@ Ranked by priority:
       "play 4×" section forever. One line: emit `0xD4`'s count argument as the
       CC116 value. (Fully unrolling repeats in the timeline shares the
       flattening machinery with suite stages 2/5; not required here.)
+- [ ] **Fix the damper-pedal threshold bug (`0xDF`).** The argument is a bool
+      (0/1) but the raw value goes to CC64, and 1 reads as *pedal off* on
+      every GM/GS synth (the on/off threshold is 64) — so the pedal never
+      engages and notes that should ring out are cut. Mirror the `0xCE`
+      normalization (`? 127 : 0`); one line. Found + adversarially verified
+      in the 2026-07-11 dropped-parameter triage
+      ([HISTORY.md](HISTORY.md#investigations)).
+- [ ] **Implement the two dropped commands with clean MIDI targets**:
+      `0xDC` init_pan → CC10 (exact mapping; 8,438 drops across 46 archives)
+      and `0xD8` lpf_cutoff → CC74 brightness (near-identity 0–127; 4,672
+      drops). One line each, mirroring the existing pan / FX-send handlers.
+- [ ] **Gate the vibrato CCs on mod type (`0xCC`).** The track LFO targets
+      pitch, volume, or pan; caesar emits the pitch-vibrato CCs
+      (CC1/76/77/78) unconditionally, so tremolo/auto-pan tracks render as
+      pitch wobble on every GM synth. Track mod_type per track (default
+      pitch) and suppress those CCs for types 1/2. 8,006 occurrences in 64
+      archives.
+- [ ] **Warning-hygiene pass over the drop sites** (census-ranked in
+      [HISTORY.md](HISTORY.md#investigations)): demote `span` (55k
+      occurrences, the #1 warning — the front/rear surround axis; audible on
+      console only under the System-Settings *Surround* mode, and MIDI has
+      no surround axis regardless — see the HISTORY addendum), `priority`,
+      and `front bypass` to benign "no MIDI equivalent" notices; give the remaining drops default-visible
+      notice categories (bare warnings are `-w`-only today); add a final
+      `else` unknown-opcode notice (`0xDE` FxSendC currently vanishes
+      silently); fix the extended-command warning chain being dead code
+      (`cmd.Cmd` is never set past `0xF0`, so every `setvar`/`cmp`/mod2-4
+      drop is silent — 353k `setvar` alone) and its scrambled mod4 labels;
+      emit honest notices for `Rnd`/`Var`/`[If]`-prefixed commands the
+      converter currently mangles silently.
+- [ ] **Close the Time-suffix desync hazard.** A `_t` ramp command carries a
+      trailing s16 duration that the parser only consumes for `0xB0–0xDF`;
+      Time-suffixed tempo/sweep/notes/extended commands leave those 2 bytes
+      unread and desync the rest of the track. Zero corpus occurrences (all
+      ~473k observed `_t` commands sit in the safe range), but it is the one
+      genuine wrong-arg-count hazard left. The ramps themselves flatten to
+      instant jumps (375k volume fades) — full interpolation is stage-2/5
+      flattening territory; a notice suffices for now.
+- [ ] **Use the `Rnd` midpoint instead of the minimum.** Random-valued
+      commands currently collapse to the range *minimum*, silently biasing
+      196k volumes, 177k pitch bends, and 94k rest durations (timing!) low.
+      Midpoint is the honest deterministic stand-in until real randomness
+      lands with the VM. Output-changing for those sequences.
 - [ ] *(stretch — may slip to a later release)* **Tie mode (`0xC8`).** Tied
       notes currently re-attack instead of merging into one sustained note.
       Bounded but the largest item in this patch; overlaps with the stage-2
@@ -113,20 +156,30 @@ Ranked by priority:
 
 Larger efforts that expand what caesar can do. Rough priority order:
 
-- **Sequence (CSEQ → MIDI) fidelity.** Implement the full variable/conditional/
-  random command machinery. Note-less `[If]` dispatchers are now resolved
-  heuristically (a fully-silent track follows the default branch), but the
-  underlying variables are still not evaluated, so: `[If]`-prefixed *non-jump*
-  commands (e.g. `[If] Program`, `[If] Return`) currently execute
-  unconditionally; the extended `setvar`/`cmp`/mod commands are parsed but
-  dropped (their walker branch is dead code — `cmd.Cmd` is never set to the
-  extended opcode); and random/variable values convert wrong. (The true engine
-  semantics are now documented — see "RE priorities" in
-  [SUITE-DESIGN.md](SUITE-DESIGN.md); bit-exact reproduction is possible.)
-  The bounded exporter-side pieces — controller-range triage of the ~1,020
-  surfaced drops, the mis-wired `0xE3`/`0xE0` sends, finite loop repeat
-  counts, tie mode — are scoped into **v0.5.1** above; what remains here is
-  the real variable evaluation those triage rules will eventually hand off to.
+- **Sequence (CSEQ → MIDI) fidelity: the convert-time variable VM.** The
+  2026-07-11 triage ([HISTORY.md](HISTORY.md#investigations)) quantified the
+  gap: ~2.4M sequence events convert wrong or vanish silently corpus-wide,
+  dominated by the un-evaluated variable machinery — 353k `setvar` / 210k
+  `cmp` ops ignored, `[If]`-prefixed non-jump commands executing
+  unconditionally (including 33k conditional `Return`s and 8.5k conditional
+  `Fin`s that can truncate tracks in GardenSound/Alice/Jack/ctr_dash), and
+  `Var`-valued parameters emitting the variable *index* as the value. The
+  settled plan is a small deterministic VM in the converter: three variable
+  scopes initialised to 0 (power-on hardware state), the 12 arithmetic ops,
+  the 6 comparisons setting a per-track flag, `[If]` gating *every* command
+  type, the existing revisit guard for backward jumps, and a fixed documented
+  `randvar` value. That resolves sequence-internal `[If]`s bit-exactly,
+  defaults game-driven globals to the same "default section" the current
+  heuristic aims for, strictly supersedes the two-reachability heuristic, and
+  is a direct down-payment on suite stage 4. (Semantics are pinned:
+  Gota7/GotaSequenceLib `CtrCafe.cs` is the authoritative CTR byte map, plus
+  the NW4R decomps — see the triage entry for sources.)
+- **Mid-sequence bank switching (`0xB6`).** 8,778 bank selects across 41
+  archives (WarioWare Gold's `SoundData1` alone has 4,585); dropping them
+  plays the wrong instrument wherever a track switches banks. Not a local
+  Cseq fix: the emitted CC0 must be co-designed with Cbnk's SF2 bank layout
+  (currently derived from the flat `0x81` program index), or it fights the
+  existing bank/program split.
 - **Missing audio coverage.** Implement IMA-ADPCM (codec 3), which currently
   produces silent output reported as success; extract CWSD wave-sound data
   (most sound effects), currently skipped entirely.
@@ -164,11 +217,30 @@ per stage. Status:
       clock, single final upsample.
 - [ ] **Stage 3 — reverb + delay**: offline `teakra` impulse capture →
       comb/allpass fit → New 3DS hardware validation. The long pole.
+      Same oracle method now also covers the **Surround-mode virtualization**
+      (the DSP folds a quad per-voice gain matrix down to stereo using
+      `surround_depth`/`rear_ratio`/speaker-position + two biquads,
+      headphone-aware; Citra/Azahar have never implemented it — `span` and
+      `front_bypass` feed this path; see the HISTORY 2026-07-11 addendum).
 - [ ] **Stage 4 — exact variables/conditionals/random** + the NW4C
       `mod2/3/4` LFO curves (the one genuine engine unknown left).
 - [ ] **Stage 5 — tracker export**: `.it` writer (`.mptm` one-flag upgrade).
 - [ ] **Stage 6 — editor (write-back)**: smallest size-preserving edit first,
       proven on the New 3DS via LayeredFS.
+
+Hardware-RE queue (New 3DS + CFW, feeds stages 2–3):
+
+- [ ] **Surround-mode A/B probe.** libctru homebrew playing a steady tone,
+      front-only vs rear-only `ndspChnSetMix`, under `NDSP_OUTPUT_STEREO` vs
+      `NDSP_OUTPUT_SURROUND`, line-out captured on PC. Prediction: captures
+      identical in Stereo (runtime-zeroed rear + unity fold-down), measurably
+      different in Surround (virtualization engages) — settles the one
+      inference left in the span verdict, and the headphone-detect A/B
+      reveals whether the speaker/headphone coefficient swap is real. Full
+      rationale + test design in the HISTORY 2026-07-11 addendum. Follow-up
+      if confirmed (part B): dump the live `SourceConfiguration.gain[3][4]`
+      while a span-sweeping `.bcseq` plays via LayeredFS, tying the CSEQ
+      opcode to the rear gain lanes at the source.
 
 ## Settled decisions & standing rules
 
@@ -210,8 +282,23 @@ Fixed bugs and their verification stories are in
 
 The remaining MIDI-converter discrepancies found in the 2026-07-10 post-release
 audit (controller-range drops, mis-wired `0xE3`/`0xE0`, discarded loop counts,
-tempo-zero UB) are scoped as work items under **v0.5.1** above rather than
-listed here twice. (The GM drum-channel collision from that audit is fixed.)
+tempo-zero UB) and the 2026-07-11 dropped-parameter triage (damper threshold,
+init_pan/lpf, mod-type gating, silent `Rnd`/`Var`/`[If]`/ramp handling) are
+scoped as work items under **v0.5.1** above rather than listed here twice.
+(The GM drum-channel collision from that audit is fixed.)
+
+- **Unknown-opcode bytes are swallowed instead of failing fast.** `0x90`/`0x96`
+  (2-byte `Analyse` probes guessed by the original author) and `0xB7–0xBC`
+  (1-byte catch-all) are not real CTR opcodes — the map jumps `0xB6`→`0xBD` —
+  so their presence would mean the parser already desynced upstream; consuming
+  a guessed length silently perpetuates the desync. Zero corpus occurrences;
+  should be `Common::Error` like other unknown bytes. Latent, not observed.
+- **The `(v/2)+64` transform on CC72/73/75/76/77** (attack/decay/release,
+  vibrato rate/depth) compresses the unsigned 0–127 args into 64–127 — caesar
+  can never express "faster/shorter than default". Root cause: the parse phase
+  types `0xD0/D1/D3` as *signed* under a mistaken model, so a fix must touch
+  both phases together. Low priority: FluidSynth-class players ignore CC72–79
+  entirely, so this is byte-level rather than audible wrongness.
 
 - **Bank note fields are read at hardcoded offsets** (`Cbnk.cpp`, the
   note-parse loop). The format actually locates the ADSHR envelope through a
