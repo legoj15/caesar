@@ -29,9 +29,22 @@ House rules:
 - `docs/HISTORY.md` (completed-work narratives) and `docs/SUITE-DESIGN.md`
   (tool-suite design); `docs/ROADMAP.md` slimmed to goals + open work, with a
   v0.5.1 MIDI-fidelity patch scoped. (docs only — output-identical)
+- **Surround-mode `span` (0xD7) confirmed audible on real hardware.** The
+  `tools/surround-probe/` v2 console capture shows the 3DS Surround output mode
+  performs genuine front/back virtualization on the headphone jack (front-vs-rear
+  spectrum reshapes ~6 dB and +46 dB of cross-channel energy appears, only in
+  Surround; both null controls pass) — upgrading the HISTORY finding from
+  inference-grade to console-confirmed. (docs/tooling only — output-identical)
 
 ### Fixed
 
+- `tools/surround-probe/tools/split_run.py` mis-segmented the real broadband
+  AUTO capture: the app's post-run idle tail became a phantom 11th "body", and
+  naming keyed on pip counts (which the multitone's envelope dips and transition
+  ticks corrupt). It now rejects over-long bodies by duration, names segments by
+  deterministic schedule order (pip counts demoted to a cross-check), and cuts
+  `noise_floor.wav` from a raw-envelope onset so it never clips the first pip.
+  (tooling only — does not affect caesar output)
 - Out-of-bounds guard on the sequence `OpenTrack` (`0x88`) handler: the track
   index is a full byte but the format has only 16 tracks (the `0xFE` enable mask
   is 16-bit), and an index ≥ 16 wrote past the 16-entry `trackOffsets` stack

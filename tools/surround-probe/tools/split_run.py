@@ -5,10 +5,15 @@ per-condition WAVs that tools/analyze_surround.py expects, plus noise_floor.wav.
 
 The app's AUTO run (press RIGHT) plays, per condition:
     N countable pips (segment N = N pips)  ->  ~0.6 s silence  ->  ~8 s body,
-preceded by ~1.5 s of lead-in silence. This script finds each long body, counts
-the pips before it to recover the segment index, keys the output name by that
-count, and also writes the lead-in silence as noise_floor.wav (the analyzer's
-trusted-bin floor). Feed it the whole take, then run analyze_surround.py.
+preceded by ~1.5 s of lead-in silence, and (after the last segment) an idle tail
+that keeps looping the probe. This script finds each ~8 s body -- rejecting the
+long idle tail by duration -- and, when it recovers exactly the expected number
+of bodies, names them by SCHEDULE order (deterministic and robust; the pip count
+before each body is only a cross-check, because a broadband probe's envelope
+dips and transition ticks make pip counts noisy). If the body count is off it
+falls back to pip-count naming. It also writes the true lead-in silence as
+noise_floor.wav (the analyzer's trusted-bin floor). Feed it the whole take, then
+run analyze_surround.py.
 
 Only dependency is numpy.
 Usage:  python3 tools/split_run.py RUN.wav [--outdir .] [--trim 0.4]
@@ -28,6 +33,9 @@ SCHEDULE = [
     "mono_front.wav", "mono_rear.wav",
 ]
 BODY_MIN_S = 3.0
+BODY_MAX_S = 14.0         # reject the post-run idle tail (app keeps looping the
+                          # probe after AUTO ends -> one long "body"); real
+                          # segment bodies are ~8 s
 PIP_MIN_S, PIP_MAX_S = 0.03, 0.60
 
 
@@ -113,7 +121,8 @@ def detect(mono, sr):
             i = j
         else:
             i += 1
-    bodies = [r for r in _runs_from_mask(mask, fr, sr) if r[2] >= BODY_MIN_S]
+    bodies = [r for r in _runs_from_mask(mask, fr, sr)
+              if BODY_MIN_S <= r[2] <= BODY_MAX_S]
     return fine, bodies
 
 
@@ -130,14 +139,24 @@ def main():
 
     print(f"\n=== split_run: {args.run_wav} ({x.shape[0]/sr:.1f}s, {ch}ch, {sr} Hz) ===")
     print(f"found {len(runs)} tone runs, {len(bodies)} bodies (>= {BODY_MIN_S:.0f}s)\n")
-    if len(bodies) != len(SCHEDULE):
+    order_named = (len(bodies) == len(SCHEDULE))
+    if not order_named:
         print(f"!! WARNING: expected {len(SCHEDULE)} bodies, found {len(bodies)}. "
-              f"Naming by pip count regardless.\n")
+              f"Falling back to pip-count naming (less reliable).\n")
 
-    # noise_floor.wav from the lead-in silence before the first tone run
-    first = runs[0][0] if runs else x.shape[0]
-    nf_end = max(0, first - int(0.10*sr)); nf_start = max(0, nf_end - int(1.0*sr))
-    if nf_end - nf_start >= int(0.2*sr):
+    # noise_floor.wav from the true lead-in silence. Detect the onset directly
+    # from the raw envelope (the smoothed fine-run detector can miss a short/quiet
+    # first pip), taking the first sample >=18 dB above the initial-silence level,
+    # then end a margin before it so the floor never clips a pip; cap length 2 s.
+    seed = max(int(0.30*sr), 1)
+    base = float(np.sqrt(np.mean(np.square(mono[:seed])))) + 1e-9
+    ae = np.sqrt(np.convolve(np.square(mono), np.ones(int(0.01*sr))/int(0.01*sr), mode="same"))
+    hit = np.argmax(ae > base*8.0)
+    onset = hit if hit > 0 else x.shape[0]
+    firsts = [onset] + [r[0] for r in runs] + [b[0] for b in bodies]
+    first = min(firsts)
+    nf_end = max(0, first - int(0.15*sr)); nf_start = max(int(0.20*sr), nf_end - int(2.0*sr))
+    if nf_end - nf_start >= int(0.3*sr):
         write_wav_f32(os.path.join(args.outdir, "noise_floor.wav"), sr, x[nf_start:nf_end])
         print(f"  noise_floor.wav  <- lead-in [{nf_start/sr:.2f}..{nf_end/sr:.2f}]s")
     else:
@@ -147,15 +166,17 @@ def main():
     for oi, (bs, be, bsec) in enumerate(bodies):
         pips = [r for r in runs if prev_end <= r[0] < bs and PIP_MIN_S <= r[2] <= PIP_MAX_S]
         npips = len(pips)
-        if 1 <= npips <= len(SCHEDULE):
-            name = SCHEDULE[npips-1]
+        if order_named:                      # deterministic: name by schedule position
+            name = SCHEDULE[oi]
+            flag = "" if npips == oi+1 else f"   (!! pip cross-check {npips}, expected {oi+1})"
+        elif 1 <= npips <= len(SCHEDULE):
+            name = SCHEDULE[npips-1]; flag = "   (by pip count -- body count off)"
         else:
-            name = f"segment_pip{npips}.wav"
-            print(f"  !! body {oi+1}: pip count {npips} out of range; parked as {name}")
+            name = f"segment_pip{npips}.wav"; flag = "   !! pip count out of range"
         s, e = bs+trim, be-trim
         if e-s < int(1.0*sr): s, e = bs, be
         write_wav_f32(os.path.join(args.outdir, name), sr, x[s:e])
-        print(f"  {name:26s} <- body {oi+1} ({bsec:.1f}s tone, {npips} pips)")
+        print(f"  {name:26s} <- body {oi+1} ({bsec:.1f}s tone, {npips} pips){flag}")
         prev_end = be
 
     print(f"\nnext: python3 tools/analyze_surround.py {args.outdir}\n")

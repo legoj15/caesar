@@ -956,3 +956,83 @@ Converter impact: none (MIDI has no surround axis; the demote-to-benign call
 stands, with corrected wording). Player impact (suite stages 2–3): span must
 be preserved as voice state and the Surround virtualization captured
 behaviourally via `teakra`, exactly like reverb.
+
+##### Console confirmation (2026-07-11, surround-probe v2) — CONFIRMED
+
+The residual inference above is now settled empirically on the user's New 3DS
+(Luma3DS). The `tools/surround-probe/` homebrew was rebuilt as **v2** after v1
+came back inconclusive — v1's steady, L/R-symmetric 440 Hz tone with mono-summed
+analysis is structurally blind to front/back virtualization (a centered pure
+tone carries no spectral handle for HRTF coloration, and symmetric routing is
+collapsed by the naive stereo fold; every condition nulled to the ~−30 dB
+capture floor, Surround showing only a ~+2 dB level bump with zero L/R
+decorrelation). v2 fixed both the stimulus and the analysis:
+
+- **Stimulus**: a periodic, band-limited (100 Hz–14 kHz) Schroeder-phase pink
+  multitone (`source/probe_buf.h`, low crest, seamless loop at the DSP-native
+  32728 Hz), hard-panned to **one quad corner** — front-left (FL) vs back-left
+  (BL). Same physical side, so a naive stereo fold makes FL and BL identical,
+  and the opposite (R) output channel becomes a clean crosstalk meter.
+- **Matrix**: a hands-off 10-segment AUTO run — Stereo / Surround(0x7FFF) /
+  Surround(0xFFFF, depth positive-control) / Surround(WIDE) / Mono, each ×
+  {FL, BL} — recorded as one take with a countable pip burst (segment N = N
+  pips) marking each segment.
+- **Analysis** (`analyze_surround.py`, alignment-free, never mono-sums):
+  per-channel Welch PSD → **MAGDEV** (median-subtracted front-vs-rear
+  spectral-reshaping RMS over trusted bins — level-independent, so a pure gain
+  change reads 0) and **XTALK** (energy bleeding into the silent channel).
+
+**Capture** (`run.wav`, 48 kHz/24-bit line-in from the headphone jack, System
+Settings = Surround): the results are unambiguous and every control fires
+correctly.
+
+| Mode | D (front-vs-rear reshaping) | XTALK into silent channel |
+|---|---|---|
+| **STEREO** | 0.23 dB (flat) | −53.5 dB (at the −85 dBFS floor) |
+| **SURROUND** (0x7FFF) | **6.12 dB** | **−7.7 dB** |
+| SURR + DEPTH (0xFFFF) | 6.07 dB | −7.6 dB |
+| SURR + WIDE | 6.86 dB | −8.3 dB |
+| **MONO** | 0.33 dB (flat) | 0.1 dB (L = R) |
+
+Discriminators: **dD = +5.88 dB**, **dXTALK = +46 dB**. Verdict: **CONFIRMED**.
+The result is robust against every alternative explanation:
+
+- **Not a capture-rig artifact.** The Stereo segments use the *identical*
+  routing (loud L, off-center source) yet their R channel sits dead at the
+  −85 dBFS noise floor — so the cable/ADC contribute zero L→R bleed. The
+  −7.7 dB of energy that appears in R only under Surround is generated inside
+  the 3DS. The Stereo row *is* the rig-crosstalk null, and it is silent.
+- **Not "Surround just spreads to mono."** The decisive metric is that FL and
+  BL produce *different spectra* in Surround (D = 6.1 dB) but are
+  indistinguishable in Stereo (D = 0.23 dB). That ~6 dB of front/back HRTF
+  coloration is exactly the axis `span` moves a voice along.
+- **Positive controls fire.** The WIDE speaker position raises reshaping to
+  6.86 dB (the position parameter is live, not saturated); depth holds steady
+  rather than collapsing — the effect is large and stable, not marginal.
+- **Both null controls pass.** Stereo FL≡BL and Mono FL≡BL (D ≈ 0.3, and Mono
+  correctly gives L = R) — the probe and routing do not manufacture a
+  difference on their own.
+
+So the 3DS Surround output mode performs genuine front/back spatial
+virtualization on the headphone jack, and **`span` (SurroundPan, 0xD7) is
+audible on real hardware** whenever the console is in Surround mode — upgrading
+the entry above from inference-grade to console-confirmed, and closing the
+"Surround-mode A/B probe" roadmap item. The register-level Part B (dumping live
+`gain[3][4]` while a span-sweeping `.bcseq` plays) remains queued as a
+follow-up; the *physics* is now settled. All converter/player impacts above are
+unchanged — MIDI still has no surround axis, and the suite player must model the
+virtualization behaviourally.
+
+*Tooling note:* `split_run.py`'s pip-burst segmenter misfired on the real
+broadband capture — the low-but-nonzero envelope dips of the multitone
+fragmented the 8 s bodies, body fragments and transition ticks inflated the pip
+counts, and the app's post-run idle (which keeps looping the probe) appeared as
+a spurious 44 s "11th body". The synthetic validation had passed because the
+fixture did not reproduce those envelope dips or the idle tail — classic
+fixture unrealism. The analysis here was run on interior slices cut at the
+ground-truth body boundaries (cross-checked two ways: the inter-body pip counts
+read 1…10 in order, and the R-channel level signature — dead in Stereo, lifted
+in Surround, equal in Mono — matches the schedule exactly). `split_run.py` was
+subsequently hardened to name segments by schedule order with aggressive
+gap-closing and a duration clamp that rejects the idle tail, keeping pip counts
+as a soft cross-check only.

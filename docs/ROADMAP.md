@@ -118,9 +118,10 @@ Ranked by priority:
       archives.
 - [ ] **Warning-hygiene pass over the drop sites** (census-ranked in
       [HISTORY.md](HISTORY.md#investigations)): demote `span` (55k
-      occurrences, the #1 warning — the front/rear surround axis; audible on
-      console only under the System-Settings *Surround* mode, and MIDI has
-      no surround axis regardless — see the HISTORY addendum), `priority`,
+      occurrences, the #1 warning — the front/rear surround axis; now
+      console-confirmed audible under the System-Settings *Surround* mode, but
+      MIDI has no surround axis regardless — see the HISTORY addendum),
+      `priority`,
       and `front bypass` to benign "no MIDI equivalent" notices; give the remaining drops default-visible
       notice categories (bare warnings are `-w`-only today); add a final
       `else` unknown-opcode notice (`0xDE` FxSendC currently vanishes
@@ -230,24 +231,19 @@ per stage. Status:
 
 Hardware-RE queue (New 3DS + CFW, feeds stages 2–3):
 
-- [ ] **Surround-mode A/B probe** (`tools/surround-probe/`) — settles whether
-      the 3DS Surround output mode repositions a voice front/back, i.e. whether
-      `span` (0xD7) is audible on hardware. **v1 ran on console and was
-      INCONCLUSIVE**: a steady, L/R-symmetric tone with mono-summed analysis is
-      blind to front/back virtualization (all conditions nulled to the ~−30 dB
-      floor; Surround showed only a ~+2 dB level bump, zero L/R decorrelation).
-      **v2 built + deployed 2026-07-11, console capture not yet run**: a
-      broadband periodic Schroeder-pink probe hard-panned to a single quad
-      corner (front-left vs back-left), a 10-segment AUTO run with a
-      0x7FFF/0xFFFF depth positive-control, and a strictly per-channel analyzer
-      (`analyze_surround.py`: level-independent spectral-reshaping metric +
-      crosstalk, depth-gated CONFIRM/REFUTE). The probe→split→analyze chain is
-      validated on a synthetic run (CONFIRMS a simulated effect, REFUTES a
-      null). Run steps + results sheet in `tools/surround-probe/AUTO-RUN.md`;
-      rationale in the HISTORY 2026-07-11 addendum. Follow-up if confirmed
-      (part B): dump the live `SourceConfiguration.gain[3][4]` while a
-      span-sweeping `.bcseq` plays via LayeredFS, tying the opcode to the rear
-      gain lanes at the source.
+- [x] **Surround-mode A/B probe** (`tools/surround-probe/`) — **CONFIRMED on
+      console 2026-07-11 (v2)**: the 3DS Surround output mode performs real
+      front/back virtualization on the headphone jack (Stereo FL≡BL null at
+      D=0.23 dB with a dead −85 dBFS opposite channel; Surround reshapes the
+      FL-vs-BL spectrum by ~6 dB and lifts +46 dB of cross-channel energy the
+      rig cannot produce; WIDE position raises it further; Mono collapses to
+      L=R). Therefore `span` (0xD7) IS audible in Surround mode. Full write-up +
+      metrics table in the HISTORY 2026-07-11 addendum.
+- [ ] **Surround Part B — tie the opcode to the register** (hardware-RE,
+      follow-up now that Part A is confirmed). Dump the live
+      `SourceConfiguration.gain[3][4]` while a span-sweeping `.bcseq` plays via
+      LayeredFS, binding `span`/`front_bypass` to the rear gain lanes at the
+      source. Feeds suite stage 3's Surround virtualization model.
 
 ## Settled decisions & standing rules
 
