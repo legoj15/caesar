@@ -230,19 +230,24 @@ per stage. Status:
 
 Hardware-RE queue (New 3DS + CFW, feeds stages 2–3):
 
-- [ ] **Surround-mode A/B probe** — *tool built + deployed 2026-07-11
-      (`tools/surround-probe/`); console capture not yet run.* libctru homebrew
-      playing a steady tone, front-only vs rear-only `ndspChnSetMix`, under
-      `NDSP_OUTPUT_STEREO` vs `NDSP_OUTPUT_SURROUND`, line-out captured on PC.
-      Prediction: captures identical in Stereo (runtime-zeroed rear + unity
-      fold-down), measurably different in Surround (virtualization engages) —
-      settles the one inference left in the span verdict, and the
-      headphone-detect A/B reveals whether the speaker/headphone coefficient
-      swap is real. Build/run/analyze steps + fill-in results sheet live in
-      `tools/surround-probe/`; full rationale + test design in the HISTORY
-      2026-07-11 addendum. Follow-up if confirmed (part B): dump the live
-      `SourceConfiguration.gain[3][4]` while a span-sweeping `.bcseq` plays via
-      LayeredFS, tying the CSEQ opcode to the rear gain lanes at the source.
+- [ ] **Surround-mode A/B probe** (`tools/surround-probe/`) — settles whether
+      the 3DS Surround output mode repositions a voice front/back, i.e. whether
+      `span` (0xD7) is audible on hardware. **v1 ran on console and was
+      INCONCLUSIVE**: a steady, L/R-symmetric tone with mono-summed analysis is
+      blind to front/back virtualization (all conditions nulled to the ~−30 dB
+      floor; Surround showed only a ~+2 dB level bump, zero L/R decorrelation).
+      **v2 built + deployed 2026-07-11, console capture not yet run**: a
+      broadband periodic Schroeder-pink probe hard-panned to a single quad
+      corner (front-left vs back-left), a 10-segment AUTO run with a
+      0x7FFF/0xFFFF depth positive-control, and a strictly per-channel analyzer
+      (`analyze_surround.py`: level-independent spectral-reshaping metric +
+      crosstalk, depth-gated CONFIRM/REFUTE). The probe→split→analyze chain is
+      validated on a synthetic run (CONFIRMS a simulated effect, REFUTES a
+      null). Run steps + results sheet in `tools/surround-probe/AUTO-RUN.md`;
+      rationale in the HISTORY 2026-07-11 addendum. Follow-up if confirmed
+      (part B): dump the live `SourceConfiguration.gain[3][4]` while a
+      span-sweeping `.bcseq` plays via LayeredFS, tying the opcode to the rear
+      gain lanes at the source.
 
 ## Settled decisions & standing rules
 
