@@ -56,6 +56,25 @@ static bool emitProgram(bool ok, uint8_t* pos)
 	return ok;
 }
 
+// A plain Uint8 argument is genuine sequence data in 0-255 while the MIDI
+// control is 7-bit, so 128-255 clamps to 127 (surfaced as an approximation
+// notice) rather than dropping the write. A Rnd/Var-prefixed argument is not
+// evaluated yet (the range minimum / variable index stands in for the value),
+// so an out-of-range value there is garbage and keeps dropping through the
+// emitCtrl notice instead of being baked in as a plausible-looking 127.
+static int32_t clampPlainCtrl(const CseqCmd& cmd, uint8_t* pos)
+{
+	if ((cmd.Suffix1 == SuffixType::None) && (cmd.Args[0] > 127))
+	{
+		Common::Warning(pos, "control/parameter value above MIDI range; clamped to 127",
+			"MIDI control/parameter values clamped to 127 (above range)");
+
+		return 127;
+	}
+
+	return cmd.Args[0];
+}
+
 vector<int32_t> ReadArgs(uint8_t*& pos, ArgType argType)
 {
 	if (argType == ArgType::Uint8)
@@ -960,15 +979,15 @@ bool Cseq::Convert(uint32_t startOffset)
 			}
 			else if (i->second.Cmd == 0xC0)
 			{
-				emitCtrl(smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_PANPOT, i->second.Args[0]), here);
+				emitCtrl(smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_PANPOT, clampPlainCtrl(i->second, here)), here);
 			}
 			else if (i->second.Cmd == 0xC1)
 			{
-				emitCtrl(smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_VOLUME, i->second.Args[0]), here);
+				emitCtrl(smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_VOLUME, clampPlainCtrl(i->second, here)), here);
 			}
 			else if (i->second.Cmd == 0xC2)
 			{
-				emitCtrl(smfInsertMasterVolume(smf, absTime, 0, track, i->second.Args[0]), here);
+				emitCtrl(smfInsertMasterVolume(smf, absTime, 0, track, clampPlainCtrl(i->second, here)), here);
 			}
 			else if (i->second.Cmd == 0xC3)
 			{
@@ -1048,7 +1067,7 @@ bool Cseq::Convert(uint32_t startOffset)
 			}
 			else if (i->second.Cmd == 0xD5)
 			{
-				emitCtrl(smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_EXPRESSION, i->second.Args[0]), here);
+				emitCtrl(smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_EXPRESSION, clampPlainCtrl(i->second, here)), here);
 			}
 			else if (i->second.Cmd == 0xD6)
 			{
@@ -1097,7 +1116,12 @@ bool Cseq::Convert(uint32_t startOffset)
 			}
 			else if (i->second.Cmd == 0xE1)
 			{
-				emitCtrl(smfInsertTempoBPM(smf, absTime, track, i->second.Args[0]), here);
+				// The tempo argument decodes as signed 16-bit, so garbage (or an
+				// unevaluated Rnd/Var stand-in) can be <= 0. bpm == 0 makes
+				// libsmfcx's 60000000 / bpm infinite and the int cast of that is
+				// UB; guard caller-side to keep the vendored copy pristine. The
+				// drop still surfaces through emitCtrl's notice.
+				emitCtrl((i->second.Args[0] > 0) && smfInsertTempoBPM(smf, absTime, track, i->second.Args[0]), here);
 			}
 			else if (i->second.Cmd == 0xE3)
 			{

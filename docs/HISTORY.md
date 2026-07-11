@@ -643,6 +643,39 @@ conflict with caesar's GPL-3.0.
 Concrete defects found while surveying and evolving the code, since fixed.
 Still-open defects are tracked under "Known bugs" in ROADMAP.md.
 
+- **Out-of-range controller values dropped instead of clamped, and a zero-BPM
+  tempo UB** (`Cseq.cpp`, the plain-controller emit sites and the `0xE1`
+  handler) (*fixed 2026-07-11*). Implements the first v0.5.1 triage work item.
+  A plain (un-prefixed) `Uint8` argument to pan (`0xC0`), volume (`0xC1`),
+  master volume (`0xC2`), or expression (`0xD5`) is genuine 0–255 sequence
+  data, but the libsmfc writer rejects anything above 127, so such values
+  vanished with a drop notice. They now clamp to 127 and emit, surfaced by a
+  default-visible "clamped" approximation notice; `Rnd`/`Var`-prefixed
+  arguments (whose value is an unevaluated stand-in — the range minimum or the
+  variable index) keep the honest drop-with-notice path until the convert-time
+  VM lands. `Suffix1 == None` is the discriminator, verified sound: only the
+  `0xA0`/`0xA1` prefixes set it, the Time and `[If]` prefixes live in other
+  fields, and for Time-suffixed ramps `Args[0]` is still the value (the
+  duration is appended after). The `0xE1` tempo handler gained a `bpm > 0`
+  guard: the argument decodes as signed 16-bit, and `bpm == 0` made the
+  vendored `libsmfcx.c` compute `60000000 / 0.0` = infinity, whose `int` cast
+  is UB (benign in practice — on MSVC/x86-64 it lands on `INT_MIN` and fails
+  the writer's later range check — but UB nonetheless); the guard closes it
+  caller-side, keeping the vendored copy pristine, and routes the drop through
+  the same notice. A 15-agent adversarial review (4 lenses, every finding
+  independently verified) confirmed the design — clamp-direction is
+  hardware-correct (masking `& 0x7F` would flip loud values quiet, and a
+  0–255→0–127 rescale would fabricate a scale these 7-bit commands don't
+  have), the four sites are exactly the sanctioned ones, and the guard is
+  output-preserving for every representable input — and produced one applied
+  cosmetic fix (the notice says "control/parameter" to match the `emitCtrl`
+  house style, since master volume is a SysEx, not a control change).
+  Verified with a byte-identical old-vs-new A/B over all 82 corpus archives:
+  257,097 files per tree, **zero** diffs, all 164 runs exit 0, all stderr
+  notice summaries identical. No real archive carries a plain out-of-range
+  value for these four commands (corroborating the census: the ~1,020
+  out-of-range drops are all `0xE3`/`Rnd`/`Var`-sourced), so the change is
+  pure hardening today and only alters output for hypothetical future inputs.
 - **GM percussion-channel collision: melodic 10th tracks rendered as drums**
   (`Cseq.cpp`, the sequence-to-MIDI walk) (*fixed 2026-07-10*). Every emitted
   MIDI event used the CSEQ track index directly as the MIDI channel — the channel

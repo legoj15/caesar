@@ -38,6 +38,16 @@ House rules:
 
 ### Fixed
 
+- Plain (un-prefixed) out-of-range values for pan, volume, master volume, and
+  expression (`Uint8` 128–255) now clamp to 127 and emit — surfaced by a
+  default-visible "clamped" approximation notice — instead of being dropped;
+  values from unevaluated `Rnd`/`Var` prefixes still drop with a notice.
+  (output-identical on the whole 82-archive corpus, where no such plain values
+  occur; changes `.mid` only for inputs that carry them)
+- A sequence tempo of 0 BPM no longer reaches the vendored `libsmfcx.c`
+  division whose infinite result has an undefined-behavior `int` cast; a
+  caller-side `bpm > 0` guard drops it with the standard out-of-range notice.
+  (output-identical)
 - `tools/surround-probe/tools/split_run.py` mis-segmented the real broadband
   AUTO capture: the app's post-run idle tail became a phantom 11th "body", and
   naming keyed on pip counts (which the multitone's envelope dips and transition

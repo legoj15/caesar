@@ -75,16 +75,13 @@ Ranked by priority:
       with a GS "rhythm part off" SysEx for part 10); the SMF track layout is
       unchanged, so sequences without a 10th track are byte-identical. Full
       narrative and A/B in [HISTORY.md](HISTORY.md#fixed-bugs).
-- [ ] **Triage the ~1,020 surfaced controller/parameter drops.** Clamp plain
-      out-of-range volume/pan/expression values (`Uint8` 128-255) to 127
-      instead of dropping them; keep dropping-with-notice values that are
-      garbage from unevaluated `Rnd`/`Var` prefixes until suite stage 4 models
-      variables for real. Add a `bpm > 0` guard before `smfInsertTempoBPM` —
-      this also closes the vendored `libsmfcx.c` `bpm == 0` division UB from
-      the caller side (a `0xE1` tempo decodes as signed 16-bit; `bpm == 0`
-      makes `60000000 / bpm` infinite and the int cast is UB — benign today
-      only because the garbage fails a later range check), keeping the vendored
-      copy pristine.
+- [x] **Triaged the ~1,020 surfaced controller/parameter drops** — plain
+      out-of-range volume/pan/master-volume/expression values now clamp to 127
+      with an approximation notice (unevaluated `Rnd`/`Var` stand-ins keep
+      dropping with a notice until suite stage 4), and a caller-side `bpm > 0`
+      guard closes the vendored `libsmfcx.c` zero-BPM division UB. Corpus A/B
+      byte-identical (82 archives, 257,097 files) — full narrative in
+      [HISTORY.md](HISTORY.md#fixed-bugs).
 - [ ] **Fix the two mis-wired vibrato/pitch controls.** `0xE3` (sweep pitch, a
       signed-16 pitch-sweep amount) is emitted as CC78 "vibrato delay" — a
       mis-targeted control whose values also routinely exceed 127 and get
@@ -284,11 +281,12 @@ Fixed bugs and their verification stories are in
 [HISTORY.md](HISTORY.md#fixed-bugs).
 
 The remaining MIDI-converter discrepancies found in the 2026-07-10 post-release
-audit (controller-range drops, mis-wired `0xE3`/`0xE0`, discarded loop counts,
-tempo-zero UB) and the 2026-07-11 dropped-parameter triage (damper threshold,
-init_pan/lpf, mod-type gating, silent `Rnd`/`Var`/`[If]`/ramp handling) are
-scoped as work items under **v0.5.1** above rather than listed here twice.
-(The GM drum-channel collision from that audit is fixed.)
+audit (mis-wired `0xE3`/`0xE0`, discarded loop counts) and the 2026-07-11
+dropped-parameter triage (damper threshold, init_pan/lpf, mod-type gating,
+silent `Rnd`/`Var`/`[If]`/ramp handling) are scoped as work items under
+**v0.5.1** above rather than listed here twice. (The GM drum-channel
+collision, the controller-range drops, and the tempo-zero UB from those audits
+are fixed.)
 
 - **Unknown-opcode bytes are swallowed instead of failing fast.** `0x90`/`0x96`
   (2-byte `Analyse` probes guessed by the original author) and `0xB7–0xBC`
