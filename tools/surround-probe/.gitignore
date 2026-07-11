@@ -1,0 +1,10 @@
+# devkitARM build outputs
+build/
+*.3dsx
+*.elf
+*.smdh
+*.map
+
+# host-side capture / analysis artifacts
+*.wav
+__pycache__/

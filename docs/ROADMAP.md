@@ -230,17 +230,19 @@ per stage. Status:
 
 Hardware-RE queue (New 3DS + CFW, feeds stages 2–3):
 
-- [ ] **Surround-mode A/B probe.** libctru homebrew playing a steady tone,
-      front-only vs rear-only `ndspChnSetMix`, under `NDSP_OUTPUT_STEREO` vs
-      `NDSP_OUTPUT_SURROUND`, line-out captured on PC. Prediction: captures
-      identical in Stereo (runtime-zeroed rear + unity fold-down), measurably
-      different in Surround (virtualization engages) — settles the one
-      inference left in the span verdict, and the headphone-detect A/B
-      reveals whether the speaker/headphone coefficient swap is real. Full
-      rationale + test design in the HISTORY 2026-07-11 addendum. Follow-up
-      if confirmed (part B): dump the live `SourceConfiguration.gain[3][4]`
-      while a span-sweeping `.bcseq` plays via LayeredFS, tying the CSEQ
-      opcode to the rear gain lanes at the source.
+- [ ] **Surround-mode A/B probe** — *tool built + deployed 2026-07-11
+      (`tools/surround-probe/`); console capture not yet run.* libctru homebrew
+      playing a steady tone, front-only vs rear-only `ndspChnSetMix`, under
+      `NDSP_OUTPUT_STEREO` vs `NDSP_OUTPUT_SURROUND`, line-out captured on PC.
+      Prediction: captures identical in Stereo (runtime-zeroed rear + unity
+      fold-down), measurably different in Surround (virtualization engages) —
+      settles the one inference left in the span verdict, and the
+      headphone-detect A/B reveals whether the speaker/headphone coefficient
+      swap is real. Build/run/analyze steps + fill-in results sheet live in
+      `tools/surround-probe/`; full rationale + test design in the HISTORY
+      2026-07-11 addendum. Follow-up if confirmed (part B): dump the live
+      `SourceConfiguration.gain[3][4]` while a span-sweeping `.bcseq` plays via
+      LayeredFS, tying the CSEQ opcode to the rear gain lanes at the source.
 
 ## Settled decisions & standing rules
 
