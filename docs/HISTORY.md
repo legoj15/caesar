@@ -643,6 +643,89 @@ conflict with caesar's GPL-3.0.
 Concrete defects found while surveying and evolving the code, since fixed.
 Still-open defects are tracked under "Known bugs" in ROADMAP.md.
 
+- **Init pan (`0xDC`) and LPF cutoff (`0xD8`) implemented — and *both* of the
+  triage's prescriptions were wrong** (`Cseq.cpp`) (*2026-07-12*). Closes the
+  v0.5.1 "two dropped commands with clean MIDI targets" item. The roadmap called
+  for "one line each, mirroring the existing pan / FX-send handlers": `0xDC` →
+  CC10 raw ("exact mapping"), `0xD8` → CC74 raw ("near-identity 0–127"). Neither
+  survived contact with the engine. As with the `0xDF` damper phantom, the
+  argument semantics had been *assumed*, not read.
+
+  **The `0xDC` clobber.** The triage's own table said "engine sums init_pan+pan"
+  and, in the same sentence, called a raw CC10 write "exact" — an internal
+  contradiction nobody had cashed out. MIDI has exactly one CC10 register per
+  channel and caesar already writes `0xC0` pan to it, so a second independent
+  raw CC10 stream is *last-writer-wins*: whichever command comes second wins and
+  the other is silently lost. The engine instead treats the two as **additive
+  offsets from centre** — NW4R's MML parser reads them with the *identical*
+  conversion (`pan = arg - 64`, `initPan = arg - 64`) and sums both into the
+  voice's pan, along with a third term, the bank note's own pan. So `pan=32`
+  with `init_pan=32` is hard left on hardware (−32/63 + −32/63 → clamped −1.0),
+  where a raw emit gives half-left.
+
+  **Why the pan sum is exact, not an approximation.** caesar already exports the
+  note term as the SF2 `kPan` generator (`Cbnk.cpp`: `(pan - 64) * (500/63)` —
+  literally the engine's `(instInfo.pan - 64) / 63` rescaled), and a SoundFont
+  player *sums* `kPan` with CC10 at the generator summing node. That is the
+  engine's own additive structure, so CC10 must carry exactly the other two
+  terms and must not re-fold in the note pan (which would double-count it).
+  `Cbnk` needed no change. The new `combinePan` emits
+  `clamp(pan + initPan - 64, 0, 127)`; because `initPan` defaults to 64, this
+  collapses to `pan` on every track that never sends `0xDC`, which is what makes
+  the change byte-identical everywhere else and gives the A/B a falsifiable
+  prediction.
+
+  **The `0xD8` invented brightening.** "Neutral 64" was right (`InitParam` starts
+  `lpfFreq` at 64), but "near-identity 0–127" was not: the value scales the
+  voice's cutoff by `value / 64`, and `Voice::SetLpfFreq` **clamps that scale to
+  [0,1]**. Every byte ≥ 64 is therefore bit-identical to 64 — the command can
+  only *darken*, never brighten. CC74 above 64, by contrast, tells a synth to
+  brighten past the sample's own tone, so a raw pass-through would have
+  manufactured treble the console never produced, on the 261 corpus commands
+  that sit above 64. caesar clamps to the engine's own ceiling instead. The
+  residual approximation is the curve, not the direction: hardware steps 187.5
+  cents per unit (an exponential 31.25 Hz – 32 kHz sweep) against GM2's ~150, so
+  a cut reads about 20% shallow — a relative control can carry the direction,
+  the neutral point and both end stops, and it does.
+
+  **The CSEQ command dispatcher, found at last.** The evidence chain ran on the
+  actual 3DS binary, not only the Wii decomps: `MmlParser::CommandProc` lives at
+  `0x2E32D4` in MiiPlaza's `code.bin` (load base `0x00100000`), pre-computing
+  `arg - 0x40` at `0x2E3304`. The `0xDC` case (`0x2E35F0`) is a bare
+  `strb r1, [r4, #0x6b]` → SeqTrack+0x87; the `0xC0` case (`0x2E35D0`) writes a
+  *different* field (+0x72); `Channel::Update` (`0x149FC0`) adds them with
+  `vadd.f32 s16, s2, s3`. The `0xD8` case (`0x2E3768`) multiplies by
+  `0x3C800000` = 1/64. This is the sequence runtime that the disasm handoff's
+  Session 3 listed as the next dig and never reached — worth carrying into
+  `NW4C-disasm-handoff.md` and into suite stage 2.
+
+  Two incidental findings: `0xDC`'s CTR handler is a plain `strb` that ignores
+  any `_t` ramp length, so a time-suffixed init_pan is an instant jump **on
+  hardware too** — caesar's instant emit is exact there, not a flattening. And
+  an unevaluated `Rnd`/`Var`-prefixed `0xDC` now drops with a notice rather than
+  emitting: unlike other commands, baking in a range-minimum or variable index
+  would poison the *combined* pan for every later note on the track, not just
+  its own event.
+
+  **Verification.** A/B over the 82-archive corpus, 216,485 files per side, none
+  added or removed. Every `.sf2` (6,059), `.wav` (64,580), `.log` and raw dump
+  **byte-identical**; 2,385 `.mid` differ and 31,266 do not. An independent SMF
+  parse of all 2,385 confirms **every difference is a CC10 or CC74 event** — no
+  note, timing, or other-event change anywhere (3,448 CC74 added, 4,664 CC10
+  added, 99 CC10 values changed by the pan combination). The differing-file count
+  reconciles exactly with a control-flow-scoped corpus census: 787 init_pan files
+  + 1,917 lpf files − 319 overlap = 2,385.
+
+  **The census also refuted the "common case" claim** the roadmap leaned on.
+  "Set-once-before-notes" is not the common case: init_pan fires **mid-track,
+  after notes have already sounded, in 6,209 of 8,438 uses (74%)**. It is used as
+  a live pan move, and its values cluster on real stereo positions (64 centre,
+  then 32/48/80/96) rather than sitting at centre. The one place the export stays
+  approximate is a consequence of MIDI, not of this fix: hardware *latches*
+  init_pan at note-on and never moves a sounding note, whereas CC10 moves the
+  whole channel. MIDI has no per-note pan, so the tick is the honest place to put
+  it.
+
 - **Damper pedal (`0xDF`): the reported bug did not exist — the *premise* was
   the bug** (`Cseq.cpp`, the `0xDF` handler) (*investigated and hardened
   2026-07-12*). Closes the v0.5.1 damper work item, but not the way that item
@@ -997,11 +1080,11 @@ Warned drops, census-ranked (occurrences / distinct sub-files / archives):
 | tie (0xC8) | 13,948 | 6,617 | 33 | Real articulation loss (notes re-attack); already the v0.5.1 stretch item. |
 | conditional jump | 13,871 | 2,260 | 26 | Superseded by the convert-time VM plan (below). |
 | bank select (0xB6) | 8,778 | 2,934 | 41 | Real: mid-sequence bank switch → wrong instrument. Needs Cbnk SF2-layout co-design. Top users: WarioWare Gold `SoundData1` (4,585), Majora `JokerSound`, `GreenCube`, Fire Emblem. |
-| init pan (0xDC) | 8,438 | 1,212 | 46 | **Exact one-line fix**: CC10 at the tick (engine sums init_pan+pan; set-once-before-notes is the common case). |
+| init pan (0xDC) | 8,438 | 1,212 | 46 | ~~**Exact one-line fix**: CC10 at the tick (engine sums init_pan+pan; set-once-before-notes is the common case).~~ **Both halves of this were wrong** — see the 2026-07-12 entry. A raw CC10 write *clobbers* the pan it is supposed to be summed with, and init_pan is used mid-track (74% of uses) far more often than as an initialiser. Fixed by combining the two terms. |
 | mod type (0xCC) | 8,006 | 4,512 | 64 | Linchpin: LFO target select (0 pitch / 1 volume / 2 pan). caesar emits vibrato CCs unconditionally, so tremolo/auto-pan tracks render as pitch wobble. Fix = gate CC1/76/77/78 on tracked type. |
 | biquad value/type (0xB5/0xB4) | 8,057 | ~1,030 | 27 | No audible MIDI target (filter response select + blend). Keep dropped; CC30/31 only if lossless round-trip ever matters. |
 | front bypass (0xBF) | 7,129 | 550 | 15 | Surround-path routing bool — only meaningful under the Surround output mode (addendum below); no MIDI target. Demote. |
-| lpf cutoff (0xD8) | 4,672 | 2,157 | 35 | Cheap approximate fix: CC74 brightness, near-identity 0–127 (GM2 default 64 matches NW4R neutral 64). |
+| lpf cutoff (0xD8) | 4,672 | 2,157 | 35 | CC74 brightness — but ~~near-identity 0–127~~ **darken-only 0–64**: the neutral-64 half was right, the range half was not. The engine clamps the cutoff scale at 64, so a raw pass-through would brighten past the sample's own tone. See the 2026-07-12 entry. |
 | envelope hold (0xB1) | 3,709 | 2,439 | 21 | NW4C ADSHR hold-stage override; no CC exists. Keep dropped. |
 | priority (0xC6) | 3,161 | 1,005 | 35 | Voice-steal priority; meaningless in MIDI (demote), but must be preserved as state for the future player. |
 | mute (0xDD) | 512 | 4 | 2 | Mode byte (off/no-stop/release/stop). Faithful handling = per-track flag suppressing note emission (+CC120/123); fully doable in the one-pass walk. Rare — low priority. |

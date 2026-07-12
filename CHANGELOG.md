@@ -24,6 +24,20 @@ House rules:
 
 ### Added
 
+- **Init pan (`0xDC`) and LPF cutoff (`0xD8`) are now converted** instead of
+  being dropped (12,110 previously discarded commands across 46 and 35
+  archives). Neither is the raw mapping the roadmap assumed. Init pan is an
+  *additive* offset the engine sums with the `0xC0` pan — writing it straight to
+  CC10 would have clobbered the pan on the 76 corpus tracks that set both — so
+  caesar tracks both terms and emits the combined stereo position (the note's own
+  pan stays in the SF2 `kPan` generator, which SoundFont players already sum with
+  CC10, exactly as hardware does). LPF cutoff maps to CC74 brightness but is
+  *darken-only*: the engine clamps its cutoff scale at 64, so values above it are
+  clamped rather than passed through, which would have told synths to brighten
+  past the sample's own tone. Both semantics were confirmed against the CSEQ
+  command dispatcher in a real 3DS binary. (changes `.mid` only — 2,385 files;
+  every diff is a CC10/CC74 event, verified by independent SMF parse)
+
 - This changelog, bundled into release zips and published as the release notes
   by `release.yml`. (output-identical)
 - `docs/HISTORY.md` (completed-work narratives) and `docs/SUITE-DESIGN.md`

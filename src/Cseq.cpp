@@ -75,6 +75,24 @@ static int32_t clampPlainCtrl(const CseqCmd& cmd, uint8_t* pos)
 	return cmd.Args[0];
 }
 
+// A voice's pan is the SUM of three independent terms on hardware, not a single
+// value: the bank note's own pan, the track's init pan (0xDC) and the track's pan
+// (0xC0). The engine stores the latter two identically -- NW4R's MML parser reads
+// each as a signed offset from centre (`pan = arg - 64`, `initPan = arg - 64`) and
+// adds both into the voice's pan, so neither command overrides the other. caesar
+// already exports the note term as the SF2 kPan generator, and a SoundFont player
+// sums kPan with CC10 at the generator summing node -- the same additive model --
+// so CC10 must carry exactly the other two terms and must not re-add the note pan.
+// Writing either command's raw value straight to CC10 would clobber the other,
+// which is why 0xDC needs this rather than a write of its own. The clamp is
+// two-sided because two offsets in the same direction can push the sum past either
+// end (each end is reached 54 times in the corpus), as the engine's own pan clamp
+// does.
+static int32_t combinePan(int32_t pan, int32_t initPan)
+{
+	return clamp(pan + initPan - 64, 0, 127);
+}
+
 vector<int32_t> ReadArgs(uint8_t*& pos, ArgType argType)
 {
 	if (argType == ArgType::Uint8)
@@ -647,6 +665,12 @@ bool Cseq::Convert(uint32_t startOffset)
 	// dispatcher is only followed while this is false, so any track that already
 	// produces sound converts exactly as before.
 	bool trackHasNote = false;
+	// The current track's two pan terms, in raw command units (64 = centre), which
+	// the engine sums into one voice pan (see combinePan). Both start at the value
+	// the engine initialises them to, so a track that never sends init pan emits
+	// CC10 == its pan and converts byte-identically.
+	int32_t trackPan = 64;
+	int32_t trackInitPan = 64;
 	// Set by any handler that redirects the walk (jump, call, return, track
 	// change) so the loop lands on the freshly-found command instead of stepping
 	// past it. This replaces the old "find(target); --i;" idiom, which was
@@ -752,6 +776,8 @@ bool Cseq::Convert(uint32_t startOffset)
 				track = j;
 				noteWait = false;
 				trackHasNote = false;
+				trackPan = 64;
+				trackInitPan = 64;
 				offsetTime.clear();
 
 				i = commands.find(trackOffsets[j]);
@@ -979,7 +1005,20 @@ bool Cseq::Convert(uint32_t startOffset)
 			}
 			else if (i->second.Cmd == 0xC0)
 			{
-				emitCtrl(smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_PANPOT, clampPlainCtrl(i->second, here)), here);
+				int32_t pan = clampPlainCtrl(i->second, here);
+
+				// Fold in whatever init pan (0xDC) the track is carrying. With none --
+				// every sequence that does not use 0xDC -- this is the pan value itself,
+				// so those files are untouched. An unevaluated Rnd/Var stand-in is not a
+				// pan, so it keeps being written raw as before rather than being summed
+				// into a plausible-looking position.
+				if (i->second.Suffix1 == SuffixType::None)
+				{
+					trackPan = pan;
+					pan = combinePan(trackPan, trackInitPan);
+				}
+
+				emitCtrl(smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_PANPOT, pan), here);
 			}
 			else if (i->second.Cmd == 0xC1)
 			{
@@ -1106,7 +1145,32 @@ bool Cseq::Convert(uint32_t startOffset)
 			}
 			else if (i->second.Cmd == 0xD8)
 			{
-				Common::Warning(Data + dataOffset + 8 + i->first, "lpf cutoff not implemented");
+				// LPF cutoff -> CC74 (brightness). Both are relative controls centred on
+				// 64: NW4R's SeqTrack::InitParam starts lpfFreq at 64, and the command
+				// scales the voice's low-pass cutoff by (value / 64), so 0-64 maps
+				// straight through -- 0 is fully closed, 64 fully open.
+				//
+				// Above 64 the two diverge, and passing the value through would invent
+				// sound the console never made: Voice::SetLpfFreq clamps that scale to
+				// [0,1], so every byte >= 64 is identical to 64 (filter open, i.e. the
+				// sample's own tone), whereas CC74 above 64 tells the synth to brighten
+				// PAST the sample's tone. Clamp to the engine's own ceiling instead --
+				// 261 commands in the corpus sit above it.
+				//
+				// The remaining approximation is the curve: hardware steps 187.5 cents
+				// per unit (an exponential 31.25 Hz - 32 kHz sweep) against GM2's 150,
+				// so a cut reads about 20% shallow. Direction, neutral point and the
+				// closed/open ends are all right, which is what a relative control can
+				// carry. A Rnd/Var stand-in is not a cutoff, so it keeps dropping.
+				if (i->second.Suffix1 == SuffixType::None)
+				{
+					emitCtrl(smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_BRIGHTNESS, clamp(i->second.Args[0], 0, 64)), here);
+				}
+				else
+				{
+					Common::Warning(here, "lpf cutoff is Rnd/Var-valued; dropped",
+						"MIDI brightness changes dropped (unevaluated Rnd/Var lpf cutoff)");
+				}
 			}
 			else if (i->second.Cmd == 0xD9)
 			{
@@ -1127,7 +1191,30 @@ bool Cseq::Convert(uint32_t startOffset)
 			}
 			else if (i->second.Cmd == 0xDC)
 			{
-				Common::Warning(Data + dataOffset + 8 + i->first, "init pan not implemented");
+				// Init pan: a second pan offset the engine ADDS to the track pan rather
+				// than replacing it (see combinePan), so it cannot be written to CC10 on
+				// its own -- that would clobber any 0xC0 pan, which 76 tracks in the
+				// corpus set alongside it. Track it and emit the combined position.
+				//
+				// The name is misleading: hardware latches init pan at note-on and does
+				// not move notes already sounding, and 74% of the corpus' uses fire
+				// mid-track, after notes have started. CC10 moves the whole channel,
+				// sounding notes included; MIDI has no per-note pan, so that difference
+				// is not expressible and the tick is the honest place to put it.
+				//
+				// A Rnd/Var stand-in would poison the combined pan for every later note
+				// on the track, not just its own event, so it keeps dropping.
+				if (i->second.Suffix1 == SuffixType::None)
+				{
+					trackInitPan = clampPlainCtrl(i->second, here);
+
+					emitCtrl(smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_PANPOT, combinePan(trackPan, trackInitPan)), here);
+				}
+				else
+				{
+					Common::Warning(here, "init pan is Rnd/Var-valued; dropped",
+						"MIDI pan changes dropped (unevaluated Rnd/Var init pan)");
+				}
 			}
 			else if (i->second.Cmd == 0xDD)
 			{

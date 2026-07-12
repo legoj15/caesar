@@ -103,10 +103,16 @@ Ranked by priority:
       inverted args 1–63; caesar now applies the engine's own threshold, which
       is byte-identical on the corpus and fixes a latent >127 drop. Full
       narrative in [HISTORY.md](HISTORY.md#fixed-bugs).
-- [ ] **Implement the two dropped commands with clean MIDI targets**:
-      `0xDC` init_pan → CC10 (exact mapping; 8,438 drops across 46 archives)
-      and `0xD8` lpf_cutoff → CC74 brightness (near-identity 0–127; 4,672
-      drops). One line each, mirroring the existing pan / FX-send handlers.
+- [x] **Implemented the two dropped commands — but neither was the prescribed
+      one-liner.** The engine *sums* `0xDC` init_pan with `0xC0` pan, so a raw
+      CC10 write clobbers the pan (76 corpus tracks set both); caesar now tracks
+      both terms and emits the combined position. And `0xD8` lpf_cutoff is
+      darken-only — the engine clamps its scale at 64, so a raw pass-through
+      would have told synths to brighten past the sample's own tone (261
+      commands). Both semantics confirmed in the 3DS binary itself (the CSEQ
+      dispatcher, found at last — see HISTORY). A/B: `.mid`-only, 2,385 files,
+      every diff CC10/CC74 by independent SMF parse. Narrative in
+      [HISTORY.md](HISTORY.md#fixed-bugs).
 - [ ] **Stop `0xB2` mono/poly from silencing the channel.** caesar emits it as
       CC126/CC127, but those are *Channel Mode* messages: the MIDI 1.0 spec
       mandates an implicit **All Notes Off** on CC124–127, so a mid-track mono
@@ -165,7 +171,7 @@ Ranked by priority:
       `[Unreleased]` in the same commit, stating its output impact
       (output-identical vs which output types change).
 
-## After the first release (not blocking v0.5.0)
+## After the first release (not blocking v0.5.1)
 
 Larger efforts that expand what caesar can do. Rough priority order:
 
@@ -303,6 +309,29 @@ collision, the controller-range drops, the tempo-zero UB, the mis-wired
 `0xE3`/`0xE0` controls, and the discarded loop counts from the 2026-07-10
 post-release audit are fixed.)
 
+- **The `0x8A` call stack leaks across track boundaries.** `sp` (`Cseq.cpp`) is
+  one `stack<uint32_t>` shared by all 16 tracks, and `advanceToNextTrack` resets
+  `absTime`/`noteWait`/`trackHasNote`/`offsetTime` but *not* `sp`. A track that
+  ends (Fin, or a whole-song loop-back) while inside a Call leaves its return
+  frame behind, so the next track's first unbalanced `0xFD` Return takes the
+  `!sp.empty()` branch and jumps into the **previous track's code**, executing it
+  under the new track's index and channel — silently, since the "Return with no
+  matching Call" notice only fires when `sp` *is* empty, and that case is
+  documented as common in this corpus. The engine's call stack is per-track
+  (NW4R keeps `callStack[]`/`callStackDepth` inside the track). Fix is
+  `while (!sp.empty()) sp.pop();` in `advanceToNextTrack`, but it is
+  output-changing wherever it fires, so it wants its own commit and A/B. Found
+  while auditing per-track state for the init_pan work; corrupts track
+  attribution generally, not just pan. (Related: `sp.push(next(i, 1)->first)` is
+  UB when a Call is the last command in the bank — same family as the fixed
+  `--begin()` bug.)
+- **Distinct sequence entries silently overwrite each other's `.mid`.** 104 of
+  7,990 output names are reached from more than one entry start offset —
+  `SEQ_1.bcseq` alone is converted from 6 different offsets, all writing
+  `SEQ_1.mid`, so only the last survives. The shared-bank fix gave *most* entries
+  distinct names, but where the archive's symbol name collides the offset is not
+  disambiguated. Silent data loss (the earlier entries' music never reaches
+  disk); the fix is to suffix colliding names with the entry offset.
 - **Unknown-opcode bytes are swallowed instead of failing fast.** `0x90`/`0x96`
   (2-byte `Analyse` probes guessed by the original author) and `0xB7–0xBC`
   (1-byte catch-all) are not real CTR opcodes — the map jumps `0xB6`→`0xBD` —
