@@ -643,6 +643,21 @@ conflict with caesar's GPL-3.0.
 Concrete defects found while surveying and evolving the code, since fixed.
 Still-open defects are tracked under "Known bugs" in ROADMAP.md.
 
+- **Mod types above 2 no longer abort the sequence** (`Cseq.cpp`)
+  (*2026-07-12*). Closes the "parse hard-errors on mod types above 2" known
+  bug. NW4R stores the LFO target unvalidated and its routing if-chain
+  applies no LFO to an out-of-range value, so the console plays such a file
+  (LFO silent) where caesar's `Common::Error` refused it outright — a
+  converter stricter than the hardware it models. The `0xCC` check is now a
+  default-visible notice and the sequence converts, with the emit phase
+  suppressing the pitch-vibrato CCs for the out-of-range target (the same
+  wire behaviour as tremolo/auto-pan, and exactly the audible result of "no
+  LFO"); a live CC1 is still zeroed on the retarget, with an out-of-range
+  wording. The extended mod2–4 type checks are dropped entirely — that
+  family is wholly unimplemented and already notices per execution. Zero
+  corpus occurrences: the A/B is byte-identical with byte-identical stderr
+  (exit 0).
+
 - **`Rnd` values converted as the range midpoint instead of the first bound —
   the silent bias on 500k+ random-valued events** (`Cseq.cpp`)
   (*2026-07-12*). Closes the v0.5.1 Rnd-midpoint item. The `Rnd` prefix

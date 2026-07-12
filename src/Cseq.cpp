@@ -529,14 +529,20 @@ bool Cseq::Convert(uint32_t startOffset)
 
 			cmd.Args.insert(cmd.Args.end(), args.begin(), args.end());
 
-			// Mod type (0xCC) selects the track LFO target. Only a literal
-			// argument is a target byte this validation can apply to; an
-			// unevaluated Rnd/Var stand-in is handled with a notice at emit.
+			// Mod type (0xCC) selects the track LFO target. This used to be a
+			// hard error for values above 2, but that is stricter than the
+			// hardware: NW4R stores the byte unvalidated and its routing
+			// if-chain simply applies no LFO to an out-of-range target, so the
+			// console plays such a file (LFO silent) where caesar refused it
+			// outright. Notice and continue; the emit handler suppresses the
+			// pitch-vibrato CCs for any non-pitch target, which is exactly the
+			// audible result. Only a literal argument is a target byte (an
+			// unevaluated Rnd/Var stand-in is handled at emit). Zero corpus
+			// occurrences.
 			if ((statusByte == 0xCC) && (cmd.Suffix1 == SuffixType::None) && (cmd.Args.back() > 2))
 			{
-				Common::Error(pos - 1, "A valid modulation type", cmd.Args.back());
-
-				return false;
+				Common::Warning(pos - 1, "mod type above 2; the engine applies no LFO",
+					"mod type out of range (engine applies no LFO)");
 			}
 		}
 		else if ((statusByte == 0xE0) || (statusByte == 0xE1) || (statusByte == 0xE3) || (statusByte == 0xE4))
@@ -589,17 +595,15 @@ bool Cseq::Convert(uint32_t startOffset)
 
 				cmd.Args.insert(cmd.Args.end(), args.begin(), args.end());
 
-				// mod2/3/4 type (0xA4/0xAA/0xB0): the same literal-only
-				// validation as 0xCC. These three used to read a bare byte
-				// that ignored a Rnd/Var prefix's argument form -- the same
-				// wrong-arg-count desync as the plain fixed-1-byte group.
-				if (((statusByte == 0xA4) || (statusByte == 0xAA) || (statusByte == 0xB0))
-					&& (cmd.Suffix1 == SuffixType::None) && (cmd.Args.back() > 2))
-				{
-					Common::Error(pos - 1, "A valid modulation type", cmd.Args.back());
-
-					return false;
-				}
+				// mod2/3/4 type (0xA4/0xAA/0xB0) needs no range validation:
+				// the engine stores the target unvalidated (out of range =
+				// no LFO applied), and the whole mod2-4 family is dropped at
+				// emit with a notice anyway. The old hard error was stricter
+				// than hardware, and these three also used to read a bare
+				// byte that ignored a Rnd/Var prefix's argument form -- the
+				// same wrong-arg-count desync as the plain fixed-1-byte
+				// group. Both fixed; the shared ReadArgs above is all that
+				// is needed.
 			}
 			else if (statusByte == 0xE0)
 			{
@@ -1218,7 +1222,9 @@ bool Cseq::Convert(uint32_t startOffset)
 			else if (i->second.Cmd == 0xCC)
 			{
 				// Track LFO target: 0 = pitch, 1 = volume (tremolo), 2 = pan
-				// (auto-pan); parse already rejected anything above 2. Retargeting
+				// (auto-pan). A value above 2 gets no LFO at all on hardware
+				// (stored unvalidated, routed nowhere), so any non-zero target
+				// rightly suppresses the pitch-vibrato CCs here. Retargeting
 				// only re-routes the engine's LFO -- its parameters persist -- so in
 				// MIDI terms leaving pitch must silence a live CC1 (the SF2 default
 				// mod-wheel modulator keeps wobbling pitch otherwise) and returning
@@ -1240,8 +1246,16 @@ bool Cseq::Convert(uint32_t startOffset)
 								smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_MODULATION, 0);
 								modWire[0] = 0;
 
-								Common::Warning(here, "track LFO retargeted to volume/pan; tremolo/auto-pan not rendered",
-									"tremolo/auto-pan LFO dropped (no MIDI equivalent)");
+								if (newType <= 2)
+								{
+									Common::Warning(here, "track LFO retargeted to volume/pan; tremolo/auto-pan not rendered",
+										"tremolo/auto-pan LFO dropped (no MIDI equivalent)");
+								}
+								else
+								{
+									Common::Warning(here, "track LFO target out of range; the engine applies no LFO",
+										"mod type out of range (engine applies no LFO)");
+								}
 							}
 						}
 						else

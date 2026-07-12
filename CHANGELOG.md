@@ -87,6 +87,15 @@ House rules:
 
 ### Fixed
 
+- A mod type (`0xCC`, or the extended mod2–4 types) above 2 no longer aborts
+  the whole sequence with a parse error. The hardware stores the LFO target
+  unvalidated and simply applies no LFO to an out-of-range value — the
+  console plays such a file with the LFO silent — so caesar now emits a
+  default-visible notice and converts the sequence, suppressing the
+  pitch-vibrato CCs exactly as it does for any non-pitch target.
+  (output-identical on the whole corpus, where no such value occurs; inputs
+  carrying one now convert instead of failing)
+
 - The sequence parser's two latent wrong-arg-count desync hazards are closed.
   A `_t` (ramp) suffix's trailing duration was only consumed for commands in
   `0xB0`–`0xDF` — on a note, tempo, sweep, or extended command those bytes

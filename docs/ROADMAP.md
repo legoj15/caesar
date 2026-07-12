@@ -337,12 +337,6 @@ vibrato gating are fixed.)
   *product* of `0xCA` depth and `0xCD` range — range, default 1, is a raw
   multiplier — so the width term largely lives in the CC77 caesar writes to
   an inert controller, while CC1 alone drives what players actually render.)
-- **Parse hard-errors on mod types above 2, stricter than the engine.** A
-  `0xCC` (or extended mod-type) argument above 2 aborts the whole sequence via
-  `Common::Error`, but NW4R stores the LFO target unvalidated and its routing
-  if-chain simply applies no LFO to an out-of-range value — the console plays
-  such a file (LFO silent) where caesar refuses it outright. Zero corpus
-  occurrences; latent. Downgrade to a notice-and-ignore when convenient.
 
 - **The "plain values clamp to 127" invariant is not universal.**
   `clampPlainCtrl` is applied at `0xC0`/`0xC1`/`0xC2`/`0xD5` but not at `0xC5`
