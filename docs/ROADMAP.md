@@ -141,11 +141,11 @@ Ranked by priority:
       non-opcodes now fail fast instead of swallowing guessed lengths, and `_t`
       ramps surface a per-execution flatten notice. Byte-identical corpus A/B;
       narrative in [HISTORY.md](HISTORY.md#fixed-bugs).
-- [ ] **Use the `Rnd` midpoint instead of the minimum.** Random-valued
-      commands currently collapse to the range *minimum*, silently biasing
-      196k volumes, 177k pitch bends, and 94k rest durations (timing!) low.
-      Midpoint is the honest deterministic stand-in until real randomness
-      lands with the VM. Output-changing for those sequences.
+- [x] **`Rnd` values now convert as the range midpoint** instead of the
+      minimum (which silently biased 196k volumes, 177k pitch bends, and 94k
+      rest durations low) — the honest deterministic stand-in until the
+      convert-time VM brings real randomness. `.mid`-only A/B; narrative in
+      [HISTORY.md](HISTORY.md#fixed-bugs).
 - [ ] *(stretch — may slip to a later release)* **Tie mode (`0xC8`).** Tied
       notes currently re-attack instead of merging into one sustained note.
       Bounded but the largest item in this patch; overlaps with the stage-2

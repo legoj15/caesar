@@ -60,7 +60,7 @@ static bool emitProgram(bool ok, uint8_t* pos)
 // A plain Uint8 argument is genuine sequence data in 0-255 while the MIDI
 // control is 7-bit, so 128-255 clamps to 127 (surfaced as an approximation
 // notice) rather than dropping the write. A Rnd/Var-prefixed argument is not
-// evaluated yet (the range minimum / variable index stands in for the value),
+// evaluated yet (the range midpoint / variable index stands in for the value),
 // so an out-of-range value there is garbage and keeps dropping through the
 // emitCtrl notice instead of being baked in as a plausible-looking 127.
 static int32_t clampPlainCtrl(const CseqCmd& cmd, uint8_t* pos)
@@ -114,7 +114,20 @@ vector<int32_t> ReadArgs(uint8_t*& pos, ArgType argType)
 	}
 	else if (argType == ArgType::Rnd)
 	{
-		return { ReadFixLen(pos, 2, false, true), ReadFixLen(pos, 2, false, true) };
+		// A random range: two s16 bounds in file order (NOT necessarily
+		// low-then-high -- corpus files carry both orders); the engine rolls a
+		// fresh value between them per execution. A deterministic converter
+		// must pick one stand-in, and it used to be the raw pair -- callers
+		// took Args[0], the FIRST bound, silently biasing 196k volumes, 177k
+		// pitch bends and 94k rest durations (timing!) toward that end
+		// corpus-wide. The midpoint is the honest deterministic choice until
+		// real randomness lands with the convert-time VM (symmetric, so the
+		// unsorted order is irrelevant; C++ truncation toward zero; callers
+		// see exactly one value, so every consumer inherits it).
+		int32_t rndA = ReadFixLen(pos, 2, false, true);
+		int32_t rndB = ReadFixLen(pos, 2, false, true);
+
+		return { (rndA + rndB) / 2 };
 	}
 	else if (argType == ArgType::Var)
 	{
@@ -830,7 +843,7 @@ bool Cseq::Convert(uint32_t startOffset)
 		// convert-time VM is the roadmap fix) used to mangle values with no trace:
 		// an [If] prefix on anything but a jump executes unconditionally (33k
 		// conditional Returns corpus-wide can truncate tracks), a Rnd argument
-		// collapses to its range minimum, and a Var argument emits the variable
+		// collapses to its range midpoint, and a Var argument emits the variable
 		// INDEX as if it were the value. Surface each execution as a notice; the
 		// behaviour itself is unchanged here. Conditional jumps are excluded --
 		// the 0x89 handler resolves or reports those itself.
@@ -842,8 +855,8 @@ bool Cseq::Convert(uint32_t startOffset)
 
 		if (i->second.Suffix1 == SuffixType::Rnd)
 		{
-			Common::Warning(here, "Rnd argument not evaluated; range minimum stands in",
-				"Rnd-valued arguments not evaluated (range minimum stands in)");
+			Common::Warning(here, "Rnd argument not evaluated; range midpoint stands in",
+				"Rnd-valued arguments not evaluated (range midpoint stands in)");
 		}
 		else if (i->second.Suffix1 == SuffixType::Var)
 		{
@@ -1316,7 +1329,7 @@ bool Cseq::Convert(uint32_t startOffset)
 				// range clamps to 127 (still finite/"many") rather than being
 				// dropped by the writer, which would lose the loop marker outright.
 				// A Rnd/Var-prefixed count is not evaluated yet, so keep the old
-				// 0 (= forever) stand-in instead of baking a raw range minimum /
+				// 0 (= forever) stand-in instead of baking a range midpoint /
 				// variable index in as a bogus finite count.
 				int32_t count = 0;
 

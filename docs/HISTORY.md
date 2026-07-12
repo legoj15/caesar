@@ -643,6 +643,43 @@ conflict with caesar's GPL-3.0.
 Concrete defects found while surveying and evolving the code, since fixed.
 Still-open defects are tracked under "Known bugs" in ROADMAP.md.
 
+- **`Rnd` values converted as the range midpoint instead of the first bound —
+  the silent bias on 500k+ random-valued events** (`Cseq.cpp`)
+  (*2026-07-12*). Closes the v0.5.1 Rnd-midpoint item. The `Rnd` prefix
+  (`0xA0`) encodes two s16 bounds the engine rolls between per execution; a
+  deterministic converter must pick one stand-in, and `ReadArgs` returned
+  the raw pair with every consumer taking `Args[0]` — the *first bound*
+  (the triage called it the minimum; the verification below found the pair
+  is stored in file order and both orders occur, which the symmetric
+  midpoint makes irrelevant). Census scale (2026-07-11 triage): 196k
+  volumes, 177k pitch bends, 94k rest durations (timing!), 71k transposes
+  silently biased toward one end of their ranges. The fix collapses the
+  pair to `(a + b) / 2` (C++ truncation toward zero) at the single read
+  site, so every consumer — including note durations and rests, which move
+  absolute time — inherits the midpoint; the emit-side drop decisions keyed
+  on `Suffix1` (lpf, init pan, mod type, loop count) are unaffected and
+  keep dropping their unevaluated stand-ins.
+
+  **Verification.** A/B over the 82-archive corpus: 257,097 files per side,
+  none added or removed, every non-`.mid` file byte-identical; 5,135 `.mid`
+  changed across 60 archives (stderr diffs are exactly the notice wording
+  swap on 61 — the one extra, `safe.bcsar`, carries Rnd commands whose
+  stand-ins land unchanged or on drop paths). An independent SMF parse of
+  **every** changed pair (fresh stdlib parser, OLD side re-extracted with
+  the cached baseline exe): **0 violations, 0 unresolved**. Note
+  key/velocity changes: 0; note insertions/deletions: 0. The 18,413
+  value-changed events sit entirely in the predicted set — 9,608 pitch
+  bends, 2,983 CC7 volume, 1,907 CC11 expression, 1,884 CC6 RPN data
+  (transpose/bend-range), 1,530 CC10 pan, 317 program changes, 136
+  CC72/73/75 envelope, 29 CC1/76/78 mod, 12 GM master-volume SysEx, 5
+  tempi, 2 CC5 — plus 16,410 tick-shifted events and 2,769 note-duration
+  changes from `Rnd` rests/durations (file split: 3,607 value-only, 274
+  timing-only, 1,254 mixed). The drop-path controls (CC74, init-pan
+  combines, mod-type, loop counts) correctly appear in no diff, and zero
+  events crossed the MIDI-validity boundary (no insertions/deletions
+  anywhere). The 321 value *decreases* were all inverted-transform-verified
+  as unsorted-pair cases (first bound > second), not anomalies.
+
 - **The two wrong-arg-count desync hazards closed; guessed non-opcodes now
   fail fast** (`Cseq.cpp`) (*2026-07-12*). Closes the v0.5.1 desync item and
   the "unknown-opcode bytes are swallowed" known bug in one parse-safety pass.

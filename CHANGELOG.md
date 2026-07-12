@@ -55,6 +55,19 @@ House rules:
 
 ### Changed
 
+- `Rnd`-valued (random-range) arguments now convert as the range **midpoint**
+  instead of the first-stored bound (nominally the minimum; the corpus
+  carries both orders, which the symmetric midpoint makes moot). The engine
+  rolls a fresh value between the bounds per execution; a deterministic
+  converter must pick one stand-in, and the old choice silently biased 196k
+  volumes, 177k pitch bends, and 94k rest durations (timing!) toward one end
+  corpus-wide. Midpoint is the honest deterministic choice until real
+  randomness lands with the convert-time VM. (changes `.mid` only — 5,135
+  files across 60 archives; an independent SMF parse of every changed pair
+  found only the predicted value changes, tick shifts, and note-duration
+  changes, with zero note key/velocity changes and zero events added or
+  removed)
+
 - Warning-hygiene pass over the sequence converter's drop sites: everything the
   converter drops or approximates is now a default-visible notice with an
   honest category (previously most were `-w`-only, and several were fully
