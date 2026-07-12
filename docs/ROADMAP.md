@@ -90,12 +90,12 @@ Ranked by priority:
       saturating at 1 s). A/B: 1,772 `.mid` diffs, every one CC78-only by
       independent SMF parse; out-of-range drops fell 1,020 → 230. Narrative in
       [HISTORY.md](HISTORY.md#fixed-bugs).
-- [ ] **Pass finite loop repeat counts through.** `0xD4`/`0xFC` loop pairs are
-      emitted as EMIDI CC116/CC117 but always with value 0 — which means
-      *infinite* in that convention, so an EMIDI-aware player loops a
-      "play 4×" section forever. One line: emit `0xD4`'s count argument as the
-      CC116 value. (Fully unrolling repeats in the timeline shares the
-      flattening machinery with suite stages 2/5; not required here.)
+- [x] **Passed finite loop repeat counts through.** `0xD4`'s count now drives
+      EMIDI CC116 and `0xFC` emits the spec-fixed CC117 = 127, so EMIDI-aware
+      players honour a finite "play N×" instead of looping forever (0 stays
+      infinite in both conventions; counts ≥ 128 clamp to 127 with a notice).
+      Full narrative + A/B in [HISTORY.md](HISTORY.md#fixed-bugs). (Fully
+      unrolling repeats in the timeline stays stage-2/5 flattening work.)
 - [ ] **Fix the damper-pedal threshold bug (`0xDF`).** The argument is a bool
       (0/1) but the raw value goes to CC64, and 1 reads as *pedal off* on
       every GM/GS synth (the on/off threshold is 64) — so the pedal never
@@ -280,13 +280,13 @@ Hard-won conclusions — do not re-litigate without new evidence. Full stories i
 Fixed bugs and their verification stories are in
 [HISTORY.md](HISTORY.md#fixed-bugs).
 
-The remaining MIDI-converter discrepancies found in the 2026-07-10 post-release
-audit (mis-wired `0xE3`/`0xE0`, discarded loop counts) and the 2026-07-11
+The remaining MIDI-converter discrepancies found in the 2026-07-11
 dropped-parameter triage (damper threshold, init_pan/lpf, mod-type gating,
 silent `Rnd`/`Var`/`[If]`/ramp handling) are scoped as work items under
 **v0.5.1** above rather than listed here twice. (The GM drum-channel
-collision, the controller-range drops, and the tempo-zero UB from those audits
-are fixed.)
+collision, the controller-range drops, the tempo-zero UB, the mis-wired
+`0xE3`/`0xE0` controls, and the discarded loop counts from the 2026-07-10
+post-release audit are fixed.)
 
 - **Unknown-opcode bytes are swallowed instead of failing fast.** `0x90`/`0x96`
   (2-byte `Analyse` probes guessed by the original author) and `0xB7–0xBC`

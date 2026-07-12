@@ -1063,7 +1063,34 @@ bool Cseq::Convert(uint32_t startOffset)
 			}
 			else if (i->second.Cmd == 0xD4)
 			{
-				smfInsertControl(smf, absTime, chan, track, 116, 0);
+				// 0xD4 = loop start; Args[0] is the U8 repeat count. Emit it as the
+				// EMIDI CC116 (loop-start) value so a loop-aware player repeats the
+				// section that many times instead of forever. The CTR and EMIDI
+				// counts line up exactly -- both are total-plays with 0 meaning
+				// "loop forever" (verified against GotaSequenceLib's CtrCafe
+				// playback and the Apogee EMIDI v1.1 spec) -- so a literal count
+				// passes straight through, 0 included. A count above the 7-bit CC
+				// range clamps to 127 (still finite/"many") rather than being
+				// dropped by the writer, which would lose the loop marker outright.
+				// A Rnd/Var-prefixed count is not evaluated yet, so keep the old
+				// 0 (= forever) stand-in instead of baking a raw range minimum /
+				// variable index in as a bogus finite count.
+				int32_t count = 0;
+
+				if (i->second.Suffix1 == SuffixType::None)
+				{
+					count = i->second.Args[0];
+
+					if (count > 127)
+					{
+						Common::Warning(here, "loop repeat count above MIDI range; clamped to 127",
+							"MIDI loop repeat counts clamped to 127 (above range)");
+
+						count = 127;
+					}
+				}
+
+				smfInsertControl(smf, absTime, chan, track, 116, count);
 			}
 			else if (i->second.Cmd == 0xD5)
 			{
@@ -1166,7 +1193,12 @@ bool Cseq::Convert(uint32_t startOffset)
 			}
 			else if (i->second.Cmd == 0xFC)
 			{
-				smfInsertControl(smf, absTime, chan, track, 117, 0);
+				// 0xFC = loop end -> EMIDI CC117 (loop-end marker). Its value is
+				// fixed at 127 by the EMIDI v1.1 spec (it carries no count; a
+				// reader jumps back to the matching CC116, whose value holds the
+				// repeat count), so emit 127 rather than the old 0 to complete a
+				// valid loop pair.
+				smfInsertControl(smf, absTime, chan, track, 117, 127);
 			}
 			else if (i->second.Cmd == 0xFD)
 			{

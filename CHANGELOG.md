@@ -38,6 +38,15 @@ House rules:
 
 ### Fixed
 
+- Finite loop repeat counts now reach the loop markers. `0xD4` (loop start)
+  emits its count as EMIDI **CC116** (was a hardcoded 0, which means *infinite*
+  in that convention — so EMIDI-aware players replayed a finite "play N×"
+  section forever), and `0xFC` (loop end) emits the spec-fixed **CC117 = 127**
+  (was 0). The CTR and EMIDI conventions match exactly — both total-plays with
+  0 = infinite — so the count passes through 1:1; counts above the 7-bit CC
+  range clamp to 127 with a default-visible approximation notice, and
+  unevaluated `Rnd`/`Var` counts keep the 0 (= infinite) stand-in. (changes
+  `.mid` only, in sequences that use `0xD4`/`0xFC` loops)
 - `0xE3` "sweep pitch" — an intra-note pitch ramp — is no longer mis-emitted
   as CC78 vibrato delay. It has no static MIDI equivalent (the faithful form
   is a pitch-bend ramp — future-player territory), so it now drops with a

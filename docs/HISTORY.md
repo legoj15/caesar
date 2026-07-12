@@ -643,6 +643,56 @@ conflict with caesar's GPL-3.0.
 Concrete defects found while surveying and evolving the code, since fixed.
 Still-open defects are tracked under "Known bugs" in ROADMAP.md.
 
+- **Finite loop repeat counts discarded — `0xD4`/`0xFC` loops always emitted as
+  infinite** (`Cseq.cpp`, the `0xD4`/`0xFC` handlers) (*fixed 2026-07-11*).
+  Implements the finite-loop-count v0.5.1 work item. `0xD4` (loop start)
+  hardcoded EMIDI **CC116 = 0** and `0xFC` (loop end) emitted **CC117 = 0**. In
+  the EMIDI convention CC116 = 0 means *loop forever*, so an EMIDI-aware player
+  replays a finite "play N×" section endlessly; CC117's value should be the
+  spec's fixed 127, not 0. **Semantics were pinned from primary sources on both
+  sides before touching the line.** CTR side — GotaSequenceLib
+  `Playback/Player.cs` (whose `CtrCafe.cs` is the authoritative CTR byte map)
+  and Kermalis VGMusicStudio use byte-identical logic: `LoopStart` stores the
+  U8 count on the call stack; `LoopEnd` does
+  `if (count != 0) { count--; if (count == 0) { pop; break; } } <jump back>`,
+  so the count is **total-plays** (1 → play once, 2 → twice) and **0 is the
+  infinite sentinel** (it is never decremented) — no off-by-one. EMIDI side —
+  the Apogee Expanded MIDI v1.1 spec defines CC116 as "0 = infinite, 1 = loop
+  once, 2 = loop twice, x = loop x times" (total-plays) and CC117 as a
+  value-less marker fixed at 127; libADLMIDI / BW_Midi_Sequencer, the reference
+  EMIDI engine, honours the count with `infinity = (value == 0)` and decrements
+  to N plays. The two conventions line up 1:1, so `0xD4`'s count now passes
+  straight through to CC116 (0 → 0 = infinite → infinite) and `0xFC` emits
+  CC117 = 127. **Honest scope limit:** only EMIDI/XMI-aware players (the
+  libADLMIDI family, ZDoom) *honour* the finite count — precisely the
+  "EMIDI-aware player" the bug describes; marker-only players such as
+  foobar2000's foo_midi read the loop points but ignore the value, so they
+  looped regardless before and are unchanged now. (The future stage-2 player
+  reads the count natively, not through MIDI.) The count is a U8 (0–255) while
+  a MIDI CC is 7-bit and the libsmfc writer silently drops an event whose value
+  exceeds 127 — which would lose the loop-start marker outright — so counts
+  ≥ 128 clamp to 127 (the maximum finite "many times", closer to intent than
+  flipping back to 0 = infinite) with a new default-visible "loop repeat counts
+  clamped to 127" approximation notice, mirroring the plain-controller clamp; a
+  `Rnd`/`Var`-prefixed count is not yet evaluable, so it keeps the old 0
+  (= forever) stand-in. The EMIDI/CTR semantics were cross-checked by a research
+  fan-out (Apogee spec + libADLMIDI/foo_midi source) and two independent
+  adversarial verifiers (both reading the RE'd player sources), returning
+  "supported" on the pass-through and "0 = infinite" claims. Verified with the
+  full-corpus byte-identical A/B (82 archives, 257,261 files per tree, all runs
+  exit 0): **exactly 3,415 `.mid` files differ and nothing else** — zero
+  `.sf2`/`.wav`/`.log`/raw-dump changes, zero files added or removed. An
+  independent SMF byte parser proved every difference sits at a CC116 or CC117
+  value slot (old `0x00` → new count ≤ 127 for CC116 / exactly `0x7F` for
+  CC117): **2,812 CC116 count-byte changes and 6,863 CC117 → 127 changes, with
+  zero file-size changes and zero off-target bytes**. Emitted CC116 counts are
+  realistically small (modes at 2, 5 and 10). The ≥ 128 clamp fired 23 times
+  across five archives (Animal Crossing's `GardenSound` plus four Kirby titles —
+  Team Clash, Fighters Deluxe, Planet Robobot, Triple Deluxe), surfaced by the
+  new notice; a separate rebuild-and-re-run confirmed that adding the notice
+  leaves all 41,235 corpus `.mid` byte-identical (the notice is stderr-only).
+  Fully unrolling repeats into the timeline is deferred to the stage-2/5
+  flattening machinery.
 - **The two mis-wired vibrato/pitch controls: `0xE3` sweep pitch and `0xE0`
   mod delay** (`Cseq.cpp`, the `0xE0`/`0xE3` handlers) (*fixed 2026-07-11*).
   Implements the second v0.5.1 work item; both commands were emitted as CC78
