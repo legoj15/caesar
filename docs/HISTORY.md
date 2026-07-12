@@ -643,6 +643,67 @@ conflict with caesar's GPL-3.0.
 Concrete defects found while surveying and evolving the code, since fixed.
 Still-open defects are tracked under "Known bugs" in ROADMAP.md.
 
+- **Tie mode (`0xC8`) implemented — tied notes no longer re-attack as
+  independent short notes** (`Cseq.cpp`) (*2026-07-12*). Closes the v0.5.1
+  stretch item, completing the section's work items.
+
+  **Ground truth (NW4R decomp, cross-checked against GotaSequenceLib's
+  executing player and the NitroStudio2 spec — three independent sources
+  agreeing line-for-line).** A tie region is ONE continuous monophonic
+  voice: `MML_SET_TIE` (both edges!) releases and frees the track's
+  channels, then latches the flag; with tie on, `SeqTrack::NoteOn` reuses
+  the sounding channel and merely updates its key and velocity — no
+  re-attack — and a fresh allocation stores length −1, which
+  `UpdateChannelLength` never counts down, so the note-length argument is
+  ignored for audio and the voice sustains through gates and rests until
+  the next tie command, `Fin`, or track end. Note-wait still advances track
+  time by the length argument, so tie affects audio duration only, never
+  event timing. (For `0xC8` specifically Gota's player *executes* the
+  command, so its bool arg-typing is validated — unlike the damper trap.)
+
+  **The flattening.** MIDI has no "retune the sounding note" event a GM/SF2
+  player honours, so each region flattens to gap-free back-to-back
+  segments: a note command with a new (key, velocity) closes the current
+  segment at its tick and opens the next; identical re-commands merge into
+  one sustained note; the last segment extends to the region's end;
+  zero-length segments (same-tick updates) are skipped. Segments close at
+  every region exit — tie command, `Fin`, stray Return, whole-song
+  loop-back, and the no-`Fin` end-of-bank walk exit. The remaining
+  approximation — a re-attack at each pitch change instead of one
+  continuous envelope — is surfaced by a per-region default-visible notice
+  (the faithful single-envelope form is a pitch-bend ramp, stage-2
+  territory).
+
+  **Verification.** A/B over the 82-archive corpus: 257,097 files per
+  side, none added or removed; every non-`.mid` file byte-identical; 6,566
+  `.mid` changed across exactly the census's 33 tie archives, the only
+  stderr change on each being the tie notice swap. An independent SMF
+  parse of **every** changed pair: 0 violations, 0 unresolved. The note
+  accounting reconciles exactly — 51,465 old notes = 15,288 surviving
+  (14,161 duration-unchanged, 336 extended across gates/rests, 791
+  shortened where an old gate overran the region's end) + 36,177 removed,
+  which decompose fully into 152 same-pitch merges (containment verified),
+  2,481 notes subsumed inside a sustained segment, 33,532 zero-length
+  skips, and 12 same-tick tie-off collapses; zero notes added, zero
+  note-on ticks moved, zero velocity changes, zero non-note events
+  touched, and all 8,301 end-of-track shrinks explained by old gates
+  overrunning the (unchanged) track end. 14 files differ only in
+  equal-tick event order (a tie segment's note-on, emitted at finalize
+  time, now sorts after a same-tick CC it used to precede — no tick or
+  value changes).
+
+  **The verification's headline side-finding: 3,366 of the changed files
+  now emit zero notes.** Their tie regions sit on tracks that never advance
+  time — 300+ tied notes at one tick, no rests — so every segment is
+  zero-length. Under tie's (correct) model that is what the commanded
+  time base says; the real defect is the time base itself: those are
+  exactly the tracks that play notes before any `0xC7`, where caesar's
+  note-wait default (OFF) contradicts the engine's (ON). The tie work thus
+  *exposed* the pre-existing default bug — see the note-wait entry above
+  for the evidence chain and fix. With the default corrected, these
+  regions become the rising swept notes the console actually plays
+  (`SE_Map_WarpstarUp*` and kin).
+
 - **Mod types above 2 no longer abort the sequence** (`Cseq.cpp`)
   (*2026-07-12*). Closes the "parse hard-errors on mod types above 2" known
   bug. NW4R stores the LFO target unvalidated and its routing if-chain

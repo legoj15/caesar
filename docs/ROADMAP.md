@@ -146,10 +146,12 @@ Ranked by priority:
       rest durations low) — the honest deterministic stand-in until the
       convert-time VM brings real randomness. `.mid`-only A/B; narrative in
       [HISTORY.md](HISTORY.md#fixed-bugs).
-- [ ] *(stretch — may slip to a later release)* **Tie mode (`0xC8`).** Tied
-      notes currently re-attack instead of merging into one sustained note.
-      Bounded but the largest item in this patch; overlaps with the stage-2
-      sequence front-end, so slipping it costs nothing.
+- [x] **Tie mode (`0xC8`) implemented** — tie regions flatten to gap-free
+      back-to-back segments (one note per commanded pitch/velocity, sustaining
+      through gates and rests, released at the next tie command/`Fin`/track
+      end; NW4R-confirmed semantics), replacing the per-note re-attacks. The
+      re-attack-at-pitch-change approximation is surfaced per region.
+      `.mid`-only A/B; narrative in [HISTORY.md](HISTORY.md#fixed-bugs).
 - [x] **Adopt a changelog** (`CHANGELOG.md`, Keep a Changelog format; release
       zips bundle it and `release.yml` publishes the version's section as the
       release notes). Convention: every user-facing change adds a line under
@@ -338,6 +340,21 @@ vibrato gating are fixed.)
   multiplier — so the width term largely lives in the CC77 caesar writes to
   an inert controller, while CC1 alone drives what players actually render.)
 
+- **The note-wait default is wrong: caesar starts tracks with note-wait OFF,
+  the engine starts them ON.** Three independent lines of evidence
+  (2026-07-12): the Wii NW4R decomp's track ctor initialises
+  `noteWaitFlag = true`; a corpus census of explicit `0xC7` arguments found
+  **44,349 executions turning it OFF vs 3,654 turning it ON** — 92% are
+  explicit disables, i.e. the authoring tool escaping an ON default; and the
+  tie-mode work exposed `SE_*` sweep effects (`SE_Map_WarpstarUp*` etc.)
+  whose 300+ tied notes carry no rests at all — under an OFF default they
+  collapse to a single tick (inaudible nonsense), under ON they are exactly
+  the rising sweeps the console plays. ~112k notes across 67 archives
+  execute before any `0xC7` and are mis-timed today (steps compressed by the
+  missing note-length waits). Fix: initialise `noteWait = true` (and the
+  per-track reset). Output-changing for those archives; wants its own commit
+  and A/B. (A LayeredFS timing probe remains the definitive console
+  confirmation if ever doubted.)
 - **The "plain values clamp to 127" invariant is not universal.**
   `clampPlainCtrl` is applied at `0xC0`/`0xC1`/`0xC2`/`0xD5` but not at `0xC5`
   (bend range), `0xC9` (portamento control), `0xCA` (modulation) or `0xCF`

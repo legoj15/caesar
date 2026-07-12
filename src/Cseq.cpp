@@ -705,6 +705,27 @@ bool Cseq::Convert(uint32_t startOffset)
 	int32_t trackModType = 0;
 	int32_t modShadow[4] = { -1, -1, -1, -1 };
 	int32_t modWire[4] = { -1, -1, -1, -1 };
+	// Tie mode (0xC8). With tie on, the engine's track plays ONE continuous
+	// voice: the first note attacks, each later note merely updates the
+	// sounding voice's key/velocity (no re-attack), the note-length argument
+	// is ignored for audio (NoteOn stores length -1, which never counts down,
+	// so the voice sustains through gates and rests), and the voice releases
+	// only at the next tie command -- BOTH edges release and free the track's
+	// channels -- a Fin, or the track's end (NW4R SeqTrack::NoteOn /
+	// UpdateChannelLength / MML_SET_TIE; note-wait still advances track time
+	// by the length argument as usual). MIDI has no "retune the sounding
+	// note" event a GM/SF2 player honours, so a tie region flattens to
+	// back-to-back segments: one note per commanded pitch/velocity, each
+	// running from its note-on to the next boundary -- gap-free, spanning
+	// rests and gates, the last extended to the region's end. The remaining
+	// approximation (a re-attack at each pitch change instead of one
+	// continuous envelope) is surfaced once per region.
+	bool tieOn = false;
+	bool tieHeld = false;
+	uint32_t tieStart = 0;
+	uint32_t tieCmdOffset = 0;
+	int32_t tieKey = 0;
+	int32_t tieVel = 0;
 	// Set by any handler that redirects the walk (jump, call, return, track
 	// change) so the loop lands on the freshly-found command instead of stepping
 	// past it. This replaces the old "find(target); --i;" idiom, which was
@@ -793,13 +814,41 @@ bool Cseq::Convert(uint32_t startOffset)
 	static const uint8_t gsRhythmPartOff[] =
 		{ 0xF0, 0x41, 0x10, 0x42, 0x12, 0x40, 0x10, 0x15, 0x00, 0x1B, 0xF7 };
 
+	// Close the current tie segment, sounding from its note-on to `end`. A
+	// zero-length segment (a pitch update in the tick it was opened, or a
+	// region closed at its own start) never had time to sound and is skipped,
+	// matching the per-frame granularity of the hardware update. The insertion
+	// tick lies in the past, which libsmfc's time-sorted writer handles the
+	// same way the loop-start markers already do. A velocity out of MIDI range
+	// surfaces exactly like a rejected plain note.
+	auto finalizeTie = [&](uint32_t end)
+	{
+		if (!tieHeld)
+		{
+			return;
+		}
+
+		tieHeld = false;
+
+		if ((end > tieStart)
+			&& !smfInsertNote(smf, tieStart, channelOf[track], track, tieKey, tieVel, end - tieStart)
+			&& (tieVel > 127))
+		{
+			Common::Warning(Data + dataOffset + 8 + tieCmdOffset, "note velocity out of MIDI range; note dropped",
+				"MIDI notes dropped (velocity out of range)");
+		}
+	};
+
 	// End the current track and move to the next allocated one (registered by an
 	// earlier 0x88 in trackOffsets). Shared by three "this track is done here"
 	// cases: Fin (0xFF), a whole-song loop's loop-back, and a stray Return.
 	// Returns false when no further track remains, i.e. the whole sequence has
-	// finished and the caller should stop the walk.
+	// finished and the caller should stop the walk. A tie segment still sounding
+	// closes at the track's end, exactly where the hardware releases it.
 	auto advanceToNextTrack = [&]() -> bool
 	{
+		finalizeTie(absTime);
+
 		smfSetEndTimingOfTrack(smf, track, absTime);
 
 		for (uint8_t j = track + 1; j < 16; ++j)
@@ -813,6 +862,7 @@ bool Cseq::Convert(uint32_t startOffset)
 				trackPan = 64;
 				trackInitPan = 64;
 				trackModType = 0;
+				tieOn = false;
 
 				for (int32_t slot = 0; slot < 4; ++slot)
 				{
@@ -901,11 +951,31 @@ bool Cseq::Convert(uint32_t startOffset)
 					rhythmOffPending = false;
 				}
 
+				if (tieOn)
+				{
+					// One continuous voice: a key/velocity change closes the
+					// current segment (its audio ran to this tick) and opens
+					// the next; re-commanding the identical key and velocity
+					// changes nothing on hardware, so the segment just
+					// continues. The length argument plays no audio role here
+					// (the note-wait advance below still uses it, as the
+					// engine does).
+					if (!tieHeld || (i->second.Cmd != tieKey) || (i->second.Args[0] != tieVel))
+					{
+						finalizeTie(absTime);
+
+						tieHeld = true;
+						tieStart = absTime;
+						tieCmdOffset = i->first;
+						tieKey = i->second.Cmd;
+						tieVel = i->second.Args[0];
+					}
+				}
 				// key is Cmd (< 0x80, always valid); a note is only rejected on its
 				// velocity. Velocity 0 is a legitimate silent note (the writer skips
 				// it and timing below still advances), so surface a drop only when
 				// the velocity is genuinely out of MIDI range, not merely zero.
-				if (!smfInsertNote(smf, absTime, chan, track, i->second.Cmd, i->second.Args[0], i->second.Args[1])
+				else if (!smfInsertNote(smf, absTime, chan, track, i->second.Cmd, i->second.Args[0], i->second.Args[1])
 					&& i->second.Args[0] > 127)
 				{
 					Common::Warning(here, "note velocity out of MIDI range; note dropped",
@@ -1168,10 +1238,29 @@ bool Cseq::Convert(uint32_t startOffset)
 			}
 			else if (i->second.Cmd == 0xC8)
 			{
-				// Real articulation loss: tied notes re-attack instead of merging
-				// into one sustained note (the roadmap's v0.5.1 stretch item).
-				Common::Warning(here, "tie mode not implemented; tied notes re-attack",
-					"tie mode dropped (tied notes re-attack)");
+				// Tie on/off. Both edges release the sounding voice on hardware
+				// (MML_SET_TIE releases and frees the track's channels before
+				// setting the flag), so either edge closes an open segment
+				// here. An unevaluated Rnd/Var argument is not a flag; latching
+				// a stand-in would silently re-plumb every following note, so
+				// it drops with a notice instead.
+				if (i->second.Suffix1 == SuffixType::None)
+				{
+					finalizeTie(absTime);
+
+					tieOn = (i->second.Args[0] != 0);
+
+					if (tieOn)
+					{
+						Common::Warning(here, "tie region approximated as back-to-back segments (single-envelope legato not expressible in MIDI)",
+							"tie regions approximated (segments re-attack at pitch changes)");
+					}
+				}
+				else
+				{
+					Common::Warning(here, "tie flag is an unevaluated Rnd/Var; dropped",
+						"tie mode dropped (unevaluated Rnd/Var)");
+				}
 			}
 			else if (i->second.Cmd == 0xC9)
 			{
@@ -1686,6 +1775,10 @@ bool Cseq::Convert(uint32_t startOffset)
 			++i;
 		}
 	}
+
+	// A track that runs off the end of the bank without a Fin exits the walk
+	// here; every other exit closes the tie segment inside advanceToNextTrack.
+	finalizeTie(absTime);
 
 	if (smf->timebase == 0)
 	{

@@ -24,6 +24,21 @@ House rules:
 
 ### Added
 
+- **Tie mode (`0xC8`) is now converted** — tied notes previously re-attacked
+  as independent short notes. On hardware a tie region is one continuous
+  voice: the first note attacks, each later note only updates the sounding
+  voice's pitch/velocity, note lengths are ignored for audio (the voice
+  sustains through gates and rests), and the voice releases at the next tie
+  command, `Fin`, or track end (NW4R-confirmed, cross-checked against
+  GotaSequenceLib's executing player). caesar now flattens each region to
+  gap-free back-to-back segments — one MIDI note per commanded
+  pitch/velocity, spanning rests, the last extended to the region's end;
+  identical re-commands merge into one sustained note. The remaining
+  approximation (a re-attack at each pitch change instead of one continuous
+  envelope — MIDI has no "retune the sounding note") is surfaced by a
+  default-visible per-region notice. (changes `.mid` only, in sequences
+  using tie)
+
 - **Init pan (`0xDC`) and LPF cutoff (`0xD8`) are now converted** instead of
   being dropped (12,110 previously discarded commands across 46 and 35
   archives). Neither is the raw mapping the roadmap assumed. Init pan is an
