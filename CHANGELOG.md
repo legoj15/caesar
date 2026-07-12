@@ -55,6 +55,19 @@ House rules:
 
 ### Fixed
 
+- `0xB2` mono/poly no longer emits CC126/CC127. Those are Channel *Mode*
+  messages — the MIDI 1.0 spec hangs an implicit All Notes Off on CC124–127,
+  so each of the 56 corpus firings that land mid-track (35 with notes already
+  sounding) chopped every ringing note on its channel — and FluidSynth-class
+  players treat the pair as a basic-channel poly/mono *reconfiguration* that
+  can disable every other channel outright (49 of the 249 corpus firings sit
+  on channel 0). The engine's per-track voice-allocation flag has no MIDI
+  equivalent, so the command now drops with a default-visible notice.
+  (changes `.mid` only — 53 files across 11 archives; all 249 removed events
+  are CC126/127 by independent SMF parse of every changed pair, with no other
+  event, note, or timing change; no `.sf2`/`.wav`/`.log`/raw dump differs and
+  no file is added or removed)
+
 - `0xDF` damper pedal now applies the sound engine's own threshold when writing
   CC64 (`arg >= 64` → pedal down), instead of passing the raw argument to a
   control that the MIDI writer will drop if it exceeds 127. The argument's

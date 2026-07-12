@@ -113,17 +113,11 @@ Ranked by priority:
       dispatcher, found at last — see HISTORY). A/B: `.mid`-only, 2,385 files,
       every diff CC10/CC74 by independent SMF parse. Narrative in
       [HISTORY.md](HISTORY.md#fixed-bugs).
-- [ ] **Stop `0xB2` mono/poly from silencing the channel.** caesar emits it as
-      CC126/CC127, but those are *Channel Mode* messages: the MIDI 1.0 spec
-      mandates an implicit **All Notes Off** on CC124–127, so a mid-track mono
-      toggle chops every ringing note on that channel — something the CTR
-      engine's voice-allocation flag never does. (The emitted value is wrong
-      too: `0` is the Omni-On form of CC126, where a single-voice mono channel
-      should send `1`.) Census whether `0xB2` ever fires mid-track rather than
-      as a track-header init; if it does, the honest call is to demote it to a
-      "no MIDI equivalent" notice rather than keep emitting a note-killer.
-      (The 2026-07-11 triage gave mono/poly a clean bill — it checked the
-      *value* domain and missed the message class.)
+- [x] **Stopped `0xB2` mono/poly from silencing the channel** — the census
+      confirmed mid-track firings (56 of 249 corpus executions, 35 after notes
+      were already sounding), so the CC126/CC127 emission is demoted to a
+      default-visible "no MIDI equivalent" notice. Full narrative and A/B in
+      [HISTORY.md](HISTORY.md#fixed-bugs).
 - [ ] **Gate the vibrato CCs on mod type (`0xCC`).** The track LFO targets
       pitch, volume, or pan; caesar emits the pitch-vibrato CCs
       (CC1/76/77/78) unconditionally, so tremolo/auto-pan tracks render as
@@ -302,12 +296,12 @@ Fixed bugs and their verification stories are in
 [HISTORY.md](HISTORY.md#fixed-bugs).
 
 The remaining MIDI-converter discrepancies found in the 2026-07-11
-dropped-parameter triage (damper threshold, init_pan/lpf, mod-type gating,
-silent `Rnd`/`Var`/`[If]`/ramp handling) are scoped as work items under
-**v0.5.1** above rather than listed here twice. (The GM drum-channel
-collision, the controller-range drops, the tempo-zero UB, the mis-wired
-`0xE3`/`0xE0` controls, and the discarded loop counts from the 2026-07-10
-post-release audit are fixed.)
+dropped-parameter triage (mod-type gating, silent `Rnd`/`Var`/`[If]`/ramp
+handling) are scoped as work items under **v0.5.1** above rather than listed
+here twice. (The GM drum-channel collision, the controller-range drops, the
+tempo-zero UB, the mis-wired `0xE3`/`0xE0` controls, the discarded loop
+counts, the damper threshold, init_pan/lpf, and the `0xB2` mono/poly
+note-killer are fixed.)
 
 - **The `0x8A` call stack leaks across track boundaries.** `sp` (`Cseq.cpp`) is
   one `stack<uint32_t>` shared by all 16 tracks, and `advanceToNextTrack` resets

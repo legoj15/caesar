@@ -643,6 +643,59 @@ conflict with caesar's GPL-3.0.
 Concrete defects found while surveying and evolving the code, since fixed.
 Still-open defects are tracked under "Known bugs" in ROADMAP.md.
 
+- **`0xB2` mono/poly demoted from CC126/CC127 to an honest notice — the
+  Channel-Mode note-killer** (`Cseq.cpp`) (*2026-07-12*). Closes the v0.5.1
+  "stop `0xB2` from silencing the channel" item. The engine's command is a
+  per-track *voice-allocation* flag — mono means a new note steals the track's
+  previous voice, and toggling it does nothing to already-sounding voices. The
+  CCs caesar emitted are not that: CC126/CC127 are Channel **Mode** messages,
+  and the MIDI 1.0 spec mandates an implicit All Notes Off on every one of
+  CC124–127, so each mid-track toggle chops the channel's ringing notes.
+
+  **The census (the roadmap's decision criterion).** An instrumented build
+  logged every `0xB2` execution across the 82-archive corpus: **249
+  executions — 56 mid-track, 35 of them after the track had already sounded
+  notes**, so the "demote rather than emit a note-killer" branch is the one
+  the roadmap's own rule selects. The argument is a 0/127 two-state like the
+  damper's (values observed: 127 "mono on" ×160, 0 "poly off" ×89; never
+  Rnd/Var-prefixed). The users are concentrated: Mii Plaza's `mgCar.bcsar`
+  racing minigame (189 executions), `cplay.bcsar` (20 per dump),
+  `MeetSound.bcsar` (4 per dump), Kirby Team Clash and the Pokémon Sun family
+  (1 each).
+
+  **The player-side finding that killed the "fix the value" alternative.** The
+  fallback plan — keep the emission for track-header inits, correcting the
+  data byte (the old code sent CC126 value 0, the "as many channels as
+  available" legacy form, where a single mono channel should send 1) — fails
+  against how real players implement these messages. FluidSynth (the
+  project's reference player class) honours CC126/127 **only on a basic
+  channel** (default: channel 0), where they do not act on that channel alone
+  — they reconfigure the poly/mono layout of the whole channel *group*, and
+  channels left outside any group are **disabled outright**. 49 of the 249
+  corpus executions sit on track 0 = channel 0, 25 of them the mono form: on
+  FluidSynth 2.x each of those could silence every other channel in the file,
+  even when "safely" emitted at tick 0. Players that don't implement basic
+  channels ignore CC126/127 entirely. So the choice was between a message
+  that is ignored, kills notes, or mutes the rest of the file — and a notice.
+
+  **An aside for the record.** The Wii-era NW4R MML has no mono/poly command
+  at all — the ogws decomp's `MmlParser` dispatch and command enum skip
+  straight past `0xB2` — so it is a CTR/Cafe addition, consistent with
+  `CtrCafe.cs` (not the NW4R decomps) being the byte-map authority for this
+  command. Its engine-side semantics stay on the stage-2 player's plate,
+  where the flag is read from the sequence itself; nothing is lost for the
+  suite by dropping the CC.
+
+  **Verification.** A/B over the 82-archive corpus, 257,097 files per side,
+  none added or removed. Every `.sf2`, `.wav`, `.log` and raw dump
+  **byte-identical**; 53 `.mid` differ, spread over the same 11 archives the
+  census flagged. An independent SMF parse of every differing pair confirms
+  the only change is the removal of CC126/CC127 events — 249 removed (160
+  CC126, 89 CC127), a one-to-one match with the census's 249 executions — no
+  note, timing, or other-event change anywhere, and no SMF track appears or
+  disappears. The drop is surfaced by a new default-visible "mono/poly
+  dropped (no MIDI equivalent)" notice.
+
 - **Init pan (`0xDC`) and LPF cutoff (`0xD8`) implemented — and *both* of the
   triage's prescriptions were wrong** (`Cseq.cpp`) (*2026-07-12*). Closes the
   v0.5.1 "two dropped commands with clean MIDI targets" item. The roadmap called

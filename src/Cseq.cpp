@@ -973,7 +973,23 @@ bool Cseq::Convert(uint32_t startOffset)
 			}
 			else if (i->second.Cmd == 0xB2)
 			{
-				smfInsertControl(smf, absTime, chan, track, i->second.Args[0] ? SMF_CONTROL_MONO : SMF_CONTROL_POLY, 0);
+				// Mono/poly: the engine's per-track voice-allocation flag (mono =
+				// a new note steals the track's previous voice; toggling it does
+				// nothing to already-sounding voices). This used to be emitted as
+				// CC126/CC127, but those are Channel MODE messages, not channel
+				// controls: the MIDI 1.0 spec mandates an implicit All Notes Off
+				// on CC124-127, so a mid-track toggle -- 56 of the 249 corpus
+				// executions, 35 of them after the track has already sounded
+				// notes -- chops every ringing note on the channel. Real players
+				// are no gentler: FluidSynth honours these CCs only on a basic
+				// channel (channel 0), where they reconfigure the whole
+				// poly/mono channel-group and can disable every other channel
+				// outright; most GM players ignore them entirely. There is no
+				// per-channel MIDI control with the engine's semantics, so drop
+				// with a notice. The future player reads the flag from the
+				// sequence itself; nothing is lost for suite stage 2.
+				Common::Warning(here, "mono/poly is a voice-allocation flag with no MIDI equivalent; dropped",
+					"mono/poly dropped (no MIDI equivalent)");
 			}
 			else if (i->second.Cmd == 0xB3)
 			{
