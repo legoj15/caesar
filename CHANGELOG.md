@@ -38,6 +38,17 @@ House rules:
 
 ### Fixed
 
+- `0xDF` damper pedal now applies the sound engine's own threshold when writing
+  CC64 (`arg >= 64` → pedal down), instead of passing the raw argument to a
+  control that the MIDI writer will drop if it exceeds 127. The argument's
+  domain is `Uint8` 0–255 and hardware reads *anything* ≥ 64 as pedal-down, so
+  a value above 127 used to lose its pedal event entirely. (Note: the v0.5.1
+  plan called this a *bool* bug, on the claim that "damper on" was emitted as a
+  1 and read as pedal-*off*; that premise was refuted — the engine thresholds at
+  64 exactly as MIDI does, and every value in the 82-archive corpus is already
+  0 or 127. The prescribed `? 127 : 0` normalization would have inverted the
+  1–63 range.) (output-identical on the whole corpus; changes `.mid` only for
+  inputs carrying a damper argument > 127)
 - Finite loop repeat counts now reach the loop markers. `0xD4` (loop start)
   emits its count as EMIDI **CC116** (was a hardcoded 0, which means *infinite*
   in that convention — so EMIDI-aware players replayed a finite "play N×"

@@ -643,6 +643,65 @@ conflict with caesar's GPL-3.0.
 Concrete defects found while surveying and evolving the code, since fixed.
 Still-open defects are tracked under "Known bugs" in ROADMAP.md.
 
+- **Damper pedal (`0xDF`): the reported bug did not exist — the *premise* was
+  the bug** (`Cseq.cpp`, the `0xDF` handler) (*investigated and hardened
+  2026-07-12*). Closes the v0.5.1 damper work item, but not the way that item
+  described. **The claim under test** (from the 2026-07-11 triage, since
+  retracted): the argument is a Bool (0/1) written raw to CC64, and since CC64
+  is a threshold control (< 64 = pedal up), "damper on" emitted as `1` reads as
+  pedal *up* — the pedal never engages and ringing notes get cut. The
+  prescribed fix was a one-liner mirroring the sibling bool `0xCE`:
+  `Args[0] ? 127 : 0`. **The premise was refuted on two independent axes before
+  the line was touched.** *Engine side*: the "Bool" typing traces to
+  GotaSequenceLib's `SequenceCommand.cs` argument table — but its player never
+  executes Damper (it sits in the `//Not implemented.` fallthrough), so the
+  typing is an untested modelling guess. The Wii RSEQ command map is
+  byte-identical to CtrCafe's over `0xC0–0xE3`, making the NW4R decomps
+  directly authoritative, and two *matching* decomps (doldecomp/ogws and
+  zeldaret/ss, both of which recompile to Nintendo's shipped bytes) read the
+  command as `rTrackParam.damperFlag = static_cast<u8>(arg1) >= 64` — a full
+  `u8` argument thresholded at 64, **exactly the MIDI CC64 rule**, not a bool.
+  (`snd_SeqTrack.cpp` confirms the semantics are a true CC64 hold: a channel
+  whose note length has expired is not released while `damperFlag` is set.)
+  *Corpus side*: the baseline extraction wrote `Args[0]` straight to CC64, so
+  every CC64 value in a baseline `.mid` **is** the raw argument. Across all
+  41,235 corpus `.mid`, 20 files carry damper at all, for **1,548 events whose
+  value is only ever 0 (786×) or 127 (762×)** — never 1, and **zero occurrences
+  in the disputed 1–63 range**. Nintendo's tooling emits MIDI-style pedal
+  values. So the raw pass-through was *already correct* (the engine's ≥ 64 rule
+  and a GM synth's ≥ 64 rule are the same rule), the pedal did engage, and the
+  prescribed `? 127 : 0` would have **inverted** args 1–63 — emitting pedal-down
+  where hardware leaves it up. **What shipped instead** is the engine's own
+  threshold, `(Args[0] >= 64) ? 127 : 0`, which is exact across the argument's
+  entire `Uint8` 0–255 domain and closes a real (if unobserved) latent hole: an
+  argument above 127 is pedal-**down** on hardware, but the libsmfc writer
+  silently drops any control value outside 7-bit range, so that pedal event
+  vanished. The normalized value is 7-bit by construction, so the `emitCtrl`
+  drop-guard is no longer needed. **Verification, in two parts.** (1) The
+  full-corpus byte-identical A/B (82 archives, 257,097 compared files per tree):
+  **zero differing files** — no `.mid`, no `.sf2`/`.wav`/raw dump, none added or
+  removed, and all 82 console logs identical down to the notice counts. That is
+  the expected result, and it doubles as proof that no corpus damper argument
+  lies outside {0, 127}. (2) Because the corpus therefore never *exercises* the
+  new branch, the untested bands were driven directly: the three damper-on
+  arguments inside `Torte.bcsar`'s `SE_BossMb_Tornade` sequence were patched
+  in-place (the blob was located by matching caesar's own raw `.bcseq` dump back
+  into the archive, so the offsets are exact) and both binaries re-run. With the
+  real value 127, old and new agree exactly (`CC64 = {0:3, 127:3}`). Patched to
+  **30** (hardware: pedal *up*), old emits `CC64 = 30` and new emits `CC64 = 0` —
+  same pedal-up result, and the *prescribed* `? 127 : 0` would have emitted 127,
+  **pedal down, inverted**. Patched to **200** (hardware: pedal *down*), the old
+  build **dropped the events entirely** ("2 MIDI control/parameter events dropped
+  (value out of range)") and the pedal silently vanished, while the new build
+  emits `CC64 = 127`. Note-on counts were identical (23,728) across all six runs,
+  confirming the patch landed on real damper arguments and desynced nothing. The
+  companion audit of the same bug *class* — a sequence argument whose domain
+  does not match its MIDI controller's domain — found **no siblings**: of the
+  MIDI switch controllers (CC64–69) caesar only ever emits CC64 and CC65, and
+  CC65 (`0xCE` portamento) is a genuine bool, correctly normalized. It did
+  surface an adjacent defect of a *different* class (`0xB2` mono/poly emits
+  Channel Mode messages that carry a mandated All Notes Off), now filed in
+  ROADMAP.md.
 - **Finite loop repeat counts discarded — `0xD4`/`0xFC` loops always emitted as
   infinite** (`Cseq.cpp`, the `0xD4`/`0xFC` handlers) (*fixed 2026-07-11*).
   Implements the finite-loop-count v0.5.1 work item. `0xD4` (loop start)
@@ -988,11 +1047,21 @@ these**):
 
 Audit of the *implemented* mappings (each finding adversarially verified):
 
-- **`0xDF` Damper bool bug (new)**: the argument is a Bool (0/1) but the raw
+- ~~**`0xDF` Damper bool bug (new)**: the argument is a Bool (0/1) but the raw
   value goes to CC64, and CC64 < 64 means pedal **off** — so "damper on"
   never engages on any GM/GS synth and ringing notes get cut. The sibling
   bool 0xCE is already normalized `? 127 : 0`; 0xDF was simply missed.
-  One-line fix, output-changing for sequences using damper.
+  One-line fix, output-changing for sequences using damper.~~
+  **RETRACTED 2026-07-12 — this finding was wrong.** The "Bool" premise came
+  from GotaSequenceLib's argument table, whose player never executes the
+  command; the engine actually thresholds the argument at 64, exactly as MIDI
+  CC64 does, so the raw pass-through was already correct and the prescribed
+  `? 127 : 0` would have *inverted* the pedal for arguments 1–63. See the
+  damper entry under "Fixed bugs" for the refutation and the mapping that
+  shipped instead. **Standing lesson: Gota's `SequenceCommandParameter` typing
+  is a modelling guess wherever his player leaves the command unimplemented —
+  it is authoritative for the byte *map*, not for argument *semantics*. Check
+  the NW4R matching decomps (and the corpus) before acting on it.**
 - **`0xE3` → CC78 confirmed wrong** (it is SweepPitch, s16, units of 1/64
   semitone — the roadmap's existing v0.5.1 item stands, now provenance-backed:
   CtrCafe + GotaSequenceLib `Channel.SweepMain`); sweeps ≥ 2 semitones exceed
@@ -1006,9 +1075,15 @@ Audit of the *implemented* mappings (each finding adversarially verified):
   model, so a fix must touch both phases. Low priority — FluidSynth-class
   players ignore CC72–79 entirely.
 - Clean bill (verified correct, no change): 0xC9→CC84 portamento control,
-  timebase, mono/poly, pan, volume, master volume, transpose→RPN2,
+  timebase, ~~mono/poly~~, pan, volume, master volume, transpose→RPN2,
   bend→14-bit, bend range→RPN0, notewait, expression→CC11, FX A/B→CC91/93,
   loop CC116/117 (finite-count pass-through stays a v0.5.1 item).
+  **Correction (2026-07-12): mono/poly (`0xB2`) does not deserve its clean
+  bill.** This audit checked the *value* domain and missed the *message class*:
+  CC126/CC127 are Channel Mode messages, which the MIDI 1.0 spec mandates carry
+  an implicit All Notes Off, so a mid-track mono toggle silences the channel's
+  ringing notes — something the engine's voice-allocation flag never does. Filed
+  as a v0.5.1 work item in ROADMAP.md.
 
 The variable/conditional machinery ("vm-flow") conclusion, feeding the
 roadmap's sequence-fidelity plan: a small deterministic convert-time VM —

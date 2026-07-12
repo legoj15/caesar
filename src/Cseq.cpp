@@ -1135,7 +1135,17 @@ bool Cseq::Convert(uint32_t startOffset)
 			}
 			else if (i->second.Cmd == 0xDF)
 			{
-			emitCtrl(smfInsertControl(smf, absTime, chan, track, 64, i->second.Args[0]), here);
+				// Damper pedal -> CC64 (hold 1). The engine thresholds this Uint8
+				// exactly the way MIDI does -- NW4R sets damperFlag = (u8)arg >= 64,
+				// and a held damper suppresses the note's release -- so the raw value
+				// was already right for 0-127. Applying the engine's own threshold
+				// extends that to the argument's full 0-255 domain: a value above 127
+				// is pedal-DOWN on hardware, but the writer drops any control outside
+				// 7-bit range, so the pedal event used to vanish. Normalizing keeps the
+				// value in range by construction, hence no emitCtrl guard.
+				// (Gota's table types this Bool, but his player never runs the command;
+				// the threshold is what the matching NW4R decomps and the corpus show.)
+				smfInsertControl(smf, absTime, chan, track, 64, (i->second.Args[0] >= 64) ? 127 : 0);
 			}
 			else if (i->second.Cmd == 0xE0)
 			{

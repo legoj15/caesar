@@ -96,17 +96,28 @@ Ranked by priority:
       infinite in both conventions; counts ≥ 128 clamp to 127 with a notice).
       Full narrative + A/B in [HISTORY.md](HISTORY.md#fixed-bugs). (Fully
       unrolling repeats in the timeline stays stage-2/5 flattening work.)
-- [ ] **Fix the damper-pedal threshold bug (`0xDF`).** The argument is a bool
-      (0/1) but the raw value goes to CC64, and 1 reads as *pedal off* on
-      every GM/GS synth (the on/off threshold is 64) — so the pedal never
-      engages and notes that should ring out are cut. Mirror the `0xCE`
-      normalization (`? 127 : 0`); one line. Found + adversarially verified
-      in the 2026-07-11 dropped-parameter triage
-      ([HISTORY.md](HISTORY.md#investigations)).
+- [x] **Damper pedal (`0xDF`) — the reported bug was a phantom; hardened
+      anyway.** The triage's "argument is a bool" premise was *refuted* (NW4R
+      thresholds it at `>= 64`, exactly as MIDI CC64 does, and every corpus
+      value is already 0 or 127), so the prescribed `? 127 : 0` would have
+      inverted args 1–63; caesar now applies the engine's own threshold, which
+      is byte-identical on the corpus and fixes a latent >127 drop. Full
+      narrative in [HISTORY.md](HISTORY.md#fixed-bugs).
 - [ ] **Implement the two dropped commands with clean MIDI targets**:
       `0xDC` init_pan → CC10 (exact mapping; 8,438 drops across 46 archives)
       and `0xD8` lpf_cutoff → CC74 brightness (near-identity 0–127; 4,672
       drops). One line each, mirroring the existing pan / FX-send handlers.
+- [ ] **Stop `0xB2` mono/poly from silencing the channel.** caesar emits it as
+      CC126/CC127, but those are *Channel Mode* messages: the MIDI 1.0 spec
+      mandates an implicit **All Notes Off** on CC124–127, so a mid-track mono
+      toggle chops every ringing note on that channel — something the CTR
+      engine's voice-allocation flag never does. (The emitted value is wrong
+      too: `0` is the Omni-On form of CC126, where a single-voice mono channel
+      should send `1`.) Census whether `0xB2` ever fires mid-track rather than
+      as a track-header init; if it does, the honest call is to demote it to a
+      "no MIDI equivalent" notice rather than keep emitting a note-killer.
+      (The 2026-07-11 triage gave mono/poly a clean bill — it checked the
+      *value* domain and missed the message class.)
 - [ ] **Gate the vibrato CCs on mod type (`0xCC`).** The track LFO targets
       pitch, volume, or pan; caesar emits the pitch-vibrato CCs
       (CC1/76/77/78) unconditionally, so tremolo/auto-pan tracks render as
@@ -127,12 +138,16 @@ Ranked by priority:
       drop is silent — 353k `setvar` alone) and its scrambled mod4 labels;
       emit honest notices for `Rnd`/`Var`/`[If]`-prefixed commands the
       converter currently mangles silently.
-- [ ] **Close the Time-suffix desync hazard.** A `_t` ramp command carries a
-      trailing s16 duration that the parser only consumes for `0xB0–0xDF`;
-      Time-suffixed tempo/sweep/notes/extended commands leave those 2 bytes
-      unread and desync the rest of the track. Zero corpus occurrences (all
-      ~473k observed `_t` commands sit in the safe range), but it is the one
-      genuine wrong-arg-count hazard left. The ramps themselves flatten to
+- [ ] **Close the two wrong-arg-count desync hazards.** (a) A `_t` ramp command
+      carries a trailing s16 duration that the parser only consumes for
+      `0xB0–0xDF`; Time-suffixed tempo/sweep/notes/extended commands leave those
+      2 bytes unread and desync the rest of the track. (b) The fixed-1-byte
+      command group (`0xB2`, `0xBF`, `0xC7`, `0xC8`, `0xC9`, `0xCE`, `0xDF`)
+      reads its argument with a bare 1-byte read that ignores `cmd.Arg1`, so an
+      `Rnd`/`Var`-prefixed command in that group consumes the wrong number of
+      bytes and desyncs the same way. Zero corpus occurrences for either (all
+      ~473k observed `_t` commands sit in the safe range), but these are the
+      genuine wrong-arg-count hazards left. The ramps themselves flatten to
       instant jumps (375k volume fades) — full interpolation is stage-2/5
       flattening territory; a notice suffices for now.
 - [ ] **Use the `Rnd` midpoint instead of the minimum.** Random-valued
@@ -301,6 +316,12 @@ post-release audit are fixed.)
   both phases together. Low priority: FluidSynth-class players ignore CC72–79
   entirely, so this is byte-level rather than audible wrongness.
 
+- **The "plain values clamp to 127" invariant is not universal.**
+  `clampPlainCtrl` is applied at `0xC0`/`0xC1`/`0xC2`/`0xD5` but not at `0xC5`
+  (bend range), `0xC9` (portamento control), `0xCA` (modulation) or `0xCF`
+  (portamento time), which are also plain `Uint8` (0–255) written into 7-bit
+  controls — those still drop-with-notice instead of clamping. Surfaced rather
+  than silent, so it is a consistency wart, not a silent data loss.
 - **Bank note fields are read at hardcoded offsets** (`Cbnk.cpp`, the
   note-parse loop). The format actually locates the ADSHR envelope through a
   `DataRef` chain (`note+0x10 + *(note+0x2C)`, then `+8`), and which optional
