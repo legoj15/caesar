@@ -35,8 +35,11 @@ House rules:
   *darken-only*: the engine clamps its cutoff scale at 64, so values above it are
   clamped rather than passed through, which would have told synths to brighten
   past the sample's own tone. Both semantics were confirmed against the CSEQ
-  command dispatcher in a real 3DS binary. (changes `.mid` only — 2,385 files;
-  every diff is a CC10/CC74 event, verified by independent SMF parse)
+  command dispatcher in a real 3DS binary. (changes `.mid` only — 2,963 files
+  across 54 archives; every one of the 11,865 differing events is a CC10 (7,383,
+  in 1,000 files) or CC74 (4,482, in 2,002 files), verified by independent SMF
+  parse of every changed pair — no `.wav`, `.sf2` or raw dump differs, and no
+  file is added or removed)
 
 - This changelog, bundled into release zips and published as the release notes
   by `release.yml`. (output-identical)
