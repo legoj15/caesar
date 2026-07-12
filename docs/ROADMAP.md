@@ -204,6 +204,16 @@ Larger efforts that expand what caesar can do. Rough priority order:
   lives in sibling `.bcgrp` group files — a known gap no maintained tool
   handles (the 28 empty `BNK_*` dirs in `ctr_dash`; now surfaced by a
   default-visible notice).
+- **Playback ergonomics (docs + optional `.rmi` export).** The per-bank output
+  layout already auto-pairs in foobar2000's foo_midi with zero caesar changes —
+  its directory-named-soundfont rule matches `BANK_X/BANK_X.sf2`, and it honors
+  the emitted `loopStart`/`loopEnd` markers and EMIDI CC116/117 (marker-only) —
+  so document that as the recommended listening setup (README "how to listen"
+  section; FluidSynth engine = the project's reference synth). Falcosoft SFMP
+  (the best per-file inspection GUI; honors *finite* CC116/117 counts) only
+  auto-loads a literal `folder.sf2`, so consider an opt-in self-contained RMIDI
+  (`.rmi`, embedded-SF2) export for sharing single songs outside the extraction
+  tree — both players support embedded-SF2 RMI. (Surveyed 2026-07-12.)
 - **Architecture modernization.** Retire the global mutable parser state,
   pass decoded samples in memory instead of round-tripping through `.wav`
   files on disk, and adopt RAII/smart pointers over the manual `new`/`delete`.
