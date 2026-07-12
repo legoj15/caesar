@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -542,6 +543,13 @@ bool Cseq::Convert(uint32_t startOffset)
 
 			statusByte = ReadFixLen(pos, 1);
 
+			// Record the extended opcode itself. Cmd used to stay 0xF0 here,
+			// which matched nothing in the walk's Extended branch, so every
+			// extended command (353k setvar, 210k cmp_eq, ... corpus-wide)
+			// fell through it silently -- not even its "not implemented"
+			// warning could fire.
+			cmd.Cmd = statusByte;
+
 			if (((statusByte >= 0x80) && (statusByte <= 0x8B)) || ((statusByte >= 0x90) && (statusByte <= 0x95)))
 			{
 				vector<int32_t> args1 = ReadArgs(pos, ArgType::Var);
@@ -824,6 +832,31 @@ bool Cseq::Convert(uint32_t startOffset)
 		// The SMF track number stays == track, so only the channel nibble moves.
 		int chan = channelOf[track];
 
+		// The argument machinery the converter does not evaluate yet (the
+		// convert-time VM is the roadmap fix) used to mangle values with no trace:
+		// an [If] prefix on anything but a jump executes unconditionally (33k
+		// conditional Returns corpus-wide can truncate tracks), a Rnd argument
+		// collapses to its range minimum, and a Var argument emits the variable
+		// INDEX as if it were the value. Surface each execution as a notice; the
+		// behaviour itself is unchanged here. Conditional jumps are excluded --
+		// the 0x89 handler resolves or reports those itself.
+		if ((i->second.Suffix3 == SuffixType::If) && (i->second.Extended || (i->second.Cmd != 0x89)))
+		{
+			Common::Warning(here, "[If] prefix not evaluated; command executes unconditionally",
+				"[If]-prefixed commands executed unconditionally (conditions not evaluated)");
+		}
+
+		if (i->second.Suffix1 == SuffixType::Rnd)
+		{
+			Common::Warning(here, "Rnd argument not evaluated; range minimum stands in",
+				"Rnd-valued arguments not evaluated (range minimum stands in)");
+		}
+		else if (i->second.Suffix1 == SuffixType::Var)
+		{
+			Common::Warning(here, "Var argument not evaluated; variable index stands in for the value",
+				"Var-valued arguments not evaluated (variable index stands in)");
+		}
+
 		if (!i->second.Label.empty())
 		{
 			smfInsertMetaText(smf, absTime, track, SMF_META_TEXT, i->second.Label.c_str());
@@ -941,7 +974,8 @@ bool Cseq::Convert(uint32_t startOffset)
 					}
 					else
 					{
-						Common::Warning(Data + dataOffset + 8 + i->first, "conditional jump skipped (conditions not implemented)");
+						Common::Warning(here, "conditional jump skipped (conditions not evaluated)",
+							"conditional jumps skipped (conditions not evaluated)");
 					}
 				}
 				else if (offsetTime.count(target))
@@ -975,7 +1009,8 @@ bool Cseq::Convert(uint32_t startOffset)
 					}
 					else
 					{
-						Common::Warning(Data + dataOffset + 8 + i->first, "jump target out of range");
+						Common::Warning(here, "jump target out of range; jump ignored",
+							"jump targets out of range (jump ignored)");
 					}
 				}
 			}
@@ -992,7 +1027,9 @@ bool Cseq::Convert(uint32_t startOffset)
 			}
 			else if (i->second.Cmd == 0xB1)
 			{
-				Common::Warning(Data + dataOffset + 8 + i->first, "envelope hold not implemented");
+				// NW4C ADSHR hold-stage override; no GM/GS controller exists for it.
+				Common::Warning(here, "envelope hold has no MIDI equivalent; dropped",
+					"envelope hold dropped (no MIDI equivalent)");
 			}
 			else if (i->second.Cmd == 0xB2)
 			{
@@ -1016,31 +1053,45 @@ bool Cseq::Convert(uint32_t startOffset)
 			}
 			else if (i->second.Cmd == 0xB3)
 			{
-				Common::Warning(Data + dataOffset + 8 + i->first, "velocity range not implemented");
+				Common::Warning(here, "velocity range not implemented; dropped",
+					"velocity range dropped (not implemented)");
 			}
 			else if (i->second.Cmd == 0xB4)
 			{
-				Common::Warning(Data + dataOffset + 8 + i->first, "biquad type not implemented");
+				// Voice biquad response select; no audible MIDI target.
+				Common::Warning(here, "biquad type has no MIDI equivalent; dropped",
+					"biquad filter dropped (no MIDI equivalent)");
 			}
 			else if (i->second.Cmd == 0xB5)
 			{
-				Common::Warning(Data + dataOffset + 8 + i->first, "biquad value not implemented");
+				Common::Warning(here, "biquad value has no MIDI equivalent; dropped",
+					"biquad filter dropped (no MIDI equivalent)");
 			}
 			else if (i->second.Cmd == 0xB6)
 			{
-				Common::Warning(Data + dataOffset + 8 + i->first, "bank select not implemented");
+				// A real fidelity gap (wrong instrument wherever a track switches
+				// banks mid-sequence), but the emitted CC0 must be co-designed with
+				// Cbnk's SF2 bank layout -- see the roadmap item.
+				Common::Warning(here, "mid-sequence bank select not implemented; instrument may be wrong",
+					"bank select dropped (not implemented)");
 			}
 			else if (i->second.Cmd == 0xBD)
 			{
-				Common::Warning(Data + dataOffset + 8 + i->first, "mod phase not implemented");
+				Common::Warning(here, "mod phase has no MIDI equivalent; dropped",
+					"LFO phase/curve dropped (no MIDI equivalent)");
 			}
 			else if (i->second.Cmd == 0xBE)
 			{
-				Common::Warning(Data + dataOffset + 8 + i->first, "mod curve not implemented");
+				Common::Warning(here, "mod curve has no MIDI equivalent; dropped",
+					"LFO phase/curve dropped (no MIDI equivalent)");
 			}
 			else if (i->second.Cmd == 0xBF)
 			{
-				Common::Warning(Data + dataOffset + 8 + i->first, "front bypass not implemented");
+				// Surround-path routing flag (bypass the front virtualization);
+				// only meaningful under the console's Surround output mode, and
+				// MIDI has no surround axis at all.
+				Common::Warning(here, "front bypass is surround routing with no MIDI equivalent; dropped",
+					"front bypass dropped (no MIDI equivalent)");
 			}
 			else if (i->second.Cmd == 0xC0)
 			{
@@ -1085,7 +1136,10 @@ bool Cseq::Convert(uint32_t startOffset)
 			}
 			else if (i->second.Cmd == 0xC6)
 			{
-				Common::Warning(Data + dataOffset + 8 + i->first, "priority not implemented");
+				// Voice-steal priority: engine scheduling state with no meaning in
+				// MIDI (the future player must preserve it; nothing is lost here).
+				Common::Warning(here, "voice priority has no MIDI equivalent; dropped",
+					"priority dropped (no MIDI equivalent)");
 			}
 			else if (i->second.Cmd == 0xC7)
 			{
@@ -1093,7 +1147,10 @@ bool Cseq::Convert(uint32_t startOffset)
 			}
 			else if (i->second.Cmd == 0xC8)
 			{
-				Common::Warning(Data + dataOffset + 8 + i->first, "tie not implemented");
+				// Real articulation loss: tied notes re-attack instead of merging
+				// into one sustained note (the roadmap's v0.5.1 stretch item).
+				Common::Warning(here, "tie mode not implemented; tied notes re-attack",
+					"tie mode dropped (tied notes re-attack)");
 			}
 			else if (i->second.Cmd == 0xC9)
 			{
@@ -1234,7 +1291,10 @@ bool Cseq::Convert(uint32_t startOffset)
 			}
 			else if (i->second.Cmd == 0xD2)
 			{
-				Common::Warning(Data + dataOffset + 8 + i->first, "sustain not implemented");
+				// ADSR sustain LEVEL (not the pedal -- that is 0xDF); no GM2/GS
+				// controller exists for it.
+				Common::Warning(here, "envelope sustain level has no MIDI equivalent; dropped",
+					"sustain level dropped (no MIDI equivalent)");
 			}
 			else if (i->second.Cmd == 0xD3)
 			{
@@ -1277,11 +1337,19 @@ bool Cseq::Convert(uint32_t startOffset)
 			}
 			else if (i->second.Cmd == 0xD6)
 			{
-				Common::Warning(Data + dataOffset + 8 + i->first, "print var not implemented");
+				// A debug print of a sequence variable; nothing to render.
+				Common::Warning(here, "print var is a debug command with no MIDI equivalent; dropped",
+					"print var dropped (no MIDI equivalent)");
 			}
 			else if (i->second.Cmd == 0xD7)
 			{
-				Common::Warning(Data + dataOffset + 8 + i->first, "span not implemented");
+				// SurroundPan: the front/rear axis of the DSP's quad voice-gain
+				// matrix. Audible on console only under the System Settings
+				// "Surround" output mode (console-confirmed 2026-07-11); MIDI has
+				// no surround axis in any mode, so there is nothing to map it to.
+				// The future player must model it -- see the suite plan.
+				Common::Warning(here, "span (front/rear surround pan) has no MIDI equivalent; dropped",
+					"span dropped (no MIDI surround axis)");
 			}
 			else if (i->second.Cmd == 0xD8)
 			{
@@ -1327,7 +1395,8 @@ bool Cseq::Convert(uint32_t startOffset)
 			}
 			else if (i->second.Cmd == 0xDB)
 			{
-				Common::Warning(Data + dataOffset + 8 + i->first, "main send not implemented");
+				Common::Warning(here, "main (dry) send not implemented; dropped",
+					"main send dropped (not implemented)");
 			}
 			else if (i->second.Cmd == 0xDC)
 			{
@@ -1358,7 +1427,17 @@ bool Cseq::Convert(uint32_t startOffset)
 			}
 			else if (i->second.Cmd == 0xDD)
 			{
-				Common::Warning(Data + dataOffset + 8 + i->first, "mute not implemented");
+				Common::Warning(here, "track mute not implemented; notes keep sounding",
+					"mute dropped (not implemented)");
+			}
+			else if (i->second.Cmd == 0xDE)
+			{
+				// FX send C: the third aux bus. A real CTR command (zero corpus
+				// occurrences) that used to fall off the end of this chain with no
+				// trace at all. Buses A/B map to CC91/93; GM has no third effects
+				// send, so C drops -- but now visibly.
+				Common::Warning(here, "fx send C (third aux bus) has no MIDI equivalent; dropped",
+					"fx send C dropped (no MIDI equivalent)");
 			}
 			else if (i->second.Cmd == 0xDF)
 			{
@@ -1442,11 +1521,13 @@ bool Cseq::Convert(uint32_t startOffset)
 			}
 			else if (i->second.Cmd == 0xE4)
 			{
-				Common::Warning(Data + dataOffset + 8 + i->first, "mod_period not implemented");
+				Common::Warning(here, "mod period has no MIDI equivalent; dropped",
+					"LFO period dropped (no MIDI equivalent)");
 			}
 			else if (i->second.Cmd == 0xFB)
 			{
-				Common::Warning(Data + dataOffset + 8 + i->first, "envelope reset not implemented");
+				Common::Warning(here, "envelope reset not implemented; dropped",
+					"envelope reset dropped (not implemented)");
 			}
 			else if (i->second.Cmd == 0xFC)
 			{
@@ -1498,180 +1579,67 @@ bool Cseq::Convert(uint32_t startOffset)
 					break;
 				}
 			}
+			else
+			{
+				// Anything the chain above does not handle used to vanish with no
+				// trace (0xDE sat here for years). Parse already vets the byte, so
+				// reaching this means a command was parsed but never wired up --
+				// surface it instead of silently perpetuating the gap.
+				char msg[64];
+				snprintf(msg, sizeof(msg), "unhandled sequence command 0x%02X; dropped", i->second.Cmd);
+				Common::Warning(here, msg, "unhandled sequence commands dropped");
+			}
 		}
 		else
 		{
-			if (i->second.Cmd == 0x80)
+			// Extended (0xF0-prefixed) command space: nothing here is implemented
+			// yet. The variable/comparison ops await the convert-time VM (see the
+			// roadmap); the mod2-4 multi-LFO family has zero corpus occurrences.
+			// One name table instead of 42 branches, in CtrCafe byte order -- the
+			// old chain's mod4 labels (0xAC-0xB1) were scrambled against the map,
+			// which never showed because the chain was dead code (see the parse
+			// fix that records the extended opcode in Cmd).
+			static const map<uint8_t, const char*> extendedNames =
 			{
-				Common::Warning(Data + dataOffset + 8 + i->first, "setvar not implemented");
+				{ 0x80, "setvar" },     { 0x81, "addvar" },      { 0x82, "subvar" },
+				{ 0x83, "mulvar" },     { 0x84, "divvar" },      { 0x85, "shiftvar" },
+				{ 0x86, "randvar" },    { 0x87, "andvar" },      { 0x88, "orvar" },
+				{ 0x89, "xorvar" },     { 0x8A, "notvar" },      { 0x8B, "modvar" },
+				{ 0x90, "cmp_eq" },     { 0x91, "cmp_ge" },      { 0x92, "cmp_gt" },
+				{ 0x93, "cmp_le" },     { 0x94, "cmp_lt" },      { 0x95, "cmp_ne" },
+				{ 0xA0, "mod2_curve" }, { 0xA1, "mod2_phase" },  { 0xA2, "mod2_depth" },
+				{ 0xA3, "mod2_speed" }, { 0xA4, "mod2_type" },   { 0xA5, "mod2_range" },
+				{ 0xA6, "mod3_curve" }, { 0xA7, "mod3_phase" },  { 0xA8, "mod3_depth" },
+				{ 0xA9, "mod3_speed" }, { 0xAA, "mod3_type" },   { 0xAB, "mod3_range" },
+				{ 0xAC, "mod4_curve" }, { 0xAD, "mod4_phase" },  { 0xAE, "mod4_depth" },
+				{ 0xAF, "mod4_speed" }, { 0xB0, "mod4_type" },   { 0xB1, "mod4_range" },
+				{ 0xE0, "userproc" },
+				{ 0xE1, "mod2_delay" }, { 0xE2, "mod2_period" },
+				{ 0xE3, "mod3_delay" }, { 0xE4, "mod3_period" },
+				{ 0xE5, "mod4_delay" }, { 0xE6, "mod4_period" },
+			};
+
+			uint8_t ext = i->second.Cmd;
+			auto name = extendedNames.find(ext);
+			char msg[64];
+
+			if (name == extendedNames.end())
+			{
+				// Parse vets extended bytes, so this is the same safety net as the
+				// plain chain's final else: parsed but never wired up.
+				snprintf(msg, sizeof(msg), "unhandled extended command 0x%02X; dropped", ext);
+				Common::Warning(here, msg, "unhandled sequence commands dropped");
 			}
-			else if (i->second.Cmd == 0x81)
+			else
 			{
-				Common::Warning(Data + dataOffset + 8 + i->first, "addvar not implemented");
-			}
-			else if (i->second.Cmd == 0x82)
-			{
-				Common::Warning(Data + dataOffset + 8 + i->first, "subvar not implemented");
-			}
-			else if (i->second.Cmd == 0x83)
-			{
-				Common::Warning(Data + dataOffset + 8 + i->first, "mulvar not implemented");
-			}
-			else if (i->second.Cmd == 0x84)
-			{
-				Common::Warning(Data + dataOffset + 8 + i->first, "divvar not implemented");
-			}
-			else if (i->second.Cmd == 0x85)
-			{
-				Common::Warning(Data + dataOffset + 8 + i->first, "shiftvar not implemented");
-			}
-			else if (i->second.Cmd == 0x86)
-			{
-				Common::Warning(Data + dataOffset + 8 + i->first, "randvar not implemented");
-			}
-			else if (i->second.Cmd == 0x87)
-			{
-				Common::Warning(Data + dataOffset + 8 + i->first, "andvar not implemented");
-			}
-			else if (i->second.Cmd == 0x88)
-			{
-				Common::Warning(Data + dataOffset + 8 + i->first, "orvar not implemented");
-			}
-			else if (i->second.Cmd == 0x89)
-			{
-				Common::Warning(Data + dataOffset + 8 + i->first, "xorvar not implemented");
-			}
-			else if (i->second.Cmd == 0x8A)
-			{
-				Common::Warning(Data + dataOffset + 8 + i->first, "notvar not implemented");
-			}
-			else if (i->second.Cmd == 0x8B)
-			{
-				Common::Warning(Data + dataOffset + 8 + i->first, "modvar not implemented");
-			}
-			else if (i->second.Cmd == 0x90)
-			{
-				Common::Warning(Data + dataOffset + 8 + i->first, "cmp_eq not implemented");
-			}
-			else if (i->second.Cmd == 0x91)
-			{
-				Common::Warning(Data + dataOffset + 8 + i->first, "cmp_ge not implemented");
-			}
-			else if (i->second.Cmd == 0x92)
-			{
-				Common::Warning(Data + dataOffset + 8 + i->first, "cmp_gt not implemented");
-			}
-			else if (i->second.Cmd == 0x93)
-			{
-				Common::Warning(Data + dataOffset + 8 + i->first, "cmp_le not implemented");
-			}
-			else if (i->second.Cmd == 0x94)
-			{
-				Common::Warning(Data + dataOffset + 8 + i->first, "cmp_lt not implemented");
-			}
-			else if (i->second.Cmd == 0x95)
-			{
-				Common::Warning(Data + dataOffset + 8 + i->first, "cmp_ne not implemented");
-			}
-			else if (i->second.Cmd == 0xA0)
-			{
-				Common::Warning(Data + dataOffset + 8 + i->first, "mod2_curve not implemented");
-			}
-			else if (i->second.Cmd == 0xA1)
-			{
-				Common::Warning(Data + dataOffset + 8 + i->first, "mod2_phase not implemented");
-			}
-			else if (i->second.Cmd == 0xA2)
-			{
-				Common::Warning(Data + dataOffset + 8 + i->first, "mod2_depth not implemented");
-			}
-			else if (i->second.Cmd == 0xA3)
-			{
-				Common::Warning(Data + dataOffset + 8 + i->first, "mod2_speed not implemented");
-			}
-			else if (i->second.Cmd == 0xA4)
-			{
-				Common::Warning(Data + dataOffset + 8 + i->first, "mod2_type not implemented");
-			}
-			else if (i->second.Cmd == 0xA5)
-			{
-				Common::Warning(Data + dataOffset + 8 + i->first, "mod2_range not implemented");
-			}
-			else if (i->second.Cmd == 0xA6)
-			{
-				Common::Warning(Data + dataOffset + 8 + i->first, "mod3_curve not implemented");
-			}
-			else if (i->second.Cmd == 0xA7)
-			{
-				Common::Warning(Data + dataOffset + 8 + i->first, "mod3_phase not implemented");
-			}
-			else if (i->second.Cmd == 0xA8)
-			{
-				Common::Warning(Data + dataOffset + 8 + i->first, "mod3_depth not implemented");
-			}
-			else if (i->second.Cmd == 0xA9)
-			{
-				Common::Warning(Data + dataOffset + 8 + i->first, "mod3_speed not implemented");
-			}
-			else if (i->second.Cmd == 0xAA)
-			{
-				Common::Warning(Data + dataOffset + 8 + i->first, "mod3_type not implemented");
-			}
-			else if (i->second.Cmd == 0xAB)
-			{
-				Common::Warning(Data + dataOffset + 8 + i->first, "mod3_range not implemented");
-			}
-			else if (i->second.Cmd == 0xAC)
-			{
-				Common::Warning(Data + dataOffset + 8 + i->first, "mod4_range not implemented");
-			}
-			else if (i->second.Cmd == 0xAD)
-			{
-				Common::Warning(Data + dataOffset + 8 + i->first, "mod4_curve not implemented");
-			}
-			else if (i->second.Cmd == 0xAE)
-			{
-				Common::Warning(Data + dataOffset + 8 + i->first, "mod4_phase not implemented");
-			}
-			else if (i->second.Cmd == 0xAF)
-			{
-				Common::Warning(Data + dataOffset + 8 + i->first, "mod4_depth not implemented");
-			}
-			else if (i->second.Cmd == 0xB0)
-			{
-				Common::Warning(Data + dataOffset + 8 + i->first, "mod4_speed not implemented");
-			}
-			else if (i->second.Cmd == 0xB1)
-			{
-				Common::Warning(Data + dataOffset + 8 + i->first, "mod4_type not implemented");
-			}
-			else if (i->second.Cmd == 0xE0)
-			{
-				Common::Warning(Data + dataOffset + 8 + i->first, "userproc not implemented");
-			}
-			else if (i->second.Cmd == 0xE1)
-			{
-				Common::Warning(Data + dataOffset + 8 + i->first, "mod2_delay not implemented");
-			}
-			else if (i->second.Cmd == 0xE2)
-			{
-				Common::Warning(Data + dataOffset + 8 + i->first, "mod2_period not implemented");
-			}
-			else if (i->second.Cmd == 0xE3)
-			{
-				Common::Warning(Data + dataOffset + 8 + i->first, "mod3_delay not implemented");
-			}
-			else if (i->second.Cmd == 0xE4)
-			{
-				Common::Warning(Data + dataOffset + 8 + i->first, "mod3_period not implemented");
-			}
-			else if (i->second.Cmd == 0xE5)
-			{
-				Common::Warning(Data + dataOffset + 8 + i->first, "mod4_delay not implemented");
-			}
-			else if (i->second.Cmd == 0xE6)
-			{
-				Common::Warning(Data + dataOffset + 8 + i->first, "mod4_period not implemented");
+				const char* category =
+					(ext <= 0x8B) ? "variable ops dropped (variables not evaluated)" :
+					(ext <= 0x95) ? "comparison ops dropped (variables not evaluated)" :
+					(ext == 0xE0) ? "userproc dropped (no MIDI equivalent)" :
+					"multi-LFO (mod2-4) commands dropped (not implemented)";
+
+				snprintf(msg, sizeof(msg), "%s not implemented; dropped", name->second);
+				Common::Warning(here, msg, category);
 			}
 		}
 

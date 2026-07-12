@@ -643,6 +643,57 @@ conflict with caesar's GPL-3.0.
 Concrete defects found while surveying and evolving the code, since fixed.
 Still-open defects are tracked under "Known bugs" in ROADMAP.md.
 
+- **Warning-hygiene pass over the drop sites — the converter no longer drops
+  anything silently** (`Cseq.cpp`) (*2026-07-12*). Closes the v0.5.1
+  warning-hygiene item, implementing the 2026-07-11 triage's census-ranked
+  demote/surface calls.
+
+  **The dead extended-command chain.** The walk's entire `Extended` branch —
+  42 "not implemented" warnings covering `setvar`/`cmp`/`mod2–4`/`userproc` —
+  was dead code: parse recorded `Cmd = 0xF0` and never the extended opcode
+  behind it, so no branch could match and 353k `setvar` + 210k `cmp_eq` +
+  64k `addvar` (and the rest) vanished with no trace. Parse now records the
+  extended opcode (safe because every consumer — `ReachableNotes`,
+  `collectEntryTracks`, both emit chains — branches on `Extended` first),
+  and the 42-branch chain is replaced by one name table in CtrCafe byte
+  order — which also fixes the mod4 labels (`0xAC`–`0xB1`), scrambled
+  (rotated by one, `range` first instead of last) against the authoritative
+  map. The corrected order, the `0xDE` = FxSendC identity, and the
+  0x90/0x96/0xB7–0xBC "not real plain opcodes" claim were each re-verified
+  directly against `Gota7/GotaSequenceLib CtrCafe.cs` for this change.
+
+  **Demotions (census verdicts).** `span` (55,291 occurrences — the #1
+  warning corpus-wide), `priority` (3,161) and `front bypass` (7,129) are
+  demoted to benign "no MIDI equivalent" notices: span is the front/rear
+  axis of the DSP's quad voice-gain matrix — console-confirmed audible under
+  the Surround output mode, but MIDI has no surround axis in any mode —
+  priority is voice-steal scheduling state, and front bypass is
+  Surround-path routing.
+
+  **Default-visible categories for every remaining drop.** Every bare
+  (`-w`-only) warning at a drop site gained a notice category: sustain
+  level, tie mode, bank select, biquad type/value, envelope hold, mute,
+  velocity range, mod phase/curve/period, print var, main send, envelope
+  reset, conditional-jump skips, out-of-range jump targets.
+
+  **The silent manglings now surface per execution.** `Rnd`-valued
+  arguments (converted as the range minimum), `Var`-valued arguments
+  (converted as the variable *index* — garbage), and `[If]`-prefixed
+  non-jump commands (executed unconditionally — including the 33k
+  conditional `Return`s that can truncate tracks) each get a notice at
+  every execution, so the biggest known fidelity gaps are visible in every
+  affected extraction instead of only in the triage document.
+
+  **The catch-alls.** `0xDE` FxSendC (a real CTR command — third aux send,
+  no GM equivalent) gets an explicit notice, and both the plain and extended
+  chains end in a final `else` that names any parsed-but-unwired opcode, so
+  a future gap can never be silent again.
+
+  **Verification.** A/B over the 82-archive corpus: 257,097 files per side,
+  none added or removed, every one byte-identical
+  (`.mid`/`.sf2`/`.wav`/`.log`/raw dumps); stderr notice summaries changed
+  on 66 archives — the intended (and only) effect.
+
 - **Vibrato CCs gated on the `0xCC` LFO target — tremolo and auto-pan no
   longer render as pitch wobble** (`Cseq.cpp`) (*2026-07-12*). Closes the
   v0.5.1 "gate the vibrato CCs on mod type" item. The track LFO is one

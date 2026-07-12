@@ -126,20 +126,14 @@ Ranked by priority:
       2,146 `.mid`-only diffs across 58 archives, every event a removed
       CC1/76/77/78 or an inserted CC1=0 by independent SMF parse. Full
       narrative in [HISTORY.md](HISTORY.md#fixed-bugs).
-- [ ] **Warning-hygiene pass over the drop sites** (census-ranked in
-      [HISTORY.md](HISTORY.md#investigations)): demote `span` (55k
-      occurrences, the #1 warning — the front/rear surround axis; now
-      console-confirmed audible under the System-Settings *Surround* mode, but
-      MIDI has no surround axis regardless — see the HISTORY addendum),
-      `priority`,
-      and `front bypass` to benign "no MIDI equivalent" notices; give the remaining drops default-visible
-      notice categories (bare warnings are `-w`-only today); add a final
-      `else` unknown-opcode notice (`0xDE` FxSendC currently vanishes
-      silently); fix the extended-command warning chain being dead code
-      (`cmd.Cmd` is never set past `0xF0`, so every `setvar`/`cmp`/mod2-4
-      drop is silent — 353k `setvar` alone) and its scrambled mod4 labels;
-      emit honest notices for `Rnd`/`Var`/`[If]`-prefixed commands the
-      converter currently mangles silently.
+- [x] **Warning-hygiene pass over the drop sites** — every drop/approximation
+      is now a default-visible categorized notice: span/priority/front-bypass
+      demoted to benign "no MIDI equivalent", the dead extended-command warning
+      chain revived (parse now records the extended opcode) with its mod4
+      labels corrected against CtrCafe, per-execution notices for the silent
+      `Rnd`/`Var`/`[If]` manglings, and final unknown-opcode catch-alls
+      (`0xDE` FxSendC included). Byte-identical corpus A/B; narrative in
+      [HISTORY.md](HISTORY.md#fixed-bugs).
 - [ ] **Close the two wrong-arg-count desync hazards.** (a) A `_t` ramp command
       carries a trailing s16 duration that the parser only consumes for
       `0xB0–0xDF`; Time-suffixed tempo/sweep/notes/extended commands leave those

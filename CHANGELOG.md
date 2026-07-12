@@ -53,6 +53,25 @@ House rules:
   Surround; both null controls pass) — upgrading the HISTORY finding from
   inference-grade to console-confirmed. (docs/tooling only — output-identical)
 
+### Changed
+
+- Warning-hygiene pass over the sequence converter's drop sites: everything the
+  converter drops or approximates is now a default-visible notice with an
+  honest category (previously most were `-w`-only, and several were fully
+  silent). Notably: the extended (`0xF0`) command space — 353k `setvar`, 210k
+  comparison ops corpus-wide — warned through a dead code path that could never
+  fire (the parser never recorded the extended opcode) and is now surfaced;
+  `Rnd`/`Var`-valued arguments (which convert as the range minimum / the
+  variable *index*) and `[If]`-prefixed non-jump commands (which execute
+  unconditionally) get per-execution notices; `span`, `priority`, and
+  `front bypass` are demoted to benign "no MIDI equivalent" notices (span is
+  the console's front/rear surround axis — real on hardware under Surround
+  mode, but MIDI has no surround axis in any mode); `0xDE` FX-send-C and any
+  future unhandled opcode hit a final catch-all notice instead of vanishing;
+  and the mod4 LFO warning labels (`0xAC`–`0xB1`), scrambled against the CTR
+  byte map, are corrected. (output-identical — byte-identical across the
+  82-archive corpus; stderr notices only)
+
 ### Fixed
 
 - Vibrato CCs are now gated on the track LFO target (`0xCC` mod type). The
