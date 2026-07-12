@@ -55,6 +55,21 @@ House rules:
 
 ### Fixed
 
+- Vibrato CCs are now gated on the track LFO target (`0xCC` mod type). The
+  3DS track LFO is one retargetable oscillator — pitch, volume (tremolo), or
+  pan (auto-pan) — and caesar emitted the pitch-vibrato CCs (CC1/76/77/78)
+  unconditionally, so tremolo and auto-pan spans (3,020 of the corpus's 8,006
+  mod-type commands, at nearly double the depth of typical pitch spans) played
+  as pitch wobble on every GM/SF2 player. Those CCs are now suppressed while
+  the LFO targets volume or pan (default-visible notice), a live CC1 is zeroed
+  when the LFO leaves pitch — the SF2 default mod-wheel modulator otherwise
+  keeps wobbling pitch — and persisted values are restored when it returns
+  (NW4R keeps the LFO parameters across a retarget). (changes `.mid` only —
+  2,146 files across 58 archives; every differing event is a removed
+  CC1/76/77/78 or an inserted CC1=0 by independent SMF parse of every changed
+  pair, with no note or timing change; no `.sf2`/`.wav`/raw dump differs and
+  no file is added or removed)
+
 - `0xB2` mono/poly no longer emits CC126/CC127. Those are Channel *Mode*
   messages — the MIDI 1.0 spec hangs an implicit All Notes Off on CC124–127,
   so each of the 56 corpus firings that land mid-track (35 with notes already

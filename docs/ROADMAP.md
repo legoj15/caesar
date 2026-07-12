@@ -118,12 +118,14 @@ Ranked by priority:
       were already sounding), so the CC126/CC127 emission is demoted to a
       default-visible "no MIDI equivalent" notice. Full narrative and A/B in
       [HISTORY.md](HISTORY.md#fixed-bugs).
-- [ ] **Gate the vibrato CCs on mod type (`0xCC`).** The track LFO targets
-      pitch, volume, or pan; caesar emits the pitch-vibrato CCs
-      (CC1/76/77/78) unconditionally, so tremolo/auto-pan tracks render as
-      pitch wobble on every GM synth. Track mod_type per track (default
-      pitch) and suppress those CCs for types 1/2. 8,006 occurrences in 64
-      archives.
+- [x] **Gated the vibrato CCs on mod type (`0xCC`)** — tracks whose LFO
+      targets volume (tremolo) or pan (auto-pan) no longer render as pitch
+      wobble: CC1/76/77/78 are suppressed on those spans, a live CC1 is
+      zeroed when the LFO leaves pitch, and persisted values are restored on
+      return (the engine keeps them across a retarget — NW4R-confirmed). A/B:
+      2,146 `.mid`-only diffs across 58 archives, every event a removed
+      CC1/76/77/78 or an inserted CC1=0 by independent SMF parse. Full
+      narrative in [HISTORY.md](HISTORY.md#fixed-bugs).
 - [ ] **Warning-hygiene pass over the drop sites** (census-ranked in
       [HISTORY.md](HISTORY.md#investigations)): demote `span` (55k
       occurrences, the #1 warning — the front/rear surround axis; now
@@ -142,8 +144,10 @@ Ranked by priority:
       carries a trailing s16 duration that the parser only consumes for
       `0xB0–0xDF`; Time-suffixed tempo/sweep/notes/extended commands leave those
       2 bytes unread and desync the rest of the track. (b) The fixed-1-byte
-      command group (`0xB2`, `0xBF`, `0xC7`, `0xC8`, `0xC9`, `0xCE`, `0xDF`)
-      reads its argument with a bare 1-byte read that ignores `cmd.Arg1`, so an
+      command group (`0xB2`, `0xBF`, `0xC7`, `0xC8`, `0xC9`, `0xCE`, `0xDF` —
+      plus `0xCC`, which has the identical bare read in its *own* parse branch,
+      so a fix that only touches the group list misses it) reads its argument
+      with a bare 1-byte read that ignores `cmd.Arg1`, so an
       `Rnd`/`Var`-prefixed command in that group consumes the wrong number of
       bytes and desyncs the same way. Zero corpus occurrences for either (all
       ~473k observed `_t` commands sit in the safe range), but these are the
@@ -296,12 +300,12 @@ Fixed bugs and their verification stories are in
 [HISTORY.md](HISTORY.md#fixed-bugs).
 
 The remaining MIDI-converter discrepancies found in the 2026-07-11
-dropped-parameter triage (mod-type gating, silent `Rnd`/`Var`/`[If]`/ramp
-handling) are scoped as work items under **v0.5.1** above rather than listed
-here twice. (The GM drum-channel collision, the controller-range drops, the
-tempo-zero UB, the mis-wired `0xE3`/`0xE0` controls, the discarded loop
-counts, the damper threshold, init_pan/lpf, and the `0xB2` mono/poly
-note-killer are fixed.)
+dropped-parameter triage (silent `Rnd`/`Var`/`[If]`/ramp handling) are scoped
+as work items under **v0.5.1** above rather than listed here twice. (The GM
+drum-channel collision, the controller-range drops, the tempo-zero UB, the
+mis-wired `0xE3`/`0xE0` controls, the discarded loop counts, the damper
+threshold, init_pan/lpf, the `0xB2` mono/poly note-killer, and the mod-type
+vibrato gating are fixed.)
 
 - **The `0x8A` call stack leaks across track boundaries.** `sp` (`Cseq.cpp`) is
   one `stack<uint32_t>` shared by all 16 tracks, and `advanceToNextTrack` resets
@@ -337,7 +341,17 @@ note-killer are fixed.)
   can never express "faster/shorter than default". Root cause: the parse phase
   types `0xD0/D1/D3` as *signed* under a mistaken model, so a fix must touch
   both phases together. Low priority: FluidSynth-class players ignore CC72–79
-  entirely, so this is byte-level rather than audible wrongness.
+  entirely, so this is byte-level rather than audible wrongness. (NW4R note
+  for whoever recalibrates these: the engine's audible vibrato width is the
+  *product* of `0xCA` depth and `0xCD` range — range, default 1, is a raw
+  multiplier — so the width term largely lives in the CC77 caesar writes to
+  an inert controller, while CC1 alone drives what players actually render.)
+- **Parse hard-errors on mod types above 2, stricter than the engine.** A
+  `0xCC` (or extended mod-type) argument above 2 aborts the whole sequence via
+  `Common::Error`, but NW4R stores the LFO target unvalidated and its routing
+  if-chain simply applies no LFO to an out-of-range value — the console plays
+  such a file (LFO silent) where caesar refuses it outright. Zero corpus
+  occurrences; latent. Downgrade to a notice-and-ignore when convenient.
 
 - **The "plain values clamp to 127" invariant is not universal.**
   `clampPlainCtrl` is applied at `0xC0`/`0xC1`/`0xC2`/`0xD5` but not at `0xC5`

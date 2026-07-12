@@ -643,6 +643,77 @@ conflict with caesar's GPL-3.0.
 Concrete defects found while surveying and evolving the code, since fixed.
 Still-open defects are tracked under "Known bugs" in ROADMAP.md.
 
+- **Vibrato CCs gated on the `0xCC` LFO target — tremolo and auto-pan no
+  longer render as pitch wobble** (`Cseq.cpp`) (*2026-07-12*). Closes the
+  v0.5.1 "gate the vibrato CCs on mod type" item. The track LFO is one
+  retargetable oscillator: `0xCC` routes it to pitch (0, the engine default),
+  volume (1, tremolo) or pan (2, auto-pan). caesar emitted the pitch-vibrato
+  CCs (CC1 mod depth, CC76 rate, CC77 range, CC78 delay) unconditionally, so
+  a tremolo or auto-pan span played as pitch vibrato — CC1 drives an audible
+  ±up-to-50-cent wobble through the SF2 2.01 §8.4 default mod-wheel modulator,
+  which FluidSynth implements — i.e. qualitatively the wrong effect, not a
+  miscalibrated right one.
+
+  **Ground truth (NW4R decomp, ogws — the established NW4C lineage).**
+  `LfoTarget { PITCH, VOLUME, PAN }` = 0/1/2; `MML_SET_LFOTARGET` stores the
+  raw byte into a `lfoTarget` field *separate from* the `LfoParam` block
+  (depth/speed/range/delay), so parameters persist untouched across a
+  retarget — which is what makes restoring them on a return to pitch faithful
+  rather than invented. Track defaults are target=pitch, depth=0 (no LFO
+  until a `0xCA`), range=1, speed=6.25 Hz, delay=0; param changes propagate
+  to sounding voices every frame, and phase/delay restart per note-on. The
+  routing applies depth × range in *cents* to pitch, dB-domain amplitude to
+  volume, and an additive pan sweep — so types 1/2 are genuinely different
+  effects with no static-CC MIDI equivalent (CC92 "tremolo depth" is inert in
+  FluidSynth-class players, same as CC76–78; a real auto-pan needs a
+  synthesized CC10 stream, which is stage-2 player territory).
+
+  **The census (an instrumented build over all 82 archives).** 8,006 literal
+  `0xCC` executions in 64 archives — an exact match to the triage figure,
+  confirming that number counted mod-type *commands*, not affected CCs. The
+  split: 4,986 set pitch (overwhelmingly redundant init-time re-assertions of
+  the default), 1,828 tremolo, 1,192 auto-pan — 38% select a non-pitch
+  target. Zero are `Rnd`/`Var`-prefixed; 98% fire before the track's first
+  note (501 after, only 156 of them value-changing), so the target is in
+  practice a static per-track patch attribute. The content being mis-rendered
+  is *strong*: mean commanded depth inside tremolo/auto-pan spans is 41/127,
+  versus 24/127 on pitch spans. Two numbers drove the design: **70% of
+  switches away from pitch (1,961 of 2,804) happen with a nonzero CC1 already
+  on the wire** — suppression alone leaves that stale CC1 wobbling forever,
+  so the CC1=0 write is load-bearing, not a safety net — and exactly **one**
+  track in the whole corpus ever returns to pitch, so the restore logic is
+  nearly theoretical but cheap.
+
+  **The fix.** A per-track `trackModType` (default 0 = the engine default)
+  tracked in walk order exactly like the existing `trackPan` state, reset at
+  every track boundary; wire/shadow value pairs per CC. While the target is
+  volume/pan: the four commands update their shadows but emit nothing, each
+  surfacing a default-visible "pitch-vibrato CCs suppressed (track LFO
+  targets volume/pan)" notice. Leaving pitch with a live nonzero CC1 writes
+  CC1=0 (plus a "tremolo/auto-pan LFO dropped (no MIDI equivalent)" notice);
+  returning to pitch re-emits any shadow that differs from the wire. An
+  unevaluated `Rnd`/`Var` mod type never latches (its parse also shares the
+  fixed-1-byte desync hazard now folded into the ROADMAP's wrong-arg-count
+  item). Only literal args update shadows, so stand-ins are never persisted.
+
+  **Verification.** A/B over the 82-archive corpus, 257,097 files per side,
+  none added or removed; every `.sf2`, `.wav`, `.log` and raw dump
+  byte-identical. 2,146 `.mid` differ across 58 archives (census predicted
+  2,141 files, 58 archives). An independent SMF parse of **every** differing
+  pair classifies every event-level change with zero unexpected diffs:
+  removed CCs — 1,242 CC1, 1,509 CC76, 822 CC77, 685 CC78 — plus 1,971
+  inserted CC1=0, and no note, timing, or other-event change anywhere. Each
+  removal count reconciles with the census's 4,260 suppressions: the corpus's
+  single return-to-pitch case (`safe.bcsar` `BANK_4/SEQ_1.mid`, an init-time
+  `pitch → auto-pan → pitch` sequence entirely at tick 0) restores its CC1
+  and CC76 byte-identically at the same tick, cancelling one CA and one CB
+  removal — the engine-faithful restore converging back to the old bytes on
+  its own is exactly the behaviour the persistence model predicts. The
+  CC1-zero count exceeds the census's 1,961 because the census heuristic
+  counted only literal prior depths, while the implementation zeroes based on
+  what is actually on the wire (including emitted `Rnd`/`Var` stand-ins) —
+  the wire-accurate superset.
+
 - **`0xB2` mono/poly demoted from CC126/CC127 to an honest notice — the
   Channel-Mode note-killer** (`Cseq.cpp`) (*2026-07-12*). Closes the v0.5.1
   "stop `0xB2` from silencing the channel" item. The engine's command is a

@@ -671,6 +671,21 @@ bool Cseq::Convert(uint32_t startOffset)
 	// CC10 == its pan and converts byte-identically.
 	int32_t trackPan = 64;
 	int32_t trackInitPan = 64;
+	// The track LFO's target (0xCC): 0 = pitch (the engine default), 1 = volume
+	// (tremolo), 2 = pan (auto-pan). The pitch-vibrato CCs (CC1/76/77/78) only
+	// describe the LFO while it targets pitch; on a volume/pan span they render
+	// tremolo/auto-pan as pitch wobble -- CC1 in particular drives an audible
+	// vibrato via the SF2 default mod-wheel modulator -- so they are suppressed
+	// while trackModType != 0. The engine keeps ONE persistent parameter block
+	// (depth/speed/range/delay) beside a separately retargetable target field,
+	// so a value commanded on any span survives a target switch: modShadow holds
+	// the last literal commanded value per CC and modWire the value actually on
+	// the MIDI wire, letting a return to pitch restore what the engine would
+	// still be playing. Slots: 0 = CC1 depth, 1 = CC76 rate, 2 = CC77 range,
+	// 3 = CC78 delay; -1 = never commanded/emitted.
+	int32_t trackModType = 0;
+	int32_t modShadow[4] = { -1, -1, -1, -1 };
+	int32_t modWire[4] = { -1, -1, -1, -1 };
 	// Set by any handler that redirects the walk (jump, call, return, track
 	// change) so the loop lands on the freshly-found command instead of stepping
 	// past it. This replaces the old "find(target); --i;" idiom, which was
@@ -778,6 +793,14 @@ bool Cseq::Convert(uint32_t startOffset)
 				trackHasNote = false;
 				trackPan = 64;
 				trackInitPan = 64;
+				trackModType = 0;
+
+				for (int32_t slot = 0; slot < 4; ++slot)
+				{
+					modShadow[slot] = -1;
+					modWire[slot] = -1;
+				}
+
 				offsetTime.clear();
 
 				i = commands.find(trackOffsets[j]);
@@ -1078,19 +1101,120 @@ bool Cseq::Convert(uint32_t startOffset)
 			}
 			else if (i->second.Cmd == 0xCA)
 			{
-				emitCtrl(smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_MODULATION, i->second.Args[0]), here);
+				if (i->second.Suffix1 == SuffixType::None)
+				{
+					modShadow[0] = i->second.Args[0];
+				}
+
+				if (trackModType == 0)
+				{
+					if (emitCtrl(smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_MODULATION, i->second.Args[0]), here))
+					{
+						modWire[0] = i->second.Args[0];
+					}
+				}
+				else
+				{
+					Common::Warning(here, "mod depth while the track LFO targets volume/pan; CC1 suppressed",
+						"pitch-vibrato CCs suppressed (track LFO targets volume/pan)");
+				}
 			}
 			else if (i->second.Cmd == 0xCB)
 			{
-				emitCtrl(smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_VIBRATORATE, (i->second.Args[0] / 2) + 64), here);
+				int32_t rate = (i->second.Args[0] / 2) + 64;
+
+				if (i->second.Suffix1 == SuffixType::None)
+				{
+					modShadow[1] = rate;
+				}
+
+				if (trackModType == 0)
+				{
+					if (emitCtrl(smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_VIBRATORATE, rate), here))
+					{
+						modWire[1] = rate;
+					}
+				}
+				else
+				{
+					Common::Warning(here, "mod speed while the track LFO targets volume/pan; CC76 suppressed",
+						"pitch-vibrato CCs suppressed (track LFO targets volume/pan)");
+				}
 			}
 			else if (i->second.Cmd == 0xCC)
 			{
-				Common::Warning(Data + dataOffset + 8 + i->first, "mod type not implemented");
+				// Track LFO target: 0 = pitch, 1 = volume (tremolo), 2 = pan
+				// (auto-pan); parse already rejected anything above 2. Retargeting
+				// only re-routes the engine's LFO -- its parameters persist -- so in
+				// MIDI terms leaving pitch must silence a live CC1 (the SF2 default
+				// mod-wheel modulator keeps wobbling pitch otherwise) and returning
+				// to pitch must restore whatever the persistent parameters now hold.
+				// An unevaluated Rnd/Var stand-in is not a target, so it never
+				// latches (and tremolo/auto-pan itself has no MIDI equivalent).
+				if (i->second.Suffix1 == SuffixType::None)
+				{
+					int32_t newType = i->second.Args[0];
+
+					if (newType != trackModType)
+					{
+						trackModType = newType;
+
+						if (newType != 0)
+						{
+							if (modWire[0] > 0)
+							{
+								smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_MODULATION, 0);
+								modWire[0] = 0;
+
+								Common::Warning(here, "track LFO retargeted to volume/pan; tremolo/auto-pan not rendered",
+									"tremolo/auto-pan LFO dropped (no MIDI equivalent)");
+							}
+						}
+						else
+						{
+							const int32_t modCtrl[4] =
+								{ SMF_CONTROL_MODULATION, SMF_CONTROL_VIBRATORATE, SMF_CONTROL_VIBRATODEPTH, SMF_CONTROL_VIBRATODELAY };
+
+							for (int32_t slot = 0; slot < 4; ++slot)
+							{
+								if ((modShadow[slot] >= 0) && (modShadow[slot] != modWire[slot]))
+								{
+									if (emitCtrl(smfInsertControl(smf, absTime, chan, track, modCtrl[slot], modShadow[slot]), here))
+									{
+										modWire[slot] = modShadow[slot];
+									}
+								}
+							}
+						}
+					}
+				}
+				else
+				{
+					Common::Warning(here, "mod type is an unevaluated Rnd/Var; LFO target not tracked",
+						"mod type dropped (unevaluated Rnd/Var)");
+				}
 			}
 			else if (i->second.Cmd == 0xCD)
 			{
-				emitCtrl(smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_VIBRATODEPTH, (i->second.Args[0] / 2) + 64), here);
+				int32_t range = (i->second.Args[0] / 2) + 64;
+
+				if (i->second.Suffix1 == SuffixType::None)
+				{
+					modShadow[2] = range;
+				}
+
+				if (trackModType == 0)
+				{
+					if (emitCtrl(smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_VIBRATODEPTH, range), here))
+					{
+						modWire[2] = range;
+					}
+				}
+				else
+				{
+					Common::Warning(here, "mod range while the track LFO targets volume/pan; CC77 suppressed",
+						"pitch-vibrato CCs suppressed (track LFO targets volume/pan)");
+				}
 			}
 			else if (i->second.Cmd == 0xCE)
 			{
@@ -1264,15 +1388,35 @@ bool Cseq::Convert(uint32_t startOffset)
 					// signed +/-64 parameter and pushed delays >= 640 ms out of
 					// MIDI range entirely.
 					int32_t ms = max(i->second.Args[0], 0) * 5;
+					int32_t delay = 64 + min(ms * 63 / 1000, 63);
 
-					smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_VIBRATODELAY, 64 + min(ms * 63 / 1000, 63));
+					modShadow[3] = delay;
+
+					if (trackModType == 0)
+					{
+						smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_VIBRATODELAY, delay);
+						modWire[3] = delay;
+					}
+					else
+					{
+						Common::Warning(here, "mod delay while the track LFO targets volume/pan; CC78 suppressed",
+							"pitch-vibrato CCs suppressed (track LFO targets volume/pan)");
+					}
 				}
-				else
+				else if (trackModType == 0)
 				{
 					// Unevaluated Rnd/Var stand-in: keep the raw-value path so
 					// out-of-range garbage still drops with the notice instead of
 					// being scaled into a plausible-looking delay.
-					emitCtrl(smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_VIBRATODELAY, (i->second.Args[0] / 2) + 64), here);
+					if (emitCtrl(smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_VIBRATODELAY, (i->second.Args[0] / 2) + 64), here))
+					{
+						modWire[3] = (i->second.Args[0] / 2) + 64;
+					}
+				}
+				else
+				{
+					Common::Warning(here, "mod delay while the track LFO targets volume/pan; CC78 suppressed",
+						"pitch-vibrato CCs suppressed (track LFO targets volume/pan)");
 				}
 			}
 			else if (i->second.Cmd == 0xE1)
