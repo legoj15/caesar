@@ -74,6 +74,23 @@ House rules:
 
 ### Fixed
 
+- The sequence parser's two latent wrong-arg-count desync hazards are closed.
+  A `_t` (ramp) suffix's trailing duration was only consumed for commands in
+  `0xB0`–`0xDF` — on a note, tempo, sweep, or extended command those bytes
+  were left unread, misframing every later command in the track — and the
+  fixed-1-byte command group (`0xB2`/`0xBF`/`0xC7`/`0xC8`/`0xC9`/`0xCE`/
+  `0xDF`, plus `0xCC` and the extended mod-types) read its argument with a
+  bare 1-byte read that ignored a `Rnd` prefix's 4-byte range form. Both now
+  go through the prefix-aware argument reader, and the trailing duration is
+  consumed for every command form. Alongside: the non-opcodes `0x90`/`0x96`
+  and `0xB7`–`0xBC` (not in the CTR command map; the original author's guessed
+  probes) now fail fast as unknown commands instead of swallowing a guessed
+  length that would perpetuate an upstream desync, and every `_t` ramp
+  surfaces a per-execution "flattened to an instant jump" notice (375k
+  volume fades corpus-wide were flattening silently). (output-identical —
+  byte-identical across the 82-archive corpus, where none of the hazard
+  patterns occur; stderr notices only)
+
 - Vibrato CCs are now gated on the track LFO target (`0xCC` mod type). The
   3DS track LFO is one retargetable oscillator — pitch, volume (tremolo), or
   pan (auto-pan) — and caesar emitted the pitch-vibrato CCs (CC1/76/77/78)

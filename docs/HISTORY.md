@@ -643,6 +643,56 @@ conflict with caesar's GPL-3.0.
 Concrete defects found while surveying and evolving the code, since fixed.
 Still-open defects are tracked under "Known bugs" in ROADMAP.md.
 
+- **The two wrong-arg-count desync hazards closed; guessed non-opcodes now
+  fail fast** (`Cseq.cpp`) (*2026-07-12*). Closes the v0.5.1 desync item and
+  the "unknown-opcode bytes are swallowed" known bug in one parse-safety pass.
+  Every hazard here has **zero corpus occurrences** — these are latent
+  misframe bombs, not observed breakage — which is why the whole change is
+  verifiably byte-identical.
+
+  **(a) The `_t` trailing duration.** The Time suffix (`0xA3`/`0xA4`/`0xA5`)
+  appends an s16 ramp duration (or its Rnd/Var form) after the command's own
+  arguments, for *any* command the prefix byte can precede — but the parser
+  consumed it only inside the `0xB0–0xDF` branch. A `_t` on a note, tempo,
+  sweep, or extended command left those bytes unread, and every later command
+  in the track misframed. The consumption is hoisted to run after the whole
+  command dispatch (error paths still return first), so it now applies to
+  every command form; stream position is unchanged for the ~473k corpus `_t`
+  commands, which all sit in the safe range.
+
+  **(b) The bare 1-byte reads.** `0xB2`/`0xBF`/`0xC7`/`0xC8`/`0xC9`/`0xCE`/
+  `0xDF` — plus `0xCC` in its own branch, `0xD6` (which always read
+  `ArgType::Var`), and the extended mod-types `0xA4`/`0xAA`/`0xB0` — read
+  their argument with a raw 1-byte read that ignored `cmd.Arg1`, so a
+  `Rnd`-prefixed command in that set consumed 1 byte where the stream carries
+  a 4-byte range: the same misframe. All of them now route through the
+  prefix-aware `ReadArgs`, with defaults preserved (`Uint8`, `Var` for
+  `0xD6`), so literal arguments read the identical byte. The mod-type `> 2`
+  validation applies only to literal arguments now — an unevaluated Rnd/Var
+  stand-in is not a target byte, and the emit phase already notices it.
+
+  **(c) Fail fast on bytes that are not commands.** `0x90`/`0x96` (the
+  original author's 2-byte `Analyse` probes) and `0xB7–0xBC` (a 1-byte
+  catch-all) are not CTR opcodes — the plain command map jumps `0xB6 → 0xBD`,
+  re-verified against `CtrCafe.cs` for this change. If one ever appears, the
+  parser has already desynced upstream, and consuming a guessed length only
+  perpetuates the misframe with plausible-looking garbage; they now hit
+  `Common::Error` like any other unknown byte.
+
+  **(d) The ramps themselves surface.** A `_t` ramp commands a glide from the
+  parameter's current value to the target over the duration; caesar emits the
+  target at the command tick (375,316 volume fades, 76,362 pan sweeps, 10,725
+  pitch-bend ramps corpus-wide — the single largest fidelity gap, previously
+  completely silent). Each execution now emits a "ramped (_t) change flattened
+  to an instant jump" notice; real interpolation stays stage-2/5 flattening
+  work.
+
+  **Verification.** A/B over the 82-archive corpus: 257,097 files per side,
+  none added or removed, every one byte-identical; stderr gained only the new
+  ramp-flatten notices. The hazard fixes themselves are exercised by no corpus
+  file (as expected), so their proof is the unchanged stream position for
+  every literal argument plus inspection.
+
 - **Warning-hygiene pass over the drop sites — the converter no longer drops
   anything silently** (`Cseq.cpp`) (*2026-07-12*). Closes the v0.5.1
   warning-hygiene item, implementing the 2026-07-11 triage's census-ranked

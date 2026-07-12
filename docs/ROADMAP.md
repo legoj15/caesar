@@ -134,20 +134,13 @@ Ranked by priority:
       `Rnd`/`Var`/`[If]` manglings, and final unknown-opcode catch-alls
       (`0xDE` FxSendC included). Byte-identical corpus A/B; narrative in
       [HISTORY.md](HISTORY.md#fixed-bugs).
-- [ ] **Close the two wrong-arg-count desync hazards.** (a) A `_t` ramp command
-      carries a trailing s16 duration that the parser only consumes for
-      `0xB0–0xDF`; Time-suffixed tempo/sweep/notes/extended commands leave those
-      2 bytes unread and desync the rest of the track. (b) The fixed-1-byte
-      command group (`0xB2`, `0xBF`, `0xC7`, `0xC8`, `0xC9`, `0xCE`, `0xDF` —
-      plus `0xCC`, which has the identical bare read in its *own* parse branch,
-      so a fix that only touches the group list misses it) reads its argument
-      with a bare 1-byte read that ignores `cmd.Arg1`, so an
-      `Rnd`/`Var`-prefixed command in that group consumes the wrong number of
-      bytes and desyncs the same way. Zero corpus occurrences for either (all
-      ~473k observed `_t` commands sit in the safe range), but these are the
-      genuine wrong-arg-count hazards left. The ramps themselves flatten to
-      instant jumps (375k volume fades) — full interpolation is stage-2/5
-      flattening territory; a notice suffices for now.
+- [x] **Closed the two wrong-arg-count desync hazards** — the `_t` trailing
+      duration is now consumed for every command form (not just `0xB0–0xDF`),
+      and the fixed-1-byte group (plus `0xCC` and the extended mod-types) reads
+      its argument through the prefix-aware path; the `0x90`/`0x96`/`0xB7–0xBC`
+      non-opcodes now fail fast instead of swallowing guessed lengths, and `_t`
+      ramps surface a per-execution flatten notice. Byte-identical corpus A/B;
+      narrative in [HISTORY.md](HISTORY.md#fixed-bugs).
 - [ ] **Use the `Rnd` midpoint instead of the minimum.** Random-valued
       commands currently collapse to the range *minimum*, silently biasing
       196k volumes, 177k pitch bends, and 94k rest durations (timing!) low.
@@ -334,12 +327,6 @@ vibrato gating are fixed.)
   distinct names, but where the archive's symbol name collides the offset is not
   disambiguated. Silent data loss (the earlier entries' music never reaches
   disk); the fix is to suffix colliding names with the entry offset.
-- **Unknown-opcode bytes are swallowed instead of failing fast.** `0x90`/`0x96`
-  (2-byte `Analyse` probes guessed by the original author) and `0xB7–0xBC`
-  (1-byte catch-all) are not real CTR opcodes — the map jumps `0xB6`→`0xBD` —
-  so their presence would mean the parser already desynced upstream; consuming
-  a guessed length silently perpetuates the desync. Zero corpus occurrences;
-  should be `Common::Error` like other unknown bytes. Latent, not observed.
 - **The `(v/2)+64` transform on CC72/73/75/76/77** (attack/decay/release,
   vibrato rate/depth) compresses the unsigned 0–127 args into 64–127 — caesar
   can never express "faster/shorter than default". Root cause: the parse phase

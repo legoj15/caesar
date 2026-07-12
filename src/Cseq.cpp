@@ -464,66 +464,66 @@ bool Cseq::Convert(uint32_t startOffset)
 		{
 			cmd.Args.push_back(ReadFixLen(pos, 3, false));
 		}
-		else if (statusByte == 0x90)
-		{
-			Common::Analyse("Cseq Cmd 0x90", ReadFixLen(pos, 2, false));
-		}
-		else if (statusByte == 0x96)
-		{
-			Common::Analyse("Cseq Cmd 0x96", ReadFixLen(pos, 2, false));
-		}
+		// 0x90 and 0x96 are not CTR opcodes either (they exist only as
+		// extended second-bytes; verified against CtrCafe.cs). The original
+		// author probed them here with a guessed 2-byte length, which -- like
+		// 0xB7-0xBC below -- could only paper over an upstream desync. They
+		// now fall through to the unknown-command error at the end.
 		else if ((statusByte >= 0xB0) && (statusByte <= 0xDF))
 		{
-			// if ((statusByte != 0xB7) && (statusByte != 0xB8) && (statusByte != 0xB9) && (statusByte != 0xBA) && (statusByte != 0xBB) && (statusByte != 0xBC) && (statusByte != 0xDE))
+			// 0xB7-0xBC are not CTR opcodes -- the plain command map jumps
+			// 0xB6 -> 0xBD (verified against CtrCafe.cs). They used to be a
+			// 1-byte catch-all here, but consuming a guessed length for a byte
+			// that cannot legitimately appear only perpetuates whatever
+			// upstream desync produced it: fail fast like any other unknown
+			// byte. Zero corpus occurrences.
+			if ((statusByte >= 0xB7) && (statusByte <= 0xBC))
+			{
+				Common::Error(pos - 1, "A valid command", statusByte);
+
+				return false;
+			}
+
+			// Every command in this range reads one argument through ReadArgs,
+			// honouring a Rnd/Var prefix's argument form; only the default type
+			// differs. The old code gave 0xB2/0xBF/0xC7/0xC8/0xC9/0xCC/0xCE/
+			// 0xDF a bare 1-byte read that ignored the prefix, so a Rnd's
+			// 4-byte range was read as 1 byte and every later command in the
+			// track misframed (the second wrong-arg-count hazard; zero corpus
+			// occurrences).
 			if ((statusByte == 0xB1) || (statusByte == 0xC3) || (statusByte == 0xC4) || (statusByte == 0xD0) || (statusByte == 0xD1) || (statusByte == 0xD2) || (statusByte == 0xD3))
 			{
 				if (cmd.Arg1 == ArgType::None)
 				{
 					cmd.Arg1 = ArgType::Int8;
 				}
-
-				vector<int32_t> args = ReadArgs(pos, cmd.Arg1);
-
-				cmd.Args.insert(cmd.Args.end(), args.begin(), args.end());
-			}
-			else if ((statusByte == 0xB2) || (statusByte == 0xBF) || (statusByte == 0xC7) || (statusByte == 0xC8) || (statusByte == 0xC9) || (statusByte == 0xCE) || (statusByte == 0xDF))
-			{
-				cmd.Args.push_back(ReadFixLen(pos, 1));
-			}
-			else if (statusByte == 0xCC)
-			{
-				cmd.Args.push_back(ReadFixLen(pos, 1));
-
-				if (cmd.Args.back() > 2)
-				{
-					Common::Error(pos - 1, "A valid modulation type", cmd.Args.back());
-
-					return false;
-				}
 			}
 			else if (statusByte == 0xD6)
 			{
-				vector<int32_t> args = ReadArgs(pos, ArgType::Var);
-
-				cmd.Args.insert(cmd.Args.end(), args.begin(), args.end());
-			}
-			else
-			{
+				// Print var names a variable slot, so the plain argument is a
+				// var index.
 				if (cmd.Arg1 == ArgType::None)
 				{
-					cmd.Arg1 = ArgType::Uint8;
+					cmd.Arg1 = ArgType::Var;
 				}
-
-				vector<int32_t> args = ReadArgs(pos, cmd.Arg1);
-
-				cmd.Args.insert(cmd.Args.end(), args.begin(), args.end());
+			}
+			else if (cmd.Arg1 == ArgType::None)
+			{
+				cmd.Arg1 = ArgType::Uint8;
 			}
 
-			if (cmd.Arg2 != ArgType::None)
-			{
-				vector<int32_t> args = ReadArgs(pos, cmd.Arg2);
+			vector<int32_t> args = ReadArgs(pos, cmd.Arg1);
 
-				cmd.Args.insert(cmd.Args.end(), args.begin(), args.end());
+			cmd.Args.insert(cmd.Args.end(), args.begin(), args.end());
+
+			// Mod type (0xCC) selects the track LFO target. Only a literal
+			// argument is a target byte this validation can apply to; an
+			// unevaluated Rnd/Var stand-in is handled with a notice at emit.
+			if ((statusByte == 0xCC) && (cmd.Suffix1 == SuffixType::None) && (cmd.Args.back() > 2))
+			{
+				Common::Error(pos - 1, "A valid modulation type", cmd.Args.back());
+
+				return false;
 			}
 		}
 		else if ((statusByte == 0xE0) || (statusByte == 0xE1) || (statusByte == 0xE3) || (statusByte == 0xE4))
@@ -565,39 +565,6 @@ bool Cseq::Convert(uint32_t startOffset)
 
 				cmd.Args.insert(cmd.Args.end(), args2.begin(), args2.end());
 			}
-			else if (statusByte == 0xA4)
-			{
-				cmd.Args.push_back(ReadFixLen(pos, 1));
-
-				if (cmd.Args.back() > 2)
-				{
-					Common::Error(pos - 1, "A valid modulation type", cmd.Args.back());
-
-					return false;
-				}
-			}
-			else if (statusByte == 0xAA)
-			{
-				cmd.Args.push_back(ReadFixLen(pos, 1));
-
-				if (cmd.Args.back() > 2)
-				{
-					Common::Error(pos - 1, "A valid modulation type", cmd.Args.back());
-
-					return false;
-				}
-			}
-			else if (statusByte == 0xB0)
-			{
-				cmd.Args.push_back(ReadFixLen(pos, 1));
-
-				if (cmd.Args.back() > 2)
-				{
-					Common::Error(pos - 1, "A valid modulation type", cmd.Args.back());
-
-					return false;
-				}
-			}
 			else if ((statusByte >= 0xA0) && (statusByte <= 0xB1))
 			{
 				if (cmd.Arg1 == ArgType::None)
@@ -608,6 +575,18 @@ bool Cseq::Convert(uint32_t startOffset)
 				vector<int32_t> args = ReadArgs(pos, cmd.Arg1);
 
 				cmd.Args.insert(cmd.Args.end(), args.begin(), args.end());
+
+				// mod2/3/4 type (0xA4/0xAA/0xB0): the same literal-only
+				// validation as 0xCC. These three used to read a bare byte
+				// that ignored a Rnd/Var prefix's argument form -- the same
+				// wrong-arg-count desync as the plain fixed-1-byte group.
+				if (((statusByte == 0xA4) || (statusByte == 0xAA) || (statusByte == 0xB0))
+					&& (cmd.Suffix1 == SuffixType::None) && (cmd.Args.back() > 2))
+				{
+					Common::Error(pos - 1, "A valid modulation type", cmd.Args.back());
+
+					return false;
+				}
 			}
 			else if (statusByte == 0xE0)
 			{
@@ -651,6 +630,21 @@ bool Cseq::Convert(uint32_t startOffset)
 			Common::Error(pos - 1, "A valid command", statusByte);
 
 			return false;
+		}
+
+		// The Time (_t) suffix appends a trailing s16 ramp duration (or its
+		// Rnd/Var form) AFTER the command's own arguments -- for any command
+		// the prefix byte can precede, not just 0xB0-0xDF, which is all the
+		// old placement inside that branch consumed. A _t on a note, tempo,
+		// sweep or extended command left those 2+ bytes unread and misframed
+		// every later command in the track (the first wrong-arg-count hazard;
+		// zero corpus occurrences -- all ~473k observed _t sit in the safe
+		// range). Error paths above return before reaching this, as before.
+		if (cmd.Arg2 != ArgType::None)
+		{
+			vector<int32_t> args = ReadArgs(pos, cmd.Arg2);
+
+			cmd.Args.insert(cmd.Args.end(), args.begin(), args.end());
 		}
 
 		commands[offset] = cmd;
@@ -855,6 +849,16 @@ bool Cseq::Convert(uint32_t startOffset)
 		{
 			Common::Warning(here, "Var argument not evaluated; variable index stands in for the value",
 				"Var-valued arguments not evaluated (variable index stands in)");
+		}
+
+		// A _t ramp commands the engine to glide from the parameter's current
+		// value to the target over the trailing duration; caesar emits the
+		// target at the command tick instead (375k volume fades corpus-wide,
+		// previously silent). Real interpolation is stage-2/5 flattening work.
+		if (i->second.Suffix2 != SuffixType::None)
+		{
+			Common::Warning(here, "ramped (_t) change flattened to an instant jump at the command tick",
+				"ramped (_t) changes flattened to instant jumps");
 		}
 
 		if (!i->second.Label.empty())
