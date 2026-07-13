@@ -35,6 +35,15 @@ struct Cwav
 
 	uint8_t SampleMode;
 
+	uint16_t ChanCount;
+	uint32_t SampleRate;
+	uint32_t LoopStart;
+	uint32_t LoopEnd;
+
+	std::vector<std::vector<int16_t>> Channels;
+
+	bool Converted = false;
+
 	Cwav(const char* fileName);
 	~Cwav();
 	bool Convert();

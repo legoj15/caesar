@@ -5,6 +5,8 @@
 #include <cmath>
 #include <filesystem>
 #include <fstream>
+#include <stdexcept>
+#include <utility>
 #include <vector>
 
 using namespace std;
@@ -242,7 +244,8 @@ bool Cwav::Convert()
 		length += 8 + smplLength;
 	}
 
-	ofstream ofs(FileName.substr(0, FileName.length() - 5).append("wav"), ofstream::binary);
+	string wavName = FileName.substr(0, FileName.length() - 5).append("wav");
+	ofstream ofs(wavName, ofstream::binary);
 
 	ofs.write("RIFF", 4);
 	ofs.write(reinterpret_cast<const char*>(&length), 4);
@@ -293,6 +296,29 @@ bool Cwav::Convert()
 	}
 
 	ofs.close();
+
+	// The ofstream was never checked before, so a failed or truncated write still
+	// reported success. This only fires on a real I/O error, never on healthy data.
+	if (!ofs)
+	{
+		throw runtime_error("could not write file (write failed or incomplete): " + wavName);
+	}
+
+	// Retain the decoded data so Cbnk can read it from the live object instead of
+	// re-opening the .wav. Move the per-channel PCM out now that the .wav is written.
+	ChanCount = chanCount;
+	SampleRate = sampleRate;
+	LoopStart = loopStart;
+	LoopEnd = loopEnd;
+
+	Channels.reserve(chanCount);
+
+	for (uint16_t i = 0; i < chanCount; ++i)
+	{
+		Channels.push_back(move(chans[i].PcmSamples));
+	}
+
+	Converted = true;
 
 	return true;
 }

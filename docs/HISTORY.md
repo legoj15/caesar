@@ -2157,3 +2157,47 @@ widened) → 4 (library split).**
   stale on the day the doc was committed (the read-back is the
   `cwav.Id < 0xF000` block in `Cbnk::Convert`). Landmarks over line numbers
   in design docs from here on.
+
+## Suite stage 0 — session 1: the in-memory sample handoff (2026-07-13)
+
+First code of the suite plan, executed the same day as the kickoff survey and
+in its revised order (this was sub-step 2, narrowed to the `.wav` trip and
+pulled ahead of the context fold). `Cwav` now retains channel count, sample
+rate, the raw INFO loop points, per-channel decoded PCM, and a
+converted-successfully flag alongside the already-retained `SampleMode`;
+`Cbnk` fills its per-sample state from the live `Cwav` (reached through the
+unchanged positional `Cwars` lookup) instead of re-opening and re-parsing the
+`.wav` it just wrote. The `.wav` user output is byte-unchanged. Deleted with
+the read-back: the RIFF header asserts, the smpl scan, the per-sample heap
+buffer, and the codebase's only manual `Push`/`Pop` pair — retiring the
+stale-frame/bounds-Range leak on its return-false paths, filed that morning.
+Added: the `.wav` write is checked (previously silent on I/O failure), and
+the bank-side guard turns three formerly-crashing malformed references
+(positional index past the map, absent/nullptr WARC, out-of-range sample id)
+into the exact missing-file error text `RequireOpen` always threw. Quirks
+reproduced, not fixed: >2-channel waves still collapse frame-interleaved into
+`LeftSamples`; SampleMode-odd loop points are recovered even with empty PCM
+(the IMA-ADPCM case); the no-loop default stays `0..LeftSamples.size()`. The
+per-sample `<id>.wav` stdout echo is kept by pushing an empty context range.
+
+Verification: full-corpus A/B (tools/ab-verify, baseline = the survey commit)
+— 82 archives, **257,125 output files byte-identical, stdout/stderr
+identical**, exit 0. Peak working set on the corpus's largest archive
+(FatesB `IRON15_sound.bcsar`, 151 MB): 461 MB → 1,028 MB — the retained
+decoded PCM, accepted and changelogged; it is the future player's sample
+path — with single-run wall time 24.1 s → 22.2 s. Three adversarial Opus
+reviewers (byte-surface, value-simulation across every channel-count ×
+SampleMode × codec combination, lifetime/UB) found zero blockers; lifetimes
+are anchored by the pre-existing live-object `SampleMode` deref in the SF2
+build. One real latent divergence was found and deliberately kept: when two
+WARCs share a symbol (and therefore an output directory), the old build
+silently built SF2s from whichever colliding on-disk `.wav` won the
+overwrite; the new build reads the correct per-archive samples. That is a
+bugfix on a case absent from the corpus — the WARC naming-collision entry in
+Known bugs stays open for the on-disk overwrite itself. Also surfaced:
+`Cgrp`'s map-insert-by-assignment leaks an overwritten `Cwar` on group id
+collisions (pre-existing, unobserved, now heavier — filed in Known bugs).
+
+Pattern note: one Opus implementation agent working against the survey's
+quirk contract, then parallel Opus adversarial review — the tier-1-fixes
+pattern, holding up well.

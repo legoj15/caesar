@@ -152,6 +152,9 @@ per stage. Status:
       split last — and identified the `ReadArgs` Rnd-midpoint collapse as the
       one lossless-model blocker. Full findings in
       [HISTORY.md](HISTORY.md#2026-07-13--suite-stage-0-kickoff-survey).
+      First sub-step shipped 2026-07-13: the `.wav` in-memory handoff
+      (257,125-file A/B byte-identical; write-up in HISTORY). Next up: the
+      diagnostics goldens, then the `ParseContext` fold.
 - [ ] **Stage 1 — byte-identical round-trip** of BCSEQ/BCBNK/BCSAR from a
       raw-backed model (**the next milestone** — the cheapest complete proof
       the format is understood, and the serializer everything else sits on).
@@ -233,7 +236,10 @@ list is the known defect tail.
   bank, wave-archive and group outputs are still named from the symbol alone
   with no id disambiguation. Banks have no per-entry offset, so it takes two
   INFO entries sharing one symbol — unmeasured in the corpus. Census before
-  extending the suffix scheme.
+  extending the suffix scheme. (2026-07-13: the in-memory handoff removed the
+  worst downstream symptom — bank SF2s no longer read cross-contaminated
+  samples when two WARCs collide on one directory; the on-disk `.wav`
+  overwrite itself remains.)
 - **The `(v/2)+64` transform on CC72/73/75/76/77** (attack/decay/release,
   vibrato rate/depth) compresses the unsigned 0–127 args into 64–127 — caesar
   can never express "faster/shorter than default". Root cause: the parse phase
@@ -281,16 +287,6 @@ list is the known defect tail.
   Surfaced by the 2026-07-11 `0xE3` research (sweep pitch and portamento are
   independent, additive mechanisms). Verify CC84 semantics across target
   players before changing anything.
-- **The bank's `.wav` read-back leaks a stale context frame on early failure.**
-  `Cbnk::Convert`'s manual `Push`/`Pop` around each sample's `.wav` (the one
-  non-RAII pair in the codebase) has nine early `return false` exits between
-  push and pop, and that path also skips `Common::Reset` (main resets only on
-  the exception path) — so the next input on the command line parses with a
-  stale entry in the bounds-check table, where wild pointers landing inside
-  the leaked buffer pass validation. Latent on a healthy corpus (those `.wav`s
-  are caesar's own output); same family as the fixed `sp` call-stack leak.
-  Dies naturally in suite stage 0's in-memory handoff. (2026-07-13 kickoff
-  survey.)
 - **Multi-input runs bleed the analysis `.log` across archives.** `Common::Log`
   is cleared only on the exception path, so in `caesar a.bcsar b.bcsar`, `b`'s
   `.log` also contains all of `a`'s rows (`Notices` doesn't bleed — it flushes
@@ -299,9 +295,11 @@ list is the known defect tail.
   against whatever frame tops the shared file-name stack, across unrelated
   heap buffers). The stage-0 context fold must reproduce both first and fix
   them as a separate, deliberate output-changing commit. (2026-07-13 kickoff
-  survey.)
-- **The `.wav` writer never checks its output stream.** A failed or truncated
-  `.wav` write still reports success; today the bank's read-back turns that
-  into a clean abort by accident, but after stage 0's in-memory handoff the
-  SF2 would build fine while the on-disk `.wav` is bad. The handoff step must
-  add the stream check. (2026-07-13 kickoff survey.)
+  survey. The survey's other two filings — the bank read-back's stale-frame
+  leak and the unchecked `.wav` write — were both retired the same day by the
+  in-memory handoff; see HISTORY.)
+- **Group WARC id collisions leak the overwritten object.** `Cgrp` inserts its
+  wave archives into the shared map by plain assignment; an id already present
+  (a direct WARC's or another group's) is overwritten without being freed.
+  Pre-existing and unobserved on the corpus; noted 2026-07-13 because retained
+  decoded PCM now makes each leaked object materially heavier.

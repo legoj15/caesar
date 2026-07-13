@@ -59,6 +59,24 @@ House rules:
 
 ### Fixed
 
+- **A failed or truncated `.wav` write is now reported instead of silently
+  succeeding** — `Cwav::Convert` never checked its output stream, so a full disk
+  or I/O error left a short/empty `.wav` behind while the run reported success.
+  The stream is now checked after close and a write failure throws (caught by the
+  per-input handler). This rides in on the in-memory sample handoff: `Cwav` now
+  retains its decoded PCM, channel count, sample rate, and raw loop points, and
+  `Cbnk` reads samples from the live wave object rather than re-opening and
+  re-parsing the `.wav` it just wrote — which also retires a latent stale-frame /
+  bounds-check leak on the old read-back's error paths. The `.wav` files are
+  still written exactly as before, and malformed banks that reference an absent
+  or out-of-range wave archive now fail with the same clean per-input error as a
+  missing sample instead of crashing. (output-identical — byte-identical and
+  stderr-identical across the corpus on healthy inputs; the new throw fires only
+  on real I/O failure, which the corpus does not exercise. Runtime tradeoff:
+  extraction is modestly faster, and peak memory roughly doubles on the largest
+  archives because decoded samples now live in memory for the archive's
+  lifetime — measured 0.46 GB → 1.0 GB on the corpus's worst case, a 151 MB
+  archive)
 - **The `0x8A`/`0xFD` call stack no longer leaks across track boundaries** —
   `sp`, the Call/Return stack, was a single `stack<uint32_t>` shared by all 16
   tracks of a sequence, and `advanceToNextTrack` reset every other per-track

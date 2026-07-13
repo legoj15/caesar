@@ -12,6 +12,7 @@
 #include <map>
 #include <memory>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -226,100 +227,65 @@ bool Cbnk::Convert()
 
 		if (cwav.Id < 0xF000)
 		{
-			// The decoded .wav sits beside the wave-archive's own dump file (the
-			// folder Cwar extracted into), so derive its path from that
-			// wave-archive's full path rather than assuming a working directory.
-			filesystem::path wavPath = filesystem::path(it->second->FileName).parent_path() / (to_string(cwav.Id) + ".wav");
-			ifstream ifs(wavPath, ios::binary | ios::ate);
-
-			streamoff cwavLength = ifs.tellg();
-			Common::RequireOpen(ifs.good(), cwavLength, to_string(cwav.Id) + ".wav");
-			uint8_t* cwavData = new uint8_t[cwavLength];
-
-			Common::Push(string(to_string(cwav.Id) + ".wav"), cwavData, cwavLength);
-
-			ifs.seekg(0, ios::beg);
-			ifs.read(reinterpret_cast<char*>(cwavData), cwavLength);
-			ifs.close();
-
-			pos = cwavData;
-
-			if (!Common::Assert(pos, 0x52494646, ReadFixLen(pos, 4, false))) { return false; }
-			if (!Common::Assert<uint64_t>(pos, cwavLength - 8, ReadFixLen(pos, 4))) { return false; }
-			if (!Common::Assert(pos, 0x57415645, ReadFixLen(pos, 4, false))) { return false; }
-			if (!Common::Assert(pos, 0x666D7420, ReadFixLen(pos, 4, false))) { return false; }
-			if (!Common::Assert(pos, 0x10, ReadFixLen(pos, 4))) { return false; }
-			if (!Common::Assert(pos, 0x1, ReadFixLen(pos, 2))) { return false; }
-
-			cwav.ChanCount = ReadFixLen(pos, 2);
-			cwav.SampleRate = ReadFixLen(pos, 4);
-			uint32_t byteRate = ReadFixLen(pos, 4);
-			uint16_t blockAlign = ReadFixLen(pos, 2);
-			uint16_t bitsPerSample = ReadFixLen(pos, 2);
-
-			if (!Common::Assert(pos - 8, byteRate, (cwav.SampleRate * cwav.ChanCount) * (bitsPerSample / 8))) { return false; }
-			if (!Common::Assert<uint16_t>(pos - 4, blockAlign, cwav.ChanCount * (bitsPerSample / 8))) { return false; }
-			if (!Common::Assert(pos, 0x64617461, ReadFixLen(pos, 4, false))) { return false; }
-
-			uint32_t cwavDataLength = ReadFixLen(pos, 4);
-
-			while (pos < (cwavData + 44 + cwavDataLength))
+			// The sample was already decoded in memory when its wave-archive was
+			// extracted; read it back from the live Cwav instead of re-opening the
+			// .wav. The positional lookup above located that wave-archive (advance
+			// begin() by Cwar). Guard the cases that were previously a missing-file
+			// throw or a crash: past the map's end, an absent wave-archive (nullptr),
+			// an out-of-range id, or a sample that never converted. On healthy data
+			// none of these fire, so this matches the old RequireOpen-throws contract.
+			if (it == Cwars->end() || it->second == nullptr || cwav.Id >= it->second->Cwavs.size() || !it->second->Cwavs[cwav.Id]->Converted)
 			{
-				cwav.LeftSamples.push_back(ReadFixLen(pos, 2));
-
-				if (cwav.ChanCount == 2)
-				{
-					cwav.RightSamples.push_back(ReadFixLen(pos, 2));
-				}
+				throw runtime_error("could not open or read file (missing, empty, or unreadable): " + to_string(cwav.Id) + ".wav");
 			}
 
-			for (; pos < (cwavData + cwavLength); pos -= 3)
+			Cwav* src = it->second->Cwavs[cwav.Id];
+
+			// Keep the per-sample stdout echo (empty range: no reads happen here now).
+			Common::Push(to_string(cwav.Id) + ".wav", nullptr, 0);
+
+			cwav.ChanCount = src->ChanCount;
+			cwav.SampleRate = src->SampleRate;
+
+			if (src->ChanCount == 1)
 			{
-				if (ReadFixLen(pos, 4, false) == 0x736D706C)
+				cwav.LeftSamples = src->Channels[0];
+			}
+			else if (src->ChanCount == 2)
+			{
+				cwav.LeftSamples = src->Channels[0];
+				cwav.RightSamples = src->Channels[1];
+			}
+			else
+			{
+				// The old read-back pushed every 2-byte word into LeftSamples unless
+				// the wave had exactly two channels, so a >2-channel wave collapsed
+				// into one frame-interleaved LeftSamples stream. Reproduce that.
+				for (size_t s = 0; s < src->Channels[0].size(); ++s)
 				{
-					[[maybe_unused]] uint32_t smplLength = ReadFixLen(pos, 4);
-					[[maybe_unused]] uint32_t manufacturer = ReadFixLen(pos, 4);
-					[[maybe_unused]] uint32_t product = ReadFixLen(pos, 4);
-					[[maybe_unused]] uint32_t samplePeriod = ReadFixLen(pos, 4);
-					[[maybe_unused]] uint32_t midiUnityNote = ReadFixLen(pos, 4);
-					[[maybe_unused]] uint32_t midiPitchFraction = ReadFixLen(pos, 4);
-					[[maybe_unused]] uint32_t smpteFormat = ReadFixLen(pos, 4);
-					[[maybe_unused]] uint32_t smpteOffset = ReadFixLen(pos, 4);
-					uint32_t sampleLoops = ReadFixLen(pos, 4);
-					[[maybe_unused]] uint32_t samplerData = ReadFixLen(pos, 4);
-
-					vector<WaveSmpl> smpls;
-
-					for (uint32_t j = 0; j < sampleLoops; ++j)
+					for (uint16_t c = 0; c < src->ChanCount; ++c)
 					{
-						WaveSmpl smpl{};
-						smpl.CuePointId = ReadFixLen(pos, 4);
-						smpl.Type = ReadFixLen(pos, 4);
-						smpl.Start = ReadFixLen(pos, 4);
-						smpl.End = ReadFixLen(pos, 4);
-						smpl.Fraction = ReadFixLen(pos, 4);
-						smpl.PlayCount = ReadFixLen(pos, 4);
-
-						smpls.push_back(smpl);
+						cwav.LeftSamples.push_back(src->Channels[c][s]);
 					}
-
-					cwav.Loop = true;
-					cwav.LoopStart = smpls[0].Start;
-					cwav.LoopEnd = smpls[0].End;
-
-					break;
 				}
 			}
 
-			if (!cwav.Loop)
+			// A smpl chunk is written only when SampleMode is odd; it carried the raw
+			// loop points, which the old code recovered even when the decoded PCM was
+			// empty (the IMA-ADPCM case: a smpl chunk but zero samples).
+			if ((src->SampleMode % 2) != 0)
+			{
+				cwav.Loop = true;
+				cwav.LoopStart = src->LoopStart;
+				cwav.LoopEnd = src->LoopEnd;
+			}
+			else
 			{
 				cwav.LoopStart = 0;
 				cwav.LoopEnd = static_cast<uint32_t>(cwav.LeftSamples.size());
 			}
 
 			Common::Pop();
-
-			delete[] cwavData;
 		}
 
 		cwavs.push_back(cwav);
