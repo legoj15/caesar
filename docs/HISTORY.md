@@ -643,6 +643,51 @@ conflict with caesar's GPL-3.0.
 Concrete defects found while surveying and evolving the code, since fixed.
 Still-open defects are tracked under "Known bugs" in ROADMAP.md.
 
+- **The note-wait default fixed: tracks start with note-wait ON, as the
+  engine does** (`Cseq.cpp`) (*2026-07-12*). A new bug found (and fixed)
+  during the tie-mode work — caesar initialised `noteWait = false` (track
+  time advanced only via explicit rests until an explicit `0xC7`), so every
+  track that plays notes before its first `0xC7` was time-compressed:
+  ~112k notes across 67 archives (instrumented census), overwhelmingly
+  sound effects, lost their note-length waits — `SE_CTR_COMMON_WAIT`'s
+  steps played on a 9-tick grid instead of the engine's 13 (gate 4 +
+  rest 9), and the no-rest tied sweeps (`SE_Map_WarpstarUp*`, 300+ tied
+  notes, zero rests) collapsed onto a single tick, which the tie-mode
+  verification surfaced as 3,366 suddenly-silent files.
+
+  **The evidence chain (three independent lines).** (1) The NW4R decomp's
+  track constructor initialises `noteWaitFlag = true` (ogws
+  `snd_MmlSeqTrack.cpp`). (2) An instrumented corpus census of explicit
+  `0xC7` arguments: **44,349 executions disable note-wait vs 3,654 that
+  enable it** — 92% disables is an authoring tool escaping an ON default
+  (an OFF default would make 44k explicit "off" commands pointless). (3)
+  The tied sweeps are dispositive: under OFF they are inaudible nonsense
+  (a 327-step swell in one tick), under ON they are exactly the rising
+  sweep the console plays. An earlier same-day reading of the rest-timed
+  UI blips ("OFF matches; ON would drag them") mistook a genuinely
+  ambiguous case for evidence — the sweeps and the `0xC7` census are not
+  ambiguous. (A LayeredFS timing probe remains the definitive console
+  check if ever doubted.)
+
+  **Verification.** A/B over the 82-archive corpus: 257,097 files per
+  side, none added or removed; only `.mid` changed — 12,562 files across
+  66 archives (the 67th census archive's default-dependent notes shift
+  nothing) — and stdout/stderr are byte-identical (no notice depends on
+  the clock). Independent SMF parse of every changed pair (old side
+  re-extracted and SHA-matched against the A/B manifest): **0 violations,
+  0 unresolved**. Zero value changes on any event, zero control events
+  added or dropped, zero events moving earlier; 112,987 events shift
+  monotonically later (max 97,408 ticks). Non-tie notes keep key,
+  velocity, and duration by construction (60,930 shifted intact); all
+  3,255 duration changes are tie-span recomputations; 31,782 notes
+  *reappear* inside tie regions as clean monophonic segments (99.96%
+  non-overlapping, none creating new polyphony) — the silent sweeps
+  restored. Same-channel note overlaps corpus-wide drop 39,080 → 1,995
+  (collapsed chord-stacks becoming sequential audio), and end-of-track
+  times only grow or stay. The 156 strict-monotonicity heuristic trips
+  were each run to ground as benign loop-marker anchoring or tie-cluster
+  restructuring with zero absolute earlier-moves.
+
 - **Tie mode (`0xC8`) implemented — tied notes no longer re-attack as
   independent short notes** (`Cseq.cpp`) (*2026-07-12*). Closes the v0.5.1
   stretch item, completing the section's work items.

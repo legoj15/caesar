@@ -679,7 +679,14 @@ bool Cseq::Convert(uint32_t startOffset)
 	Smf* smf = smfCreate();
 	uint32_t absTime = 0;
 	uint8_t track = 0;
-	bool noteWait = false;
+	// Note-wait starts ON: the engine default (NW4R SeqTrack ctor sets
+	// noteWaitFlag = true), corroborated corpus-wide -- 92% of the corpus's
+	// explicit 0xC7 commands are DISABLES (44,349 off vs 3,654 on), i.e. the
+	// authoring tool escaping an on-default, and the no-rest tied sweeps
+	// (SE_Map_WarpstarUp*) only produce their console sound with waits.
+	// caesar shipped OFF for years, compressing every track that plays notes
+	// before an explicit 0xC7 (~112k notes across 67 archives).
+	bool noteWait = true;
 	// Whether the current track has emitted a note yet. A note-less [If]
 	// dispatcher is only followed while this is false, so any track that already
 	// produces sound converts exactly as before.
@@ -857,7 +864,7 @@ bool Cseq::Convert(uint32_t startOffset)
 			{
 				absTime = 0;
 				track = j;
-				noteWait = false;
+				noteWait = true;
 				trackHasNote = false;
 				trackPan = 64;
 				trackInitPan = 64;

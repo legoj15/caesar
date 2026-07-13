@@ -102,6 +102,18 @@ House rules:
 
 ### Fixed
 
+- **Tracks now start with note-wait ON, matching the engine** — caesar
+  initialised it OFF, compressing the timing of every track that plays notes
+  before an explicit `0xC7` note-wait command (~112k notes across 67
+  archives, overwhelmingly sound effects: steps lost their note-length
+  waits, and the no-rest tied sweeps like `SE_Map_WarpstarUp*` collapsed
+  onto a single tick). Three lines of evidence: the NW4R track constructor
+  initialises `noteWaitFlag = true`; 92% of the corpus's explicit `0xC7`
+  commands are *disables* (44,349 off vs 3,654 on — an authoring tool
+  escaping an on-default); and the tie sweeps only produce their console
+  sound with waits. (changes `.mid` only, in sequences with notes before
+  any `0xC7`)
+
 - A mod type (`0xCC`, or the extended mod2–4 types) above 2 no longer aborts
   the whole sequence with a parse error. The hardware stores the LFO target
   unvalidated and simply applies no LFO to an out-of-range value — the
