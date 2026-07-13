@@ -47,6 +47,21 @@ House rules:
   frame is ever consumed by a subsequent track's Return and every call target is
   valid; the fix removes latent cross-track corruption and two undefined-
   behaviour / silent-track-drop hazards that this corpus does not exercise)
+- **Distinct sequence entries sharing a symbol name no longer overwrite each
+  other's output** — a bank can be referenced by many INFO entries, each with
+  its own start offset but the same symbol name, and both the extracted
+  `.bcseq` and the converted `.mid` were named from that symbol alone. Every
+  such entry composed the same output path, so the last writer won and the
+  earlier entries' music silently never reached disk. The output path now keeps
+  the bare name for the first entry to claim it and suffixes later collisions
+  with the entry's start offset (`SEQ_1_0x1b40`, and the file id as a further
+  tiebreak), so every distinct entry keeps its own `.bcseq`/`.mid`; an exact-
+  duplicate INFO entry (same id and start offset) still reuses the one path.
+  (changes `.mid`/`.bcseq` only — across the 82-archive / 257,097-file corpus
+  this adds 28 files in one archive, `safe.bcsar` (14 `.bcseq` + 14 `.mid`, the
+  relocated collision siblings of a 17-entry `SEQ_1` group), and changes 1 bare
+  `.mid` to carry the first entry's output instead of the last's; no `.sf2`,
+  `.wav`, raw-dump, stderr, or exit-code output changes)
 
 ## [0.5.1] — 2026-07-12
 

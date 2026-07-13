@@ -354,19 +354,12 @@ mis-wired `0xE3`/`0xE0` controls, the discarded loop counts, the damper
 threshold, init_pan/lpf, the `0xB2` mono/poly note-killer, and the mod-type
 vibrato gating are fixed.)
 
-- **Distinct sequence entries silently overwrite each other's `.mid`.** 104 of
-  7,990 output names are reached from more than one entry start offset —
-  `SEQ_1.bcseq` alone is converted from 6 different offsets, all writing
-  `SEQ_1.mid`, so only the last survives. The shared-bank fix gave *most* entries
-  distinct names, but where the archive's symbol name collides the offset is not
-  disambiguated. Silent data loss (the earlier entries' music never reaches
-  disk); the fix is to suffix colliding names with the entry offset. (Audit
-  2026-07-12: the collision also clobbers the extracted `.bcseq` itself when
-  the colliding entries reference different file ids; the fix point is the
-  name composition in `Csar.cpp` — keep the first occurrence bare so
-  unaffected names stay byte-identical, and skip true duplicates (same id
-  *and* offset) instead of suffixing. Bank/WARC/GROUP naming shares the
-  symbol-collision hazard structurally — census before extending the fix.)
+- **Bank/WARC/GROUP naming shares the symbol-collision hazard structurally.**
+  The sequence-side collision fix (2026-07-12) covers `.bcseq`/`.mid` only;
+  bank, wave-archive and group outputs are still named from the symbol alone
+  with no id disambiguation. Banks have no per-entry offset, so it takes two
+  INFO entries sharing one symbol — unmeasured in the corpus. Census before
+  extending the suffix scheme.
 - **The `(v/2)+64` transform on CC72/73/75/76/77** (attack/decay/release,
   vibrato rate/depth) compresses the unsigned 0–127 args into 64–127 — caesar
   can never express "faster/shorter than default". Root cause: the parse phase

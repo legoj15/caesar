@@ -1486,6 +1486,68 @@ Still-open defects are tracked under "Known bugs" in ROADMAP.md.
   undefined-behaviour / silent-track-drop hazards without moving a single output
   byte on the available corpus.
 
+- **Distinct sequence entries sharing a symbol name no longer overwrite each
+  other's `.bcseq`/`.mid`** (`Csar.cpp`) (*2026-07-12*). A `.bcsar` maps many
+  sequence INFO entries onto shared sequence banks; each entry carries a symbol
+  name and its own start offset within the bank. The `case 0x2203:` extraction
+  composed both the raw `.bcseq` path and (via `Cseq::Convert`) the `.mid` path
+  from the symbol name alone (`bankDir / (FileName + ".bcseq")`), so two entries
+  with the same name wrote the same two paths. Last writer won; every earlier
+  entry's converted music silently never reached disk, and when the colliding
+  entries referenced different file ids even the raw `.bcseq` bytes were
+  clobbered.
+
+  **The fix (name composition only).** A per-archive record maps each claimed
+  `seqFile` path to the `(id, startOffset)` that claimed it. The first entry to
+  claim a path keeps the bare name unchanged — so every non-colliding entry and
+  each collision group's first entry stay byte-identical to before. A later
+  entry landing on a path already held by a *different* `(id, startOffset)` is a
+  genuinely distinct sequence sharing the name, and gets its start offset as a
+  lowercase-hex suffix (`SEQ_1_0x1b40`); if even that collides (same name and
+  offset, different id) the id is appended as a further tiebreak, so the
+  `(name, startOffset, id)` triple — unique per distinct entry — always
+  resolves. A repeat of the same `(id, startOffset)` is an exact-duplicate INFO
+  entry and is left to rewrite identical bytes over the one path, as before. The
+  suffix is local to the path: `cseqs[i].FileName` and `namesById[id]` keep the
+  bare name, so group naming (Cgrp reads `namesById`) and log/display uses are
+  untouched — only the entry's own per-file console line shows the suffixed
+  basename, which is what distinguishes the siblings.
+
+  **Verification (corpus A/B, output-changing by design).** Baseline HEAD
+  `91517e7`, 82-archive / 257,097-file corpus; exit 1 as expected. New side
+  257,125 files: **29 output diffs — 1 changed, 28 added, 0 removed**, all in
+  `3DSNand/sound/safe.bcsar`, `BANK_4/SEQ_1`. The 28 additions are 14 `.bcseq`
+  + 14 `.mid` (the relocated collision siblings); the single change is the bare
+  `SEQ_1.mid`. Console echoes 17 `SEQ_1` write lines on both sides: the group is
+  **17 INFO entries → 15 distinct `(id, startOffset)`** (1 bare + 14 suffixed)
+  **plus 2 exact duplicates** (a second entry each at `0x12e` and `0x402`, same
+  id and offset) that reuse their path and add nothing — the exact-duplicate
+  passthrough, exercised on real data. All 15 entries reference the same bank id,
+  so every `.bcseq` is byte-identical (`D997D71…`, 1760 B) and the bare `.bcseq`
+  therefore does not change; only the bare `.mid` moves, from the last writer
+  (271 B `D0A653…`, offset `0x41e`) to the first writer (36 B `818A61…`). **No
+  music lost, only relocated:** the old bare `.mid` content reappears
+  byte-identical as `SEQ_1_0x41e.mid`, and the old bare `.bcseq` content is
+  present across the whole group. Every other invariant held exactly: no file
+  removed; every addition matches `<base>_0x<hex>[_id]` with the bare base
+  present in the same directory; every change is a collision-group bare
+  `.bcseq`/`.mid`; **no `.sf2`, `.wav`, or raw-dump byte changed anywhere**;
+  stderr byte-identical (0 diffs, so no warning category added or vanished) and
+  exit codes unchanged, the one stdout diff being the suffixed basenames on
+  `safe.bcsar`'s per-file write lines (same 17-line count both sides).
+
+  **Reconciling the roadmap's "104 of 7,990".** Scanning the new trees:
+  **41,249** `.bcseq` reach disk across **28,375** distinct symbol names, of
+  which **9,334 recur across more than one directory** — but those are benign
+  (each archive/bank extracts into its own directory, so cross-directory
+  same-names never share a path). Genuine *within-directory* path collisions,
+  the only case that overwrote, number exactly **one** here (the `SEQ_1` group).
+  The roadmap headline counted recurring output names corpus-wide (dominated by
+  that benign cross-directory reuse) and drew on a wider survey than the
+  harness's default corpus; the fix mechanism is collision-count-agnostic, and
+  this corpus simply contains a single true collision site. MSVC Release build
+  warning-clean.
+
 ## Investigations
 
 ### 2026-07-11 — Dropped-parameter triage (full census + provenance)

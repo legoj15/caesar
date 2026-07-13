@@ -9,6 +9,7 @@
 #include <filesystem>
 #include <fstream>
 #include <map>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -400,6 +401,17 @@ bool Csar::Extract(const string& outputDir)
 	vector<CsarCseq> cseqs;
 	map<int, bool> cseqsFromCsar;
 
+	// Distinct sequence entries can share one symbol name: many INFO entries map
+	// onto shared sequence banks, each beginning at its own start offset. Both the
+	// .bcseq and the .mid are named from that symbol, so same-named entries would
+	// compose the same output path and the later writer would silently clobber the
+	// earlier entry's music (safe.bcsar maps 17 INFO entries -- 15 distinct
+	// sequences -- onto one SEQ_1 name; 14 of them never reached disk). Remember
+	// which seqFile path each distinct (id, startOffset) pair has claimed so a
+	// later collision can be suffixed apart instead of overwriting what is
+	// already on disk.
+	map<string, pair<uint32_t, uint32_t>> claimedSeqFiles;
+
 	for (uint32_t i = 0; i < cseqCount; ++i)
 	{
 		if (!Common::Assert(pos, 0x2200, ReadFixLen(pos, 4))) { return false; }
@@ -479,7 +491,46 @@ bool Csar::Extract(const string& outputDir)
 
 					Common::CheckBounds(pos, cseqLength);
 
-					string seqFile = (bankDir / (cseqs[i].FileName + ".bcseq")).string();
+					// The first entry to claim a path keeps the bare symbol name, so
+					// non-colliding entries (the vast majority) and each collision
+					// group's first entry stay byte-identical to before. A later entry
+					// landing on a path already claimed by a DIFFERENT (id, startOffset)
+					// is a genuinely distinct sequence sharing the name: suffix its
+					// start offset (lowercase hex) so it keeps its own .bcseq/.mid
+					// rather than overwriting the earlier one. If even that collides
+					// (same name and start offset but a different file id), fall back to
+					// the id -- the (name, startOffset, id) triple is unique per distinct
+					// entry, so this always resolves. A repeat of the same (id,
+					// startOffset) is an exact-duplicate INFO entry and is left to
+					// rewrite identical bytes over the same path, exactly as before.
+					// The suffix is local to this path composition: cseqs[i].FileName
+					// and namesById[id] keep the bare name, so group naming (Cgrp reads
+					// namesById) and log/display uses are unaffected. The suffixed
+					// basename does surface in this entry's own per-file notices, which
+					// is what tells the collision siblings apart.
+					string seqName = cseqs[i].FileName;
+					string seqFile = (bankDir / (seqName + ".bcseq")).string();
+
+					auto claimed = claimedSeqFiles.find(seqFile);
+
+					if (claimed != claimedSeqFiles.end() && claimed->second != make_pair(id, startOffset))
+					{
+						ostringstream suffixed;
+						suffixed << seqName << "_0x" << hex << startOffset;
+						seqName = suffixed.str();
+						seqFile = (bankDir / (seqName + ".bcseq")).string();
+
+						claimed = claimedSeqFiles.find(seqFile);
+
+						if (claimed != claimedSeqFiles.end() && claimed->second != make_pair(id, startOffset))
+						{
+							seqName += "_" + to_string(id);
+							seqFile = (bankDir / (seqName + ".bcseq")).string();
+						}
+					}
+
+					claimedSeqFiles[seqFile] = make_pair(id, startOffset);
+
 					ofstream ofs(seqFile, ofstream::binary);
 					ofs.write(reinterpret_cast<const char*>(pos), cseqLength);
 					ofs.close();
