@@ -9,8 +9,8 @@ deep reverse-engineering findings (addresses, evidence chains) in
 [NW4C-disasm-handoff.md](NW4C-disasm-handoff.md).
 
 Entries are grouped by the v0.5.0 roadmap section they closed out, in the
-original roadmap order, followed by the v0.5.1 release record, fixed bugs,
-and investigations.
+original roadmap order, followed by the v0.5.1 release record, post-v0.5.1
+feature narratives, fixed bugs, and investigations.
 
 ---
 
@@ -728,6 +728,110 @@ tie mode's true semantics — both also below.
   release notes). Convention: every user-facing change adds a line under
   `[Unreleased]` in the same commit, stating its output impact
   (output-identical vs which output types change).
+
+## The convert-time variable VM (2026-07-13)
+
+The largest single fidelity item since the fork began: the sequence variable
+machinery — 353k `setvar`-family ops, 210k comparisons, the `[If]` prefix,
+and `Var`-valued arguments — now *executes* during conversion instead of
+dropping with notices. This entry is the full record: semantics sourcing,
+converter policies, the verification net, and the two design rules the
+verification itself forced.
+
+**Semantics sourcing — three independent layers, and a real engine
+divergence.** (1) The NW4R decomp (kiwi515/ogws `snd_MmlParser.cpp` /
+`snd_SeqPlayer.cpp` / `snd_SeqTrack.cpp`) supplied the op formulas; (2)
+GotaSequenceLib supplied the CTR byte map but was found wrong in **five**
+places (garbled `notvar`, exclusive-max `Rnd` roll, unguarded ÷0, unchecked
+variable indices, global-var default 0) — every one resolved in NW4R's
+favour; (3) a fresh capstone disassembly of MiiPlaza `code.bin` byte-verified
+all 18 ops in the shipped 3DS engine (addresses in the disasm handoff,
+Session 4). The disassembly also settled scoping — 16 player locals (idx
+0–15), 16 **process-global** vars at an absolute address (16–31), **16**
+track vars (32–47, not 8), NULL no-op at ≥48 — and caught a genuine
+NW4C≠NW4R divergence found nowhere else: **the CTR port gates `Fin` and
+`Return` behind `[If]`** (`[If] Fin` with a false flag keeps the track
+playing), where the Wii engine returns FINISH outside the gate. The Wii
+reading had already been written into the implementation spec; the binary
+overruled it mid-flight. Only the inert `0xFE` alloc-track escapes the gate.
+
+**Converter policies (each surfaced by a notice).** Variables initialise to
+**0** — a deliberate policy, not the hardware's −1 power-on value: the
+roadmap-mandated two-init corpus A/B showed init −1 rescues *nothing* (0
+files) while silencing **1,294 more** files and ~309k note-ons, because
+authored comparisons overwhelmingly key on 0 as the default section; the
+per-group mechanism diagnoses independently confirmed init choice was
+irrelevant to every contested file (their variables are sequence-written
+before read). `randvar` and `Rnd` arguments stand in their range midpoint
+(the VM is deliberately PRNG-free — one input, one reproducible file). Reads
+of never-written variables fire a per-execution notice naming the variable —
+the honest marker for game-seeded state. `cmpFlag` inits true per track;
+skipped commands consume arguments and no time; an `[If]`-skipped comparison
+cannot write `cmpFlag` (all binary-confirmed).
+
+**Control flow.** The two-reachability dispatcher heuristic is deleted —
+conditional jumps evaluate exactly. Backward conditional takes follow the
+spin-wait/counted-loop rule (allowed while VM state changed since the target
+last ran, under a 1024-per-site revisit budget): a counted loop unrolls until
+its comparison clears; a spin-wait's body plays once. A per-track execution
+budget (1M commands, added after the adversarial review) is the terminal
+backstop and incidentally closes a latent pre-existing hang on `Call` cycles.
+No loop markers ever come from conditional jumps.
+
+**The re-roll-loop escape rule — forced by verification.** The first corpus
+census found 482 sound→silent files. Mechanism diagnosis (per-group, against
+the raw `.bcseq` streams, with a validated Python re-implementation of both
+walks) split them three ways: (a) **50 unique Pokémon `niji_sound` files
+(403 notes)** are self-contained RNG re-roll loops — `randvar`, compare,
+`[If]`-exit to the play block, unconditional jump back — which on hardware
+ALWAYS eventually play (every threshold satisfiable), but whose exit a
+PRNG-free midpoint can never roll open; the unconditional back-jump then
+read as a "whole-song loop" and the track ended silent. The fix: when the
+whole-song-loop rule fires, if the loop span contains an `[If]`-jump the
+gate turned off **whose comparison read only sequence-written state**, take
+that exit once — it is the loop's guaranteed hardware escape. (b) **138
+GardenSound files** are game-triggered spin-wait dispatchers polling
+never-written variables (`cmp_ne var33 != var17`-style) — the old converter's
+notes were *fabricated* by the heuristic taking an arbitrary branch; honest
+silence-at-rest is console-accurate, so these are deliberately NOT escaped
+(the never-written tag excludes them), and each names its trigger variable
+in a notice. An opt-in trigger-seed preview mode is filed on the roadmap.
+(c) **17 niji selector chirps + 6 GreenCube selectors** are random one-shots
+whose midpoint outcome is the (majority) "no fire" branch — honest silence.
+After the rule landed, the census settled at exactly the diagnosed
+honest-silence population (332 files incl. archive duplicates) and the 50
+re-roll files recovered all 403 notes; 11 additional ambience/engine SEs
+(bakery cafés, Zelda waves, kart wind, WarioWare engines) gained notes the
+old converter never reached.
+
+**Verification.** Corpus A/B (82 archives, 257,125 files/side): every diff
+`.mid`-only — 3,356 files across 55 archives, none added or removed, no
+`.sf2`/`.wav`/raw-dump byte moved; 19 machinery-free archives byte-identical
+including stderr. Independent SMF parse of all 3,356 changed pairs: zero
+parse errors; net **+37,486 note-ons** (+55,175 gained as conditional content
+became reachable, −17,689 lost to honest gating). Every sound→silent
+transition mechanism-diagnosed and justified (above); the 909-file
+dispatcher regression watch resolved as: the majority still sound via real
+evaluation, 5 GardenSound files *gained* sound (incl. `SE_ESC_INSECT_HORNET`
+0→1, `SE_ESCAPE_ENV_SHAPER` 0→5), and the 138 silenced ones are proven
+fabrications. A three-lens adversarial review (engine-semantics fidelity /
+byte-identity threat model / loop termination) confirmed **zero defects**;
+its informational findings produced the execution-budget backstop and two
+comment corrections. Two byte-diff oddities were run to ground as correct
+improvements: `SEQ_BGM_PROLOGUE_12` swaps a same-tick loopStart/note-on pair
+(the old converter executed an `[If]` tie-off unconditionally, finalizing the
+tie mid-stream; the VM correctly gates it), and `SE_DJ_CTRL_WAIT_TO_FIN`
+loses a bogus 7 BPM tempo + 8-tick rest that were the old variable-*index*
+stand-ins (var7/var8 resolve to 0; the 0-BPM guard drops the tempo).
+
+**Residue, documented.** Six GardenSound-class files whose trigger is seeded
+still select a velocity-0 variant under the randvar midpoint (the known
+midpoint approximation, not a silencing bug). GotaSequenceLib was dropped as
+a cross-oracle (its execution layer failed five semantic checks); the
+validated per-file Python walk simulators used for the diagnoses served that
+role instead. The New 3DS in-game spot checks for default-section ground
+truth remain available on request but were superseded by the two-init A/B's
+unambiguous result plus the per-mechanism diagnoses.
 
 ## Fixed bugs
 

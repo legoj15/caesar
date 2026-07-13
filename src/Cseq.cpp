@@ -24,6 +24,29 @@ using namespace std;
 // and DAWs display on the timeline.
 static constexpr int SMF_META_MARKER = 0x06;
 
+// Convert-time variable-VM policy: all three sequence-variable scopes (player,
+// global, track) start at 0. This is a deliberate CONVERTER policy, not the
+// hardware power-on value -- NW4R's DEFAULT_VARIABLE_VALUE is -1 for every
+// scope, and on hardware the globals are static, seeded by the game via
+// SetGlobalVariable and persisting across songs, neither of which a standalone
+// converter can reproduce. 0 is the "game at rest / default section" value, so
+// game-driven globals default to the same section the retired dispatcher
+// heuristic aimed for and every conversion is deterministic. Kept a named
+// constant so the init-policy A/B is a one-line flip.
+static constexpr int16_t kVarInit = 0;
+
+// Safety budgets. kCondRetakeBudget caps the backward retakes per conditional
+// jump-site (see the 0x89 [If] handling): a counted loop unrolls until its
+// comparison flips cmpFlag, but a state-churning loop can spin without
+// settling. A GENUINE counted loop above the budget is truncated at 1024
+// passes -- the refusal notice surfaces it, and no corpus loop counts that
+// high. kTrackExecBudget caps total commands executed per track, checked once
+// per walk iteration: it is the terminal backstop for any cycle the other
+// guards cannot see (a Call that reaches itself recursed unboundedly before
+// this guard existed). Neither budget binds on real data.
+static constexpr uint32_t kCondRetakeBudget = 1024;
+static constexpr uint32_t kTrackExecBudget = 1u << 20;
+
 // The libsmfc writer silently returns false and drops an event when an argument
 // is outside MIDI range (a control/program/master-volume value above 127, a
 // pitch bend beyond +/-8192, a tempo out of the 24-bit range). The sequence
@@ -57,15 +80,18 @@ static bool emitProgram(bool ok, uint8_t* pos)
 	return ok;
 }
 
-// A plain Uint8 argument is genuine sequence data in 0-255 while the MIDI
-// control is 7-bit, so 128-255 clamps to 127 (surfaced as an approximation
-// notice) rather than dropping the write. A Rnd/Var-prefixed argument is not
-// evaluated yet (the range midpoint / variable index stands in for the value),
-// so an out-of-range value there is garbage and keeps dropping through the
-// emitCtrl notice instead of being baked in as a plausible-looking 127.
-static int32_t clampPlainCtrl(const CseqCmd& cmd, uint8_t* pos)
+// Clamp an already-resolved control/parameter value into 7-bit MIDI range,
+// surfacing the approximation. A plain Uint8 argument is genuine sequence data
+// in 0-255, so 128-255 clamps to 127 rather than dropping the write; the
+// convert-time VM can also hand this a Var/Rnd-resolved s16 that is below 0,
+// which clamps to 0. (Before the VM every argument reaching here was a literal
+// value and only the high end was live -- the callers gated this on
+// Suffix1 == None and let an unevaluated Rnd/Var stand-in drop through the
+// emitCtrl notice instead; the value now arrives evaluated, so both ends are
+// real and the caller no longer discriminates on the prefix.)
+static int32_t clampCtrl(int32_t value, uint8_t* pos)
 {
-	if ((cmd.Suffix1 == SuffixType::None) && (cmd.Args[0] > 127))
+	if (value > 127)
 	{
 		Common::Warning(pos, "control/parameter value above MIDI range; clamped to 127",
 			"MIDI control/parameter values clamped to 127 (above range)");
@@ -73,7 +99,15 @@ static int32_t clampPlainCtrl(const CseqCmd& cmd, uint8_t* pos)
 		return 127;
 	}
 
-	return cmd.Args[0];
+	if (value < 0)
+	{
+		Common::Warning(pos, "control/parameter value below MIDI range; clamped to 0",
+			"MIDI control/parameter values clamped to 0 (below range)");
+
+		return 0;
+	}
+
+	return value;
 }
 
 // A voice's pan is the SUM of three independent terms on hardware, not a single
@@ -120,10 +154,13 @@ vector<int32_t> ReadArgs(uint8_t*& pos, ArgType argType)
 		// must pick one stand-in, and it used to be the raw pair -- callers
 		// took Args[0], the FIRST bound, silently biasing 196k volumes, 177k
 		// pitch bends and 94k rest durations (timing!) toward that end
-		// corpus-wide. The midpoint is the honest deterministic choice until
-		// real randomness lands with the convert-time VM (symmetric, so the
-		// unsorted order is irrelevant; C++ truncation toward zero; callers
-		// see exactly one value, so every consumer inherits it).
+		// corpus-wide. The midpoint is the honest deterministic choice: the
+		// convert-time VM evaluates every other argument exactly, but stays
+		// deliberately PRNG-free so one input yields one reproducible file, so
+		// the range midpoint is the settled stand-in for randomness (symmetric,
+		// so the unsorted order is irrelevant; C++ truncation toward zero;
+		// callers see exactly one value, so every consumer inherits it). The VM
+		// surfaces the midpoint as an approximation notice at the command site.
 		int32_t rndA = ReadFixLen(pos, 2, false, true);
 		int32_t rndB = ReadFixLen(pos, 2, false, true);
 
@@ -161,98 +198,6 @@ Cseq::~Cseq()
 	Common::Pop();
 
 	delete[] Data;
-}
-
-// The set of command offsets from which the walk reaches a note (any Cmd < 0x80),
-// following calls and unconditional jumps. `followConditional` controls whether
-// conditional [If] jumps are treated as branchable:
-//   false -> skip them, exactly what Convert emits today; answers "would the
-//            current converter produce a note starting here" (used to decide
-//            whether the plain fall-through of a dispatcher stays silent).
-//   true  -> also follow their targets; answers "can this offset reach a note by
-//            some branch" (used to decide whether a dispatcher branch is worth
-//            taking, even when the note hides behind a further [If] jump).
-// Two notions are needed: a single any-path set would report the fall-through as
-// note-reaching via a branch we never take, so no dispatcher would ever fire.
-// Computed by seeding every note command and walking predecessor edges, so
-// cycles (loops) resolve correctly.
-static set<uint32_t> ReachableNotes(const map<uint32_t, CseqCmd>& commands, bool followConditional)
-{
-	map<uint32_t, vector<uint32_t>> preds;
-	vector<uint32_t> work;
-	set<uint32_t> reaches;
-
-	for (auto it = commands.begin(); it != commands.end(); ++it)
-	{
-		uint32_t offset = it->first;
-		const CseqCmd& cmd = it->second;
-		auto nextIt = next(it, 1);
-		uint32_t nextOffset = (nextIt != commands.end()) ? nextIt->first : 0xFFFFFFFF;
-
-		// Record that reaching `succ` also reaches `offset` (a reverse edge).
-		auto edge = [&](uint32_t succ)
-		{
-			if (commands.count(succ))
-			{
-				preds[succ].push_back(offset);
-			}
-		};
-
-		if (!cmd.Extended && (cmd.Cmd < 0x80))
-		{
-			// A note: a source of the reachability we are propagating backwards.
-			reaches.insert(offset);
-			work.push_back(offset);
-		}
-		else if (!cmd.Extended && ((cmd.Cmd == 0xFF) || (cmd.Cmd == 0xFD)))
-		{
-			// Fin / Return: this path ends here, so there are no successors.
-		}
-		else if (!cmd.Extended && (cmd.Cmd == 0x89) && (cmd.Suffix3 != SuffixType::If))
-		{
-			edge(cmd.Args[0]);          // unconditional jump: control follows it
-		}
-		else if (!cmd.Extended && (cmd.Cmd == 0x89) && (cmd.Suffix3 == SuffixType::If))
-		{
-			edge(nextOffset);           // conditional jump: the not-taken path, and
-			if (followConditional)
-			{
-				edge(cmd.Args[0]);      // optionally the taken branch as well
-			}
-		}
-		else if (!cmd.Extended && (cmd.Cmd == 0x8A))
-		{
-			edge(cmd.Args[0]);          // call into the subroutine, or
-			edge(nextOffset);           // continue after it returns
-		}
-		else
-		{
-			edge(nextOffset);           // everything else
-		}
-	}
-
-	while (!work.empty())
-	{
-		uint32_t succ = work.back();
-		work.pop_back();
-
-		auto p = preds.find(succ);
-
-		if (p == preds.end())
-		{
-			continue;
-		}
-
-		for (uint32_t pred : p->second)
-		{
-			if (reaches.insert(pred).second)
-			{
-				work.push_back(pred);
-			}
-		}
-	}
-
-	return reaches;
 }
 
 // The set of track indices this entry uses, marked into trackUsed[16]. These
@@ -536,9 +481,9 @@ bool Cseq::Convert(uint32_t startOffset)
 			// console plays such a file (LFO silent) where caesar refused it
 			// outright. Notice and continue; the emit handler suppresses the
 			// pitch-vibrato CCs for any non-pitch target, which is exactly the
-			// audible result. Only a literal argument is a target byte (an
-			// unevaluated Rnd/Var stand-in is handled at emit). Zero corpus
-			// occurrences.
+			// audible result. Only a literal argument can be range-checked here;
+			// a Var/Rnd target is known only at emit, where the VM's resolved
+			// value drives the same suppression. Zero corpus occurrences.
 			if ((statusByte == 0xCC) && (cmd.Suffix1 == SuffixType::None) && (cmd.Args.back() > 2))
 			{
 				Common::Warning(pos - 1, "mod type above 2; the engine applies no LFO",
@@ -667,15 +612,6 @@ bool Cseq::Convert(uint32_t startOffset)
 		commands[offset] = cmd;
 	}
 
-	// Offsets from which a note is reachable (see ReachableNotes). `noteOnFall`
-	// follows only the plain (skip-[If]) flow, so it reports whether a
-	// dispatcher's fall-through stays silent; `noteViaBranch` also follows [If]
-	// branches, so it reports whether a branch target eventually reaches a note
-	// even through further conditional jumps. Together they let the walk resolve
-	// note-less [If] dispatchers below.
-	set<uint32_t> noteOnFall = ReachableNotes(commands, false);
-	set<uint32_t> noteViaBranch = ReachableNotes(commands, true);
-
 	Smf* smf = smfCreate();
 	uint32_t absTime = 0;
 	uint8_t track = 0;
@@ -687,10 +623,6 @@ bool Cseq::Convert(uint32_t startOffset)
 	// caesar shipped OFF for years, compressing every track that plays notes
 	// before an explicit 0xC7 (~112k notes across 67 archives).
 	bool noteWait = true;
-	// Whether the current track has emitted a note yet. A note-less [If]
-	// dispatcher is only followed while this is false, so any track that already
-	// produces sound converts exactly as before.
-	bool trackHasNote = false;
 	// The current track's two pan terms, in raw command units (64 = centre), which
 	// the engine sums into one voice pan (see combinePan). Both start at the value
 	// the engine initialises them to, so a track that never sends init pan emits
@@ -733,6 +665,54 @@ bool Cseq::Convert(uint32_t startOffset)
 	uint32_t tieCmdOffset = 0;
 	int32_t tieKey = 0;
 	int32_t tieVel = 0;
+	// The convert-time variable VM. vars[] is the engine's own s16 storage (all
+	// op arithmetic wraps at 16 bits through it); the index map is
+	// RESEARCH-CONFIRMED: 0-15 player-local, 16-31 global, 32-47 track-local.
+	// Player/global slots persist across the sequential track walk (globals are
+	// static on hardware; the sequential visibility of writes is the
+	// deterministic stand-in for concurrent tracks), while track slots (32-47)
+	// reset per track in advanceToNextTrack (SeqTrack::InitParam). varWritten
+	// tracks which slots the sequence itself has written, so a read of a slot the
+	// game would have seeded externally is surfaced honestly (init-0 stands in).
+	// cmpFlag is the per-track comparison result the [If] gate reads; it starts
+	// true (NW4R MmlSeqTrack ctor) and is written only by the six comparisons.
+	int16_t vars[48];
+
+	for (int32_t v = 0; v < 48; ++v)
+	{
+		vars[v] = kVarInit;
+	}
+
+	bool varWritten[48] = { false };
+	bool cmpFlag = true;
+	// Bumped only when VM state actually changes (a var write that changes the
+	// stored value or flips varWritten, or a cmpFlag flip). offsetVersion stamps
+	// the vmVersion in force when each offset was last reached, beside offsetTime;
+	// together they let a conditional backward jump tell a still-counting loop
+	// (state moved since the target ran) from a spin-wait (state unchanged).
+	uint64_t vmVersion = 0;
+	map<uint32_t, uint64_t> offsetVersion;
+	// Conditional-loop budgets: revisits taken per jump-site, and total commands
+	// executed this track. Both cleared per track (see advanceToNextTrack).
+	map<uint32_t, uint32_t> condRetakes;
+	uint32_t trackExecs = 0;
+	// Re-roll loop escape bookkeeping. A common SE idiom is a self-contained RNG
+	// wait loop -- randvar, compare, [If]-jump to the play block, unconditional
+	// jump back -- which on hardware ALWAYS eventually exits (the sequence rolls
+	// its own variable until the comparison clears; Pokemon niji_sound's ambient
+	// SFX are 50 corpus files of exactly this). A PRNG-free midpoint can gate
+	// that exit off permanently, and the loop's unconditional back-jump would
+	// then read as a "whole-song loop" and end the track silent. So every
+	// [If]-jump the gate skips is recorded (offset -> target), tagged with
+	// whether the comparison that gated it read any never-written -- i.e.
+	// game-seeded -- variable: a game-driven wait (Animal Crossing's spin-wait
+	// dispatchers, 138 files) must NOT be escaped, because silence-until-the-
+	// game-acts is its real at-rest behaviour, while a sequence-internal RNG
+	// wait is escaped once at the loop-classification site (see the 0x89
+	// handler). All cleared per track.
+	map<uint32_t, pair<uint32_t, bool>> gatedExits;   // jump offset -> (target, gameDriven)
+	set<uint32_t> gatedExitUsed;
+	bool lastCmpGameDriven = false;
 	// Set by any handler that redirects the walk (jump, call, return, track
 	// change) so the loop lands on the freshly-found command instead of stepping
 	// past it. This replaces the old "find(target); --i;" idiom, which was
@@ -744,8 +724,10 @@ bool Cseq::Convert(uint32_t startOffset)
 	[[maybe_unused]] bool trackEnabled[16] = { false };
 
 	// Absolute MIDI time at which each command offset was reached in the current
-	// track, so a backward jump can place its loop-start marker at the tick where
-	// the loop target originally played. Cleared at every track boundary.
+	// track, so an unconditional backward jump can place its loop-start marker at
+	// the tick where the loop target originally played (and, for a conditional
+	// backward jump, so offsetVersion has a companion key). Cleared at every
+	// track boundary.
 	map<uint32_t, uint32_t> offsetTime;
 
 	// Begin at this entry's start offset within the shared bank. If it does not
@@ -865,7 +847,6 @@ bool Cseq::Convert(uint32_t startOffset)
 				absTime = 0;
 				track = j;
 				noteWait = true;
-				trackHasNote = false;
 				trackPan = 64;
 				trackInitPan = 64;
 				trackModType = 0;
@@ -876,6 +857,25 @@ bool Cseq::Convert(uint32_t startOffset)
 					modShadow[slot] = -1;
 					modWire[slot] = -1;
 				}
+
+				// Track-scoped VM state resets at every track init on hardware
+				// (SeqTrack::InitParam): the 16 track-local vars to the init
+				// policy, their written flags, and cmpFlag to true. Player and
+				// global vars (0-31) and their written flags persist across the
+				// walk. The conditional-loop bookkeeping is per-track too.
+				for (int32_t v = 32; v < 48; ++v)
+				{
+					vars[v] = kVarInit;
+					varWritten[v] = false;
+				}
+
+				cmpFlag = true;
+				offsetVersion.clear();
+				condRetakes.clear();
+				trackExecs = 0;
+				gatedExits.clear();
+				gatedExitUsed.clear();
+				lastCmpGameDriven = false;
 
 				// The engine keeps the 0x8A/0xFD call stack per track (NW4R
 				// callStack[]/callStackDepth). A track that ends inside a Call
@@ -900,6 +900,7 @@ bool Cseq::Convert(uint32_t startOffset)
 	while (i != commands.end())
 	{
 		offsetTime[i->first] = absTime;
+		offsetVersion[i->first] = vmVersion;
 
 		// Position of the command now being emitted, for any dropped-event notice.
 		uint8_t* here = Data + dataOffset + 8 + i->first;
@@ -908,29 +909,161 @@ bool Cseq::Convert(uint32_t startOffset)
 		// The SMF track number stays == track, so only the channel nibble moves.
 		int chan = channelOf[track];
 
-		// The argument machinery the converter does not evaluate yet (the
-		// convert-time VM is the roadmap fix) used to mangle values with no trace:
-		// an [If] prefix on anything but a jump executes unconditionally (33k
-		// conditional Returns corpus-wide can truncate tracks), a Rnd argument
-		// collapses to its range midpoint, and a Var argument emits the variable
-		// INDEX as if it were the value. Surface each execution as a notice; the
-		// behaviour itself is unchanged here. Conditional jumps are excluded --
-		// the 0x89 handler resolves or reports those itself.
-		if ((i->second.Suffix3 == SuffixType::If) && (i->second.Extended || (i->second.Cmd != 0x89)))
+		// Labels are positional annotations on the stream, so they emit even for
+		// a command the [If] gate below skips.
+		if (!i->second.Label.empty())
 		{
-			Common::Warning(here, "[If] prefix not evaluated; command executes unconditionally",
-				"[If]-prefixed commands executed unconditionally (conditions not evaluated)");
+			smfInsertMetaText(smf, absTime, track, SMF_META_TEXT, i->second.Label.c_str());
 		}
 
-		if (i->second.Suffix1 == SuffixType::Rnd)
+		// The per-track execution backstop. Conditional jumps are bounded by
+		// offsetTime/condRetakes and unconditional backward jumps end the track,
+		// but a Call cycle (a subroutine that reaches itself) has no such guard
+		// and recursed forever before this check. Ending the track is the same
+		// recovery every other "this track is done here" case uses.
+		if (++trackExecs > kTrackExecBudget)
 		{
-			Common::Warning(here, "Rnd argument not evaluated; range midpoint stands in",
-				"Rnd-valued arguments not evaluated (range midpoint stands in)");
+			Common::Warning(here, "track exceeded the execution budget (likely a call cycle); ending track",
+				"track execution budget exceeded (track ended)");
+
+			if (!advanceToNextTrack())
+			{
+				break;
+			}
+
+			redirected = false;
+			continue;
 		}
-		else if (i->second.Suffix1 == SuffixType::Var)
+
+		// The [If] gate. cmpFlag starts true per track and is written only by the
+		// six comparison ops, so an [If]-free stream runs exactly as before; a
+		// false flag skips the command outright -- no argument-as-value, no
+		// notice, no latch, no emission, no time advance, no redirect -- the
+		// engine's own doExecCommand = cmpFlag dispatch. DISASM-CONFIRMED against
+		// the actual 3DS binary (MiiPlaza code.bin, Parse @0x2E3B80): EVERY
+		// command is gated, INCLUDING Fin (0xFF gate @0x2E4000) and Return (0xFD
+		// tail @0x2E403C), so [If] Fin / [If] Return with a false flag keep the
+		// track playing -- real conditional-truncation behaviour. This
+		// CONTRADICTS the NW4R/Wii decomp, where MML_FIN returns FINISH outside
+		// the gate; the CTR port moved it inside. The lone exception is 0xFE
+		// alloc-track, which CTR Parse consumes (the u16 mask) regardless of the
+		// flag; caesar's latch is inert either way, so it stays ungated to mirror
+		// that byte-consumption semantics.
+		bool allocTrack = !i->second.Extended && (i->second.Cmd == 0xFE);
+
+		if ((i->second.Suffix3 == SuffixType::If) && !cmpFlag && !allocTrack)
 		{
-			Common::Warning(here, "Var argument not evaluated; variable index stands in for the value",
-				"Var-valued arguments not evaluated (variable index stands in)");
+			// Condition false: skip. A gated command never redirects, so the walk
+			// just steps to the next command. A skipped plain jump is remembered
+			// as a potential loop exit (see gatedExits): if an unconditional
+			// backward jump later closes a loop over this offset, the gated exit
+			// is where hardware would eventually leave a re-roll loop. Gated
+			// calls are deliberately NOT recorded -- no corpus loop exits through
+			// a call, and replaying one would need a return frame the loop never
+			// pushed.
+			if (!i->second.Extended && (i->second.Cmd == 0x89) && !i->second.Args.empty())
+			{
+				gatedExits[i->first] = { static_cast<uint32_t>(i->second.Args[0]), lastCmpGameDriven };
+			}
+
+			++i;
+			continue;
+		}
+
+		// Execution-time argument resolution and the VM's read/write helpers. A
+		// Var-prefixed slot holds a variable INDEX resolved against vars[] at this
+		// instant (the whole point of the VM); a never-written slot surfaces the
+		// init-0 default; an out-of-range index is the engine's GetVariablePtr ==
+		// NULL no-op, mirrored here as a deterministic command drop.
+		bool dropCommand = false;
+
+		auto readVar = [&](int32_t idx) -> int32_t
+		{
+			// A read of a slot the sequence never wrote is where the init-0 policy
+			// does its work (on hardware the game seeds such slots externally), so
+			// surface it. Arithmetic ops that read-modify-write their own target do
+			// NOT come through here; the honest read sites are Var arguments and a
+			// comparison's target, per the VM design.
+			if (!varWritten[idx])
+			{
+				char msg[80];
+				snprintf(msg, sizeof(msg),
+					"variable %d read before any write; converter default %d stands in", idx, kVarInit);
+				Common::Warning(here, msg,
+					"variables read before any write (converter init-0 default)");
+			}
+
+			return vars[idx];
+		};
+
+		auto resolveArg = [&](int32_t slot) -> int32_t
+		{
+			int32_t raw = i->second.Args[slot];
+
+			if (i->second.Suffix1 == SuffixType::Var)
+			{
+				if ((raw < 0) || (raw >= 48))
+				{
+					Common::Warning(here, "variable index out of range; command dropped",
+						"variable index out of range (command dropped)");
+					dropCommand = true;
+
+					return 0;
+				}
+
+				return readVar(raw);
+			}
+
+			if (i->second.Suffix1 == SuffixType::Rnd)
+			{
+				Common::Warning(here, "Rnd argument approximated by its range midpoint",
+					"Rnd-valued arguments approximated (range midpoint)");
+			}
+
+			return raw;
+		};
+
+		auto writeVar = [&](int32_t idx, int32_t value)
+		{
+			int16_t v = static_cast<int16_t>(value);   // s16 storage wraps at 16 bits
+
+			if ((vars[idx] != v) || !varWritten[idx])
+			{
+				vars[idx] = v;
+				varWritten[idx] = true;
+				++vmVersion;
+			}
+		};
+
+		// The command's Suffix1-governed primary argument, resolved once. Notes
+		// carry velocity in Args[0] and the resolvable length in Args[1]; the
+		// other value-carrying commands (0x80 rest, 0x81 program, the 0xB0-0xE4
+		// parameters) use Args[0]. Structural commands (OpenTrack/Jump/Call/
+		// AllocTrack), the no-argument commands, and the extended ops have no
+		// primary slot here -- the extended ops resolve their own operand inside
+		// their handler.
+		int32_t primarySlot = -1;
+
+		if (!i->second.Extended)
+		{
+			uint8_t c = i->second.Cmd;
+
+			if (c < 0x80)                        { primarySlot = 1; }
+			else if ((c == 0x80) || (c == 0x81)) { primarySlot = 0; }
+			else if ((c >= 0xB0) && (c <= 0xE4)) { primarySlot = 0; }
+		}
+
+		int32_t arg = 0;
+
+		if ((primarySlot >= 0) && (primarySlot < static_cast<int32_t>(i->second.Args.size())))
+		{
+			arg = resolveArg(primarySlot);
+		}
+
+		if (dropCommand)
+		{
+			++i;
+			continue;
 		}
 
 		// A _t ramp commands the engine to glide from the parameter's current
@@ -943,15 +1076,24 @@ bool Cseq::Convert(uint32_t startOffset)
 				"ramped (_t) changes flattened to instant jumps");
 		}
 
-		if (!i->second.Label.empty())
-		{
-			smfInsertMetaText(smf, absTime, track, SMF_META_TEXT, i->second.Label.c_str());
-		}
-
 		if (!i->second.Extended)
 		{
 			if (i->second.Cmd < 0x80)
 			{
+				// Resolved note length (Args[1] may be a Var read; arg holds it). A
+				// negative s16 length is meaningless as a duration -- treat it as a
+				// zero-length note (immediate) and surface it. Velocity (Args[0])
+				// stays a plain byte, never resolved.
+				int32_t len = arg;
+
+				if (len < 0)
+				{
+					Common::Warning(here, "negative note length from variable; treated as 0",
+						"negative note length/rest from variable (treated as 0)");
+
+					len = 0;
+				}
+
 				// This entry saturates all 16 tracks, so track 9 could not be
 				// relocated off the GM drum channel; emit the GS rhythm-part-off
 				// SysEx immediately before track 9's first note. Doing it lazily
@@ -990,23 +1132,33 @@ bool Cseq::Convert(uint32_t startOffset)
 				// velocity. Velocity 0 is a legitimate silent note (the writer skips
 				// it and timing below still advances), so surface a drop only when
 				// the velocity is genuinely out of MIDI range, not merely zero.
-				else if (!smfInsertNote(smf, absTime, chan, track, i->second.Cmd, i->second.Args[0], i->second.Args[1])
+				else if (!smfInsertNote(smf, absTime, chan, track, i->second.Cmd, i->second.Args[0], len)
 					&& i->second.Args[0] > 127)
 				{
 					Common::Warning(here, "note velocity out of MIDI range; note dropped",
 						"MIDI notes dropped (velocity out of range)");
 				}
 
-				trackHasNote = true;
-
 				if (noteWait)
 				{
-					absTime += i->second.Args[1];
+					absTime += len;
 				}
 			}
 			else if (i->second.Cmd == 0x80)
 			{
-				absTime += i->second.Args[0];
+				// Rest: advance track time by the resolved wait (Args[0] may be a
+				// Var read). A negative s16 wait is meaningless -- treat it as 0.
+				int32_t wait = arg;
+
+				if (wait < 0)
+				{
+					Common::Warning(here, "negative rest duration from variable; treated as 0",
+						"negative note length/rest from variable (treated as 0)");
+
+					wait = 0;
+				}
+
+				absTime += wait;
 			}
 			else if (i->second.Cmd == 0x81)
 			{
@@ -1025,12 +1177,12 @@ bool Cseq::Convert(uint32_t startOffset)
 				// (unbanked) voice, bank == 0, so this emits CC0=0 CC32=0 exactly as
 				// before -- unbanked program changes stay byte-identical.
 				//
-				// A Rnd/Var prefix can make Args[0] negative; a negative value keeps
-				// its sign through /128 and %128, so the emit* wrappers still surface
-				// anything the writer rejects.
-				emitCtrl(smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_BANKSELM, (i->second.Args[0] / 128) % 128), here);
+				// The convert-time VM can make the resolved value negative (a Var/Rnd
+				// s16); a negative value keeps its sign through /128 and %128, so the
+				// emit* wrappers still surface anything the writer rejects.
+				emitCtrl(smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_BANKSELM, (arg / 128) % 128), here);
 				emitCtrl(smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_BANKSELL, 0), here);
-				emitProgram(smfInsertProgram(smf, absTime, chan, track, i->second.Args[0] % 128), here);
+				emitProgram(smfInsertProgram(smf, absTime, chan, track, arg % 128), here);
 			}
 			else if (i->second.Cmd == 0x88)
 			{
@@ -1056,47 +1208,120 @@ bool Cseq::Convert(uint32_t startOffset)
 
 				if (i->second.Suffix3 == SuffixType::If)
 				{
-					// Conditional (dispatcher) jump. The runtime variable it tests
-					// is not modelled, so by default we take the branch-not-taken
-					// path and fall through -- correct for spin-waits and for any
-					// track that already carries its own notes. But many sequences
-					// (notably Animal Crossing's GardenSound) build a whole track as
-					// a note-less dispatcher: the body is nothing but conditional
-					// jumps and every note lives behind one, so falling through
-					// yields a silent MIDI. When this track has emitted no notes and
-					// its plain continuation stays silent, follow the first branch
-					// that actually reaches a note -- the default (variable == 0)
-					// section the sound engine would pick -- rather than drop the
-					// track. The forward-only test (target not yet played) keeps
-					// backward spin-wait loops on the fall-through path.
-					auto nextIt = next(i, 1);
-					uint32_t fallThrough = (nextIt != commands.end()) ? nextIt->first : 0xFFFFFFFF;
-					bool fallSilent = (fallThrough == 0xFFFFFFFF) || !noteOnFall.count(fallThrough);
+					// Conditional jump. The [If] gate at the top of the loop already
+					// dropped this command when cmpFlag was false, so reaching here
+					// means the condition evaluated TRUE and the jump is taken --
+					// subject only to the loop-revisit rule below. This replaces the
+					// old two-reachability dispatcher heuristic, which guessed a
+					// note-reaching branch because the tested variable was unmodelled;
+					// the VM now resolves the condition exactly, so there is nothing
+					// to guess and no marker to place.
+					auto n = commands.find(target);
 
-					if (!trackHasNote && !offsetTime.count(target) && fallSilent && noteViaBranch.count(target))
+					if (n == commands.end())
 					{
-						i = commands.find(target);
+						Common::Warning(here, "jump target out of range; jump ignored",
+							"jump targets out of range (jump ignored)");
+					}
+					else if (!offsetTime.count(target))
+					{
+						// Not yet executed this track (a forward branch, or a first
+						// entry into shared code): take it, like the unconditional
+						// forward case below.
+						i = n;
 						redirected = true;
 					}
 					else
 					{
-						Common::Warning(here, "conditional jump skipped (conditions not evaluated)",
-							"conditional jumps skipped (conditions not evaluated)");
+						// The target already ran this track: a conditional backward
+						// jump, i.e. a loop only the VM can bound. A counted loop
+						// rewrites its counter each pass, so VM state has moved since
+						// the target last ran (vmVersion != the offsetVersion stamped
+						// there) and it unrolls until its comparison flips cmpFlag and
+						// the gate falls through naturally; a spin-wait polls a
+						// game-driven variable convert-time state can never change, so
+						// its version never moves and the body plays exactly once.
+						// Refuse the retake when state is unchanged or a budget is hit,
+						// and fall through. No loop markers on a conditional loop --
+						// those stay exclusive to the unconditional whole-song path.
+						bool stateChanged = (vmVersion != offsetVersion[target]);
+						bool budgetOk = (condRetakes[i->first] < kCondRetakeBudget) && (trackExecs < kTrackExecBudget);
+
+						if (stateChanged && budgetOk)
+						{
+							++condRetakes[i->first];
+							i = n;
+							redirected = true;
+						}
+						else if (!stateChanged)
+						{
+							Common::Warning(here, "conditional backward jump with unchanged state; loop not repeated (spin-wait broken out)",
+								"conditional loops broken (unchanged state / spin-wait)");
+						}
+						else
+						{
+							Common::Warning(here, "conditional loop exceeded the revisit budget; loop broken",
+								"conditional loops broken (revisit budget exhausted)");
+						}
 					}
 				}
 				else if (offsetTime.count(target))
 				{
 					// The target has already played in this track, so following the
-					// jump would replay it forever: this is the format's whole-song
-					// loop. A MIDI file cannot loop on its own, so mark the loop span
-					// (target..here) with "loopStart"/"loopEnd" and end the track
-					// instead of following the jump.
-					smfInsertMetaText(smf, offsetTime[target], track, SMF_META_MARKER, "loopStart");
-					smfInsertMetaText(smf, absTime, track, SMF_META_MARKER, "loopEnd");
+					// jump would replay it forever. Before calling it the whole-song
+					// loop, check whether the span it closes contains an [If]-jump
+					// the gate turned off whose comparison read only SEQUENCE-written
+					// state: that is a self-contained RNG re-roll loop (randvar, cmp,
+					// [If]-exit to the play block, jump back), and on hardware it
+					// ALWAYS eventually leaves through that exit -- the sequence
+					// re-rolls its own variable until the comparison clears. The
+					// PRNG-free midpoint can never clear it, so take the exit once
+					// instead of ending the track silent (Pokemon niji_sound: 50
+					// ambient-SFX files, 403 notes, all guaranteed audible on
+					// console). Taken at most once per exit: on a later pass the
+					// loop really is "repeat from the file's viewpoint" and falls
+					// through to the marker path below. A gated exit whose
+					// comparison read a game-seeded (never-written) variable is NOT
+					// an escape -- that loop is a game-driven spin-wait (Animal
+					// Crossing's dispatcher SEs), and its honest at-rest rendering
+					// is silence until the game acts.
+					uint32_t rescueTarget = 0;
+					bool rescued = false;
 
-					if (!advanceToNextTrack())
+					for (auto g = gatedExits.lower_bound(target);
+						(g != gatedExits.end()) && (g->first <= i->first); ++g)
 					{
-						break;
+						if (!g->second.second && !gatedExitUsed.count(g->first)
+							&& commands.count(g->second.first))
+						{
+							gatedExitUsed.insert(g->first);
+							rescueTarget = g->second.first;
+							rescued = true;
+							break;
+						}
+					}
+
+					if (rescued)
+					{
+						Common::Warning(here, "re-roll loop exit taken once (sequence-rolled condition always clears on hardware)",
+							"re-roll loop exits taken once (PRNG-free stand-in never clears them)");
+
+						i = commands.find(rescueTarget);
+						redirected = true;
+					}
+					else
+					{
+						// The format's whole-song loop. A MIDI file cannot loop on
+						// its own, so mark the loop span (target..here) with
+						// "loopStart"/"loopEnd" and end the track instead of
+						// following the jump.
+						smfInsertMetaText(smf, offsetTime[target], track, SMF_META_MARKER, "loopStart");
+						smfInsertMetaText(smf, absTime, track, SMF_META_MARKER, "loopEnd");
+
+						if (!advanceToNextTrack())
+						{
+							break;
+						}
 					}
 				}
 				else
@@ -1152,7 +1377,7 @@ bool Cseq::Convert(uint32_t startOffset)
 			}
 			else if (i->second.Cmd == 0xB0)
 			{
-				smfSetTimebase(smf, i->second.Args[0]);
+				smfSetTimebase(smf, arg);
 			}
 			else if (i->second.Cmd == 0xB1)
 			{
@@ -1224,44 +1449,41 @@ bool Cseq::Convert(uint32_t startOffset)
 			}
 			else if (i->second.Cmd == 0xC0)
 			{
-				int32_t pan = clampPlainCtrl(i->second, here);
-
 				// Fold in whatever init pan (0xDC) the track is carrying. With none --
 				// every sequence that does not use 0xDC -- this is the pan value itself,
-				// so those files are untouched. An unevaluated Rnd/Var stand-in is not a
-				// pan, so it keeps being written raw as before rather than being summed
-				// into a plausible-looking position.
-				if (i->second.Suffix1 == SuffixType::None)
-				{
-					trackPan = pan;
-					pan = combinePan(trackPan, trackInitPan);
-				}
+				// so those files are untouched. The value is now always resolved (a plain
+				// byte, a Var read or the Rnd midpoint), so the latch-and-combine runs
+				// unconditionally rather than writing an unevaluated stand-in raw.
+				int32_t pan = clampCtrl(arg, here);
+
+				trackPan = pan;
+				pan = combinePan(trackPan, trackInitPan);
 
 				emitCtrl(smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_PANPOT, pan), here);
 			}
 			else if (i->second.Cmd == 0xC1)
 			{
-				emitCtrl(smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_VOLUME, clampPlainCtrl(i->second, here)), here);
+				emitCtrl(smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_VOLUME, clampCtrl(arg, here)), here);
 			}
 			else if (i->second.Cmd == 0xC2)
 			{
-				emitCtrl(smfInsertMasterVolume(smf, absTime, 0, track, clampPlainCtrl(i->second, here)), here);
+				emitCtrl(smfInsertMasterVolume(smf, absTime, 0, track, clampCtrl(arg, here)), here);
 			}
 			else if (i->second.Cmd == 0xC3)
 			{
 				smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_RPNM, 0);
 				smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_RPNL, 2);
-				emitCtrl(smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_DATAENTRYM, i->second.Args[0] + 64), here);
+				emitCtrl(smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_DATAENTRYM, arg + 64), here);
 			}
 			else if (i->second.Cmd == 0xC4)
 			{
-				emitCtrl(smfInsertPitchBend(smf, absTime, chan, track, i->second.Args[0] * 64), here);
+				emitCtrl(smfInsertPitchBend(smf, absTime, chan, track, arg * 64), here);
 			}
 			else if (i->second.Cmd == 0xC5)
 			{
 				smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_RPNM, 0);
 				smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_RPNL, 0);
-				emitCtrl(smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_DATAENTRYM, clampPlainCtrl(i->second, here)), here);
+				emitCtrl(smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_DATAENTRYM, clampCtrl(arg, here)), here);
 			}
 			else if (i->second.Cmd == 0xC6)
 			{
@@ -1272,49 +1494,40 @@ bool Cseq::Convert(uint32_t startOffset)
 			}
 			else if (i->second.Cmd == 0xC7)
 			{
-				noteWait = i->second.Args[0];
+				// Note-wait latches the resolved flag (the VM retires the old known
+				// bug where a Var/Rnd stand-in latched a bogus persistent flag).
+				noteWait = (arg != 0);
 			}
 			else if (i->second.Cmd == 0xC8)
 			{
 				// Tie on/off. Both edges release the sounding voice on hardware
 				// (MML_SET_TIE releases and frees the track's channels before
-				// setting the flag), so either edge closes an open segment
-				// here. An unevaluated Rnd/Var argument is not a flag; latching
-				// a stand-in would silently re-plumb every following note, so
-				// it drops with a notice instead.
-				if (i->second.Suffix1 == SuffixType::None)
-				{
-					finalizeTie(absTime);
+				// setting the flag), so either edge closes an open segment here.
+				// The flag is now the resolved value (plain, Var read or Rnd
+				// midpoint), so it always latches -- no stand-in to drop.
+				finalizeTie(absTime);
 
-					tieOn = (i->second.Args[0] != 0);
+				tieOn = (arg != 0);
 
-					if (tieOn)
-					{
-						Common::Warning(here, "tie region approximated as back-to-back segments (single-envelope legato not expressible in MIDI)",
-							"tie regions approximated (segments re-attack at pitch changes)");
-					}
-				}
-				else
+				if (tieOn)
 				{
-					Common::Warning(here, "tie flag is an unevaluated Rnd/Var; dropped",
-						"tie mode dropped (unevaluated Rnd/Var)");
+					Common::Warning(here, "tie region approximated as back-to-back segments (single-envelope legato not expressible in MIDI)",
+						"tie regions approximated (segments re-attack at pitch changes)");
 				}
 			}
 			else if (i->second.Cmd == 0xC9)
 			{
-				emitCtrl(smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_PORTAMENTOCTRL, clampPlainCtrl(i->second, here)), here);
+				emitCtrl(smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_PORTAMENTOCTRL, clampCtrl(arg, here)), here);
 			}
 			else if (i->second.Cmd == 0xCA)
 			{
 				// Clamp once so the latched shadow and the emitted CC1 carry the same
 				// value: the 0xCC restore path replays modShadow[0], so an unclamped
-				// >127 there would drop on the replay even after clamping now.
-				int32_t depth = clampPlainCtrl(i->second, here);
+				// >127 there would drop on the replay even after clamping now. The
+				// depth is always resolved now, so the shadow always latches.
+				int32_t depth = clampCtrl(arg, here);
 
-				if (i->second.Suffix1 == SuffixType::None)
-				{
-					modShadow[0] = depth;
-				}
+				modShadow[0] = depth;
 
 				if (trackModType == 0)
 				{
@@ -1331,12 +1544,9 @@ bool Cseq::Convert(uint32_t startOffset)
 			}
 			else if (i->second.Cmd == 0xCB)
 			{
-				int32_t rate = (i->second.Args[0] / 2) + 64;
+				int32_t rate = (arg / 2) + 64;
 
-				if (i->second.Suffix1 == SuffixType::None)
-				{
-					modShadow[1] = rate;
-				}
+				modShadow[1] = rate;
 
 				if (trackModType == 0)
 				{
@@ -1361,67 +1571,57 @@ bool Cseq::Convert(uint32_t startOffset)
 				// MIDI terms leaving pitch must silence a live CC1 (the SF2 default
 				// mod-wheel modulator keeps wobbling pitch otherwise) and returning
 				// to pitch must restore whatever the persistent parameters now hold.
-				// An unevaluated Rnd/Var stand-in is not a target, so it never
-				// latches (and tremolo/auto-pan itself has no MIDI equivalent).
-				if (i->second.Suffix1 == SuffixType::None)
+				// The target is now always resolved (plain, Var read or Rnd
+				// midpoint), so it always tracks; tremolo/auto-pan itself still has
+				// no MIDI equivalent.
+				int32_t newType = arg;
+
+				if (newType != trackModType)
 				{
-					int32_t newType = i->second.Args[0];
+					trackModType = newType;
 
-					if (newType != trackModType)
+					if (newType != 0)
 					{
-						trackModType = newType;
-
-						if (newType != 0)
+						if (modWire[0] > 0)
 						{
-							if (modWire[0] > 0)
-							{
-								smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_MODULATION, 0);
-								modWire[0] = 0;
+							smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_MODULATION, 0);
+							modWire[0] = 0;
 
-								if (newType <= 2)
-								{
-									Common::Warning(here, "track LFO retargeted to volume/pan; tremolo/auto-pan not rendered",
-										"tremolo/auto-pan LFO dropped (no MIDI equivalent)");
-								}
-								else
-								{
-									Common::Warning(here, "track LFO target out of range; the engine applies no LFO",
-										"mod type out of range (engine applies no LFO)");
-								}
+							if (newType <= 2)
+							{
+								Common::Warning(here, "track LFO retargeted to volume/pan; tremolo/auto-pan not rendered",
+									"tremolo/auto-pan LFO dropped (no MIDI equivalent)");
+							}
+							else
+							{
+								Common::Warning(here, "track LFO target out of range; the engine applies no LFO",
+									"mod type out of range (engine applies no LFO)");
 							}
 						}
-						else
-						{
-							const int32_t modCtrl[4] =
-								{ SMF_CONTROL_MODULATION, SMF_CONTROL_VIBRATORATE, SMF_CONTROL_VIBRATODEPTH, SMF_CONTROL_VIBRATODELAY };
+					}
+					else
+					{
+						const int32_t modCtrl[4] =
+							{ SMF_CONTROL_MODULATION, SMF_CONTROL_VIBRATORATE, SMF_CONTROL_VIBRATODEPTH, SMF_CONTROL_VIBRATODELAY };
 
-							for (int32_t slot = 0; slot < 4; ++slot)
+						for (int32_t slot = 0; slot < 4; ++slot)
+						{
+							if ((modShadow[slot] >= 0) && (modShadow[slot] != modWire[slot]))
 							{
-								if ((modShadow[slot] >= 0) && (modShadow[slot] != modWire[slot]))
+								if (emitCtrl(smfInsertControl(smf, absTime, chan, track, modCtrl[slot], modShadow[slot]), here))
 								{
-									if (emitCtrl(smfInsertControl(smf, absTime, chan, track, modCtrl[slot], modShadow[slot]), here))
-									{
-										modWire[slot] = modShadow[slot];
-									}
+									modWire[slot] = modShadow[slot];
 								}
 							}
 						}
 					}
 				}
-				else
-				{
-					Common::Warning(here, "mod type is an unevaluated Rnd/Var; LFO target not tracked",
-						"mod type dropped (unevaluated Rnd/Var)");
-				}
 			}
 			else if (i->second.Cmd == 0xCD)
 			{
-				int32_t range = (i->second.Args[0] / 2) + 64;
+				int32_t range = (arg / 2) + 64;
 
-				if (i->second.Suffix1 == SuffixType::None)
-				{
-					modShadow[2] = range;
-				}
+				modShadow[2] = range;
 
 				if (trackModType == 0)
 				{
@@ -1438,19 +1638,19 @@ bool Cseq::Convert(uint32_t startOffset)
 			}
 			else if (i->second.Cmd == 0xCE)
 			{
-				smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_PORTAMENTO, i->second.Args[0] ? 127 : 0);
+				smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_PORTAMENTO, arg ? 127 : 0);
 			}
 			else if (i->second.Cmd == 0xCF)
 			{
-				emitCtrl(smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_PORTAMENTOTIME, clampPlainCtrl(i->second, here)), here);
+				emitCtrl(smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_PORTAMENTOTIME, clampCtrl(arg, here)), here);
 			}
 			else if (i->second.Cmd == 0xD0)
 			{
-				emitCtrl(smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_ATTACKTIME, (i->second.Args[0] / 2) + 64), here);
+				emitCtrl(smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_ATTACKTIME, (arg / 2) + 64), here);
 			}
 			else if (i->second.Cmd == 0xD1)
 			{
-				emitCtrl(smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_DECAYTIME, (i->second.Args[0] / 2) + 64), here);
+				emitCtrl(smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_DECAYTIME, (arg / 2) + 64), here);
 			}
 			else if (i->second.Cmd == 0xD2)
 			{
@@ -1461,42 +1661,43 @@ bool Cseq::Convert(uint32_t startOffset)
 			}
 			else if (i->second.Cmd == 0xD3)
 			{
-				emitCtrl(smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_RELEASETIME, (i->second.Args[0] / 2) + 64), here);
+				emitCtrl(smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_RELEASETIME, (arg / 2) + 64), here);
 			}
 			else if (i->second.Cmd == 0xD4)
 			{
-				// 0xD4 = loop start; Args[0] is the U8 repeat count. Emit it as the
-				// EMIDI CC116 (loop-start) value so a loop-aware player repeats the
-				// section that many times instead of forever. The CTR and EMIDI
+				// 0xD4 = loop start; the resolved value is the repeat count. Emit it
+				// as the EMIDI CC116 (loop-start) value so a loop-aware player repeats
+				// the section that many times instead of forever. The CTR and EMIDI
 				// counts line up exactly -- both are total-plays with 0 meaning
 				// "loop forever" (verified against GotaSequenceLib's CtrCafe
 				// playback and the Apogee EMIDI v1.1 spec) -- so a literal count
 				// passes straight through, 0 included. A count above the 7-bit CC
 				// range clamps to 127 (still finite/"many") rather than being
-				// dropped by the writer, which would lose the loop marker outright.
-				// A Rnd/Var-prefixed count is not evaluated yet, so keep the old
-				// 0 (= forever) stand-in instead of baking a range midpoint /
-				// variable index in as a bogus finite count.
-				int32_t count = 0;
+				// dropped by the writer, which would lose the loop marker outright;
+				// a resolved NEGATIVE count (only reachable via a Var/Rnd s16)
+				// clamps to 0, i.e. loop forever.
+				int32_t count = arg;
 
-				if (i->second.Suffix1 == SuffixType::None)
+				if (count > 127)
 				{
-					count = i->second.Args[0];
+					Common::Warning(here, "loop repeat count above MIDI range; clamped to 127",
+						"MIDI loop repeat counts clamped to 127 (above range)");
 
-					if (count > 127)
-					{
-						Common::Warning(here, "loop repeat count above MIDI range; clamped to 127",
-							"MIDI loop repeat counts clamped to 127 (above range)");
+					count = 127;
+				}
+				else if (count < 0)
+				{
+					Common::Warning(here, "loop repeat count below MIDI range; clamped to 0 (loop forever)",
+						"MIDI loop repeat counts clamped to 0 (below range)");
 
-						count = 127;
-					}
+					count = 0;
 				}
 
 				smfInsertControl(smf, absTime, chan, track, 116, count);
 			}
 			else if (i->second.Cmd == 0xD5)
 			{
-				emitCtrl(smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_EXPRESSION, clampPlainCtrl(i->second, here)), here);
+				emitCtrl(smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_EXPRESSION, clampCtrl(arg, here)), here);
 			}
 			else if (i->second.Cmd == 0xD6)
 			{
@@ -1532,26 +1733,19 @@ bool Cseq::Convert(uint32_t startOffset)
 				// per unit (an exponential 31.25 Hz - 32 kHz sweep) against GM2's 150,
 				// so a cut reads about 20% shallow. Direction, neutral point and the
 				// closed/open ends are all right, which is what a relative control can
-				// carry. A Rnd/Var stand-in is not a cutoff, so it keeps dropping.
-				if (i->second.Suffix1 == SuffixType::None)
-				{
-					int32_t cutoff = clamp(i->second.Args[0], 0, 64);
+				// carry. The resolved value drives the same clamp (a negative Var/Rnd
+				// value lands at the fully-closed 0).
+				int32_t cutoff = clamp(arg, 0, 64);
 
-					// Only an actual cut carries the ~20% curve error; landing on the
-					// neutral 64 is a no-op that needs no notice.
-					if (cutoff != 64)
-					{
-						Common::Warning(here, "lpf cutoff approximated (CC74 cuts ~20% shallower than hardware)",
-							"lpf cutoff approximated (CC74 curve reads ~20% shallow)");
-					}
-
-					emitCtrl(smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_BRIGHTNESS, cutoff), here);
-				}
-				else
+				// Only an actual cut carries the ~20% curve error; landing on the
+				// neutral 64 is a no-op that needs no notice.
+				if (cutoff != 64)
 				{
-					Common::Warning(here, "lpf cutoff is Rnd/Var-valued; dropped",
-						"MIDI brightness changes dropped (unevaluated Rnd/Var lpf cutoff)");
+					Common::Warning(here, "lpf cutoff approximated (CC74 cuts ~20% shallower than hardware)",
+						"lpf cutoff approximated (CC74 curve reads ~20% shallow)");
 				}
+
+				emitCtrl(smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_BRIGHTNESS, cutoff), here);
 			}
 			else if (i->second.Cmd == 0xD9)
 			{
@@ -1559,12 +1753,12 @@ bool Cseq::Convert(uint32_t startOffset)
 				// value in these sequences (observed 0-120 across MeetSound);
 				// clamp defensively so an unexpected value can't push the control
 				// out of MIDI range and get silently dropped by the writer.
-				smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_REVERB, clamp(i->second.Args[0], 0, 127));
+				smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_REVERB, clamp(arg, 0, 127));
 			}
 			else if (i->second.Cmd == 0xDA)
 			{
 				// FX send B -> chorus depth (CC93), same 0-127 convention.
-				smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_CHORUS, clamp(i->second.Args[0], 0, 127));
+				smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_CHORUS, clamp(arg, 0, 127));
 			}
 			else if (i->second.Cmd == 0xDB)
 			{
@@ -1584,19 +1778,11 @@ bool Cseq::Convert(uint32_t startOffset)
 				// sounding notes included; MIDI has no per-note pan, so that difference
 				// is not expressible and the tick is the honest place to put it.
 				//
-				// A Rnd/Var stand-in would poison the combined pan for every later note
-				// on the track, not just its own event, so it keeps dropping.
-				if (i->second.Suffix1 == SuffixType::None)
-				{
-					trackInitPan = clampPlainCtrl(i->second, here);
+				// The init pan is now always the resolved value (plain, Var read or
+				// Rnd midpoint), so it always latches and re-emits the combined pan.
+				trackInitPan = clampCtrl(arg, here);
 
-					emitCtrl(smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_PANPOT, combinePan(trackPan, trackInitPan)), here);
-				}
-				else
-				{
-					Common::Warning(here, "init pan is Rnd/Var-valued; dropped",
-						"MIDI pan changes dropped (unevaluated Rnd/Var init pan)");
-				}
+				emitCtrl(smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_PANPOT, combinePan(trackPan, trackInitPan)), here);
 			}
 			else if (i->second.Cmd == 0xDD)
 			{
@@ -1624,54 +1810,38 @@ bool Cseq::Convert(uint32_t startOffset)
 				// value in range by construction, hence no emitCtrl guard.
 				// (Gota's table types this Bool, but his player never runs the command;
 				// the threshold is what the matching NW4R decomps and the corpus show.)
-				smfInsertControl(smf, absTime, chan, track, 64, (i->second.Args[0] >= 64) ? 127 : 0);
+				smfInsertControl(smf, absTime, chan, track, 64, (arg >= 64) ? 127 : 0);
 			}
 			else if (i->second.Cmd == 0xE0)
 			{
-				if (i->second.Suffix1 == SuffixType::None)
+				// Mod delay: time from note-on before the track LFO engages,
+				// in 5 ms units (NW4R reads it as lfoParam.delay = arg * 5 ms;
+				// NW4C is its port). CC78 "vibrato delay" is relative to the
+				// patch default (64 = no change), and these SF2s program no
+				// LFO delay, so 64 is the 0 ms baseline: scale the delay into
+				// the upper half, saturating at 1000 ms (corpus p99 = 500 ms,
+				// max = 1150 ms). The old (x/2)+64 treated the time as a
+				// signed +/-64 parameter and pushed delays >= 640 ms out of
+				// MIDI range entirely. The value is now always resolved, so it
+				// always runs the 5 ms-units path (a negative Var/Rnd value floors
+				// at the 0 ms baseline via max).
+				int32_t ms = max(arg, 0) * 5;
+				int32_t delay = 64 + min(ms * 63 / 1000, 63);
+
+				// CC78's upper half tops out at 1000 ms, but the corpus reaches
+				// 1150 ms; delays past 1 s all flatten to 127, so surface the loss.
+				if (ms > 1000)
 				{
-					// Mod delay: time from note-on before the track LFO engages,
-					// in 5 ms units (NW4R reads it as lfoParam.delay = arg * 5 ms;
-					// NW4C is its port). CC78 "vibrato delay" is relative to the
-					// patch default (64 = no change), and these SF2s program no
-					// LFO delay, so 64 is the 0 ms baseline: scale the delay into
-					// the upper half, saturating at 1000 ms (corpus p99 = 500 ms,
-					// max = 1150 ms). The old (x/2)+64 treated the time as a
-					// signed +/-64 parameter and pushed delays >= 640 ms out of
-					// MIDI range entirely.
-					int32_t ms = max(i->second.Args[0], 0) * 5;
-					int32_t delay = 64 + min(ms * 63 / 1000, 63);
-
-					// CC78's upper half tops out at 1000 ms, but the corpus reaches
-					// 1150 ms; delays past 1 s all flatten to 127, so surface the loss.
-					if (ms > 1000)
-					{
-						Common::Warning(here, "mod delay above 1000 ms saturates CC78 (flattened to 127)",
-							"mod delay saturated (CC78 caps at 1000 ms)");
-					}
-
-					modShadow[3] = delay;
-
-					if (trackModType == 0)
-					{
-						smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_VIBRATODELAY, delay);
-						modWire[3] = delay;
-					}
-					else
-					{
-						Common::Warning(here, "mod delay while the track LFO targets volume/pan; CC78 suppressed",
-							"pitch-vibrato CCs suppressed (track LFO targets volume/pan)");
-					}
+					Common::Warning(here, "mod delay above 1000 ms saturates CC78 (flattened to 127)",
+						"mod delay saturated (CC78 caps at 1000 ms)");
 				}
-				else if (trackModType == 0)
+
+				modShadow[3] = delay;
+
+				if (trackModType == 0)
 				{
-					// Unevaluated Rnd/Var stand-in: keep the raw-value path so
-					// out-of-range garbage still drops with the notice instead of
-					// being scaled into a plausible-looking delay.
-					if (emitCtrl(smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_VIBRATODELAY, (i->second.Args[0] / 2) + 64), here))
-					{
-						modWire[3] = (i->second.Args[0] / 2) + 64;
-					}
+					smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_VIBRATODELAY, delay);
+					modWire[3] = delay;
 				}
 				else
 				{
@@ -1681,12 +1851,12 @@ bool Cseq::Convert(uint32_t startOffset)
 			}
 			else if (i->second.Cmd == 0xE1)
 			{
-				// The tempo argument decodes as signed 16-bit, so garbage (or an
-				// unevaluated Rnd/Var stand-in) can be <= 0. bpm == 0 makes
-				// libsmfcx's 60000000 / bpm infinite and the int cast of that is
-				// UB; guard caller-side to keep the vendored copy pristine. The
-				// drop still surfaces through emitCtrl's notice.
-				emitCtrl((i->second.Args[0] > 0) && smfInsertTempoBPM(smf, absTime, track, i->second.Args[0]), here);
+				// The resolved tempo can still be <= 0 (a signed-16-bit literal, or a
+				// negative Var/Rnd value). bpm == 0 makes libsmfcx's 60000000 / bpm
+				// infinite and the int cast of that is UB; guard caller-side to keep
+				// the vendored copy pristine. The drop still surfaces through
+				// emitCtrl's notice.
+				emitCtrl((arg > 0) && smfInsertTempoBPM(smf, absTime, track, arg), here);
 			}
 			else if (i->second.Cmd == 0xE3)
 			{
@@ -1773,54 +1943,196 @@ bool Cseq::Convert(uint32_t startOffset)
 		}
 		else
 		{
-			// Extended (0xF0-prefixed) command space: nothing here is implemented
-			// yet. The variable/comparison ops await the convert-time VM (see the
-			// roadmap); the mod2-4 multi-LFO family has zero corpus occurrences.
-			// One name table instead of 42 branches, in CtrCafe byte order -- the
-			// old chain's mod4 labels (0xAC-0xB1) were scrambled against the map,
-			// which never showed because the chain was dead code (see the parse
-			// fix that records the extended opcode in Cmd).
-			static const map<uint8_t, const char*> extendedNames =
-			{
-				{ 0x80, "setvar" },     { 0x81, "addvar" },      { 0x82, "subvar" },
-				{ 0x83, "mulvar" },     { 0x84, "divvar" },      { 0x85, "shiftvar" },
-				{ 0x86, "randvar" },    { 0x87, "andvar" },      { 0x88, "orvar" },
-				{ 0x89, "xorvar" },     { 0x8A, "notvar" },      { 0x8B, "modvar" },
-				{ 0x90, "cmp_eq" },     { 0x91, "cmp_ge" },      { 0x92, "cmp_gt" },
-				{ 0x93, "cmp_le" },     { 0x94, "cmp_lt" },      { 0x95, "cmp_ne" },
-				{ 0xA0, "mod2_curve" }, { 0xA1, "mod2_phase" },  { 0xA2, "mod2_depth" },
-				{ 0xA3, "mod2_speed" }, { 0xA4, "mod2_type" },   { 0xA5, "mod2_range" },
-				{ 0xA6, "mod3_curve" }, { 0xA7, "mod3_phase" },  { 0xA8, "mod3_depth" },
-				{ 0xA9, "mod3_speed" }, { 0xAA, "mod3_type" },   { 0xAB, "mod3_range" },
-				{ 0xAC, "mod4_curve" }, { 0xAD, "mod4_phase" },  { 0xAE, "mod4_depth" },
-				{ 0xAF, "mod4_speed" }, { 0xB0, "mod4_type" },   { 0xB1, "mod4_range" },
-				{ 0xE0, "userproc" },
-				{ 0xE1, "mod2_delay" }, { 0xE2, "mod2_period" },
-				{ 0xE3, "mod3_delay" }, { 0xE4, "mod3_period" },
-				{ 0xE5, "mod4_delay" }, { 0xE6, "mod4_period" },
-			};
-
+			// Extended (0xF0-prefixed) command space. The variable and comparison
+			// ops (0x80-0x95) now EXECUTE in the convert-time VM; the mod2-4
+			// multi-LFO family (0xA0-0xB1, 0xE1-0xE6; zero corpus occurrences) and
+			// userproc (0xE0) still drop with a notice, served by the name table
+			// below (in CtrCafe byte order) alongside the unknown catch-all.
 			uint8_t ext = i->second.Cmd;
-			auto name = extendedNames.find(ext);
-			char msg[64];
 
-			if (name == extendedNames.end())
+			if ((ext >= 0x80) && (ext <= 0x8B))
 			{
-				// Parse vets extended bytes, so this is the same safety net as the
-				// plain chain's final else: parsed but never wired up.
-				snprintf(msg, sizeof(msg), "unhandled extended command 0x%02X; dropped", ext);
-				Common::Warning(here, msg, "unhandled sequence commands dropped");
+				// The 12 arithmetic ops (RESEARCH-CONFIRMED NW4R
+				// MmlParser::CommandProc). Args[0] is the target variable index (a
+				// plain u8, never a Var read); Args[1] is the operand, itself
+				// resolvable via a Var/Rnd prefix. Storage is s16 and wraps at 16
+				// bits (writeVar). div/mod guard ÷0 (variable left unchanged, as the
+				// engine does), notvar complements the OPERAND (not the variable),
+				// and randvar stands in the operand midpoint (the VM is PRNG-free).
+				int32_t idx = i->second.Args[0];
+
+				if ((idx < 0) || (idx >= 48))
+				{
+					Common::Warning(here, "variable index out of range; command dropped",
+						"variable index out of range (command dropped)");
+				}
+				else
+				{
+					int32_t op = resolveArg(1);
+
+					if (!dropCommand)
+					{
+						switch (ext)
+						{
+							case 0x80: writeVar(idx, op); break;               // setvar
+							case 0x81: writeVar(idx, vars[idx] + op); break;   // addvar
+							case 0x82: writeVar(idx, vars[idx] - op); break;   // subvar
+							case 0x83: writeVar(idx, vars[idx] * op); break;   // mulvar
+							case 0x84:                                         // divvar
+								if (op != 0)
+								{
+									writeVar(idx, vars[idx] / op);
+								}
+								else
+								{
+									Common::Warning(here, "divvar by zero; variable left unchanged",
+										"variable divide/modulo by zero (skipped)");
+								}
+								break;
+							case 0x85:                                         // shiftvar
+							{
+								// op >= 0 left-shifts, op < 0 arithmetic-right-shifts
+								// (RESEARCH-CONFIRMED sign convention). The count is
+								// clamped to the 16-bit width so the C++ shift stays
+								// defined; that matches the ARM register-shift (count
+								// truncated to its low byte) for every count below
+								// 256, i.e. everything short of authoring nonsense --
+								// past that the reference C is itself UB, so there is
+								// no exact value to chase.
+								int32_t v = vars[idx];
+
+								if (op >= 0)
+								{
+									v = (op >= 16) ? 0 : static_cast<int32_t>(static_cast<uint32_t>(v) << op);
+								}
+								else
+								{
+									int32_t rs = -op;
+									v = v >> ((rs >= 16) ? 15 : rs);
+								}
+
+								writeVar(idx, v);
+								break;
+							}
+							case 0x86:                                         // randvar
+								Common::Warning(here, "randvar approximated by the operand midpoint (VM is PRNG-free)",
+									"randvar approximated (operand midpoint)");
+								writeVar(idx, op / 2);
+								break;
+							case 0x87: writeVar(idx, vars[idx] & op); break;   // andvar
+							case 0x88: writeVar(idx, vars[idx] | op); break;   // orvar
+							case 0x89: writeVar(idx, vars[idx] ^ op); break;   // xorvar
+							case 0x8A:                                         // notvar
+								writeVar(idx, ~static_cast<uint16_t>(op));
+								break;
+							case 0x8B:                                         // modvar
+								if (op != 0)
+								{
+									writeVar(idx, vars[idx] % op);
+								}
+								else
+								{
+									Common::Warning(here, "modvar by zero; variable left unchanged",
+										"variable divide/modulo by zero (skipped)");
+								}
+								break;
+						}
+					}
+				}
+			}
+			else if ((ext >= 0x90) && (ext <= 0x95))
+			{
+				// The 6 comparisons write the per-track cmpFlag the [If] gate reads
+				// (RESEARCH-CONFIRMED order eq/ge/gt/le/lt/ne; signed s16 compare).
+				// cmpFlag persists until the next comparison -- one compare gates
+				// many [If]s -- and only a real flip bumps vmVersion.
+				int32_t idx = i->second.Args[0];
+
+				if ((idx < 0) || (idx >= 48))
+				{
+					Common::Warning(here, "variable index out of range; command dropped",
+						"variable index out of range (command dropped)");
+				}
+				else
+				{
+					// Whether this comparison depends on game-seeded state: any
+					// never-written participant (the target var, or a Var-prefixed
+					// operand) means the result hinges on a variable only the game
+					// writes at runtime. An [If]-jump this comparison gates off
+					// inherits the tag (see gatedExits) so the loop-escape rule can
+					// tell a sequence-internal RNG wait from a game-driven one.
+					bool opVarUnwritten = (i->second.Suffix1 == SuffixType::Var)
+						&& (i->second.Args[1] >= 0) && (i->second.Args[1] < 48)
+						&& !varWritten[i->second.Args[1]];
+
+					int32_t op = resolveArg(1);
+
+					if (!dropCommand)
+					{
+						lastCmpGameDriven = !varWritten[idx] || opVarUnwritten;
+
+						int32_t lhs = readVar(idx);
+						bool result = cmpFlag;
+
+						switch (ext)
+						{
+							case 0x90: result = (lhs == op); break;
+							case 0x91: result = (lhs >= op); break;
+							case 0x92: result = (lhs >  op); break;
+							case 0x93: result = (lhs <= op); break;
+							case 0x94: result = (lhs <  op); break;
+							case 0x95: result = (lhs != op); break;
+						}
+
+						if (result != cmpFlag)
+						{
+							cmpFlag = result;
+							++vmVersion;
+						}
+					}
+				}
 			}
 			else
 			{
-				const char* category =
-					(ext <= 0x8B) ? "variable ops dropped (variables not evaluated)" :
-					(ext <= 0x95) ? "comparison ops dropped (variables not evaluated)" :
-					(ext == 0xE0) ? "userproc dropped (no MIDI equivalent)" :
-					"multi-LFO (mod2-4) commands dropped (not implemented)";
+				// Still-dropped families: mod2-4 multi-LFO (0xA0-0xB1, 0xE1-0xE6;
+				// zero corpus occurrences), userproc (0xE0), and the unknown
+				// catch-all. One name table in CtrCafe byte order -- the old chain's
+				// mod4 labels (0xAC-0xB1) were scrambled against the map, which never
+				// showed because the chain was dead code (see the parse fix that
+				// records the extended opcode in Cmd).
+				static const map<uint8_t, const char*> extendedNames =
+				{
+					{ 0xA0, "mod2_curve" }, { 0xA1, "mod2_phase" },  { 0xA2, "mod2_depth" },
+					{ 0xA3, "mod2_speed" }, { 0xA4, "mod2_type" },   { 0xA5, "mod2_range" },
+					{ 0xA6, "mod3_curve" }, { 0xA7, "mod3_phase" },  { 0xA8, "mod3_depth" },
+					{ 0xA9, "mod3_speed" }, { 0xAA, "mod3_type" },   { 0xAB, "mod3_range" },
+					{ 0xAC, "mod4_curve" }, { 0xAD, "mod4_phase" },  { 0xAE, "mod4_depth" },
+					{ 0xAF, "mod4_speed" }, { 0xB0, "mod4_type" },   { 0xB1, "mod4_range" },
+					{ 0xE0, "userproc" },
+					{ 0xE1, "mod2_delay" }, { 0xE2, "mod2_period" },
+					{ 0xE3, "mod3_delay" }, { 0xE4, "mod3_period" },
+					{ 0xE5, "mod4_delay" }, { 0xE6, "mod4_period" },
+				};
 
-				snprintf(msg, sizeof(msg), "%s not implemented; dropped", name->second);
-				Common::Warning(here, msg, category);
+				auto name = extendedNames.find(ext);
+				char msg[64];
+
+				if (name == extendedNames.end())
+				{
+					// Parse vets extended bytes, so this is the same safety net as the
+					// plain chain's final else: parsed but never wired up.
+					snprintf(msg, sizeof(msg), "unhandled extended command 0x%02X; dropped", ext);
+					Common::Warning(here, msg, "unhandled sequence commands dropped");
+				}
+				else
+				{
+					const char* category = (ext == 0xE0)
+						? "userproc dropped (no MIDI equivalent)"
+						: "multi-LFO (mod2-4) commands dropped (not implemented)";
+
+					snprintf(msg, sizeof(msg), "%s not implemented; dropped", name->second);
+					Common::Warning(here, msg, category);
+				}
 			}
 		}
 

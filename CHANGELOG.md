@@ -22,6 +22,41 @@ House rules:
 
 ## [Unreleased]
 
+### Added
+
+- **The convert-time variable VM — sequence variables, comparisons, and `[If]`
+  conditions now execute during conversion.** The extended command space that
+  previously dropped with notices (353k `setvar`-family ops, 210k comparisons
+  corpus-wide) runs in a deterministic VM: all 12 variable ops and 6
+  comparisons with byte-verified 3DS semantics (each op was disassembled in a
+  real CTR binary — including the ÷0-guarded div/mod, `notvar` complementing
+  the *operand*, and the s16 wrap), 48 variable slots in the engine's three
+  scopes, and the `[If]` prefix gating **every** command as the CTR engine
+  does — including `Fin` and `Return`, where the 3DS port diverges from the
+  Wii engine (conditional truncation is real hardware behavior; disasm-cited
+  in the code). Consequences: `Var`-valued arguments now carry the live
+  variable value instead of the variable *index*; conditional jumps are
+  evaluated exactly, retiring the two-reachability dispatcher heuristic;
+  counted conditional loops unroll until their comparison clears (budgeted);
+  self-contained RNG re-roll loops — which always eventually play on hardware
+  but whose exit a PRNG-free converter can never roll open — take their gated
+  exit once instead of ending the track silent; and a per-track execution
+  budget closes a latent infinite-loop hazard on `Call` cycles. Converter
+  policies, each surfaced by a notice: variables initialise to 0 (the
+  game-at-rest "default section"; a two-init corpus A/B against the hardware's
+  −1 power-on value showed −1 rescues nothing and silences 1,294 more files),
+  `randvar` and `Rnd` arguments stand in their range midpoint, and reads of
+  never-written (game-seeded) variables are flagged per execution. Also
+  retires the latched-stand-in hazard at note-wait/portamento/timebase (a
+  `Var`-prefixed flag used to latch the variable index as persistent state).
+  (changes `.mid` only — 3,356 files across 55 archives; net +37k note-ons as
+  conditional content becomes reachable; an independent SMF parse of every
+  changed pair ran clean; 332 files render honestly silent where the old
+  converter fabricated notes by ignoring conditions — each is a
+  mechanism-diagnosed game-triggered spin-wait or minority-probability random
+  selector, named by its read-before-write notice; no `.sf2`/`.wav`/raw dump
+  differs and no file is added or removed)
+
 ### Fixed
 
 - **The `0x8A`/`0xFD` call stack no longer leaks across track boundaries** —

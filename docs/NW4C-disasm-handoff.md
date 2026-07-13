@@ -396,6 +396,50 @@ offsets may shift in other titles.
 
 ---
 
+## Session 4 (2026-07-13) — sequence-variable machinery: CTR ground truth, and a real NW4C≠NW4R divergence
+
+Dug for the convert-time variable VM (see HISTORY). All from MiiPlaza `code.bin`, ARM mode,
+capstone-only, anchored at the Session-3-adjacent dispatcher find `MmlParser::CommandProc @
+0x2E32D4`; the `Parse` command-fetch loop is at `0x2E3B80`, reaching CommandProc for extended
+ops with `r2 = 0xF000 | subop` (`0x2E40C0`).
+
+**The 18 variable/comparison ops, byte-verified.** Extended second-bytes `0x80–0x8B` (setvar,
+addvar, subvar, mulvar, divvar, shiftvar, randvar, andvar, orvar, xorvar, notvar, modvar) and
+`0x90–0x95` (cmp eq/ge/gt/le/lt/ne, exactly that order). Highlights: divvar (`0x2E3A48`) and
+modvar (`0x2E3AC8`) are **÷0-guarded** (`cmp r6,#0 / beq` → variable unchanged, no fault; the
+signed div/mod helper is `0x236DE0`, quotient r0 / remainder r1); shiftvar (`0x2E3A6C`) is LSL
+for a non-negative operand, ASR by `-op` for negative; **notvar (`0x2E39B4`) is `*var = ~operand`
+(`mvn r0, r6`) — it never reads the variable** (GotaSequenceLib's implementation of this op is
+garbled — do not crib it); randvar (`0x2E3A84`) is `(rand16()·(|op|+1)) >> 16`, sign-restored —
+uniform inclusive `[0, |op|]`, LCG at `0x211D94` (mult `0x19660D`, incr `0x3C6EF35F`).
+Comparisons store to **cmpFlag = SeqTrack+0x24** (`strb` @`0x2E3AFC`), init **true** in
+`SeqTrack::InitParam` (`0x191FC4`: `mov r0,#1` → `strb [r4,#0x24]`).
+
+**Variable scoping (GetVariablePtr, split across `0x1C7E1C`/`0x201B54`):** idx 0–15 → SeqPlayer
+locals (`SeqPlayer+0xC8`), idx 16–31 → **process-global array at absolute `0x00407468`** (shared
+across all players, persists across songs), idx 32–47 → SeqTrack vars (`SeqTrack+0xA0`) — **16
+track variables, not 8**; idx ≥ 48 → NULL, checked, no-op. All three arrays init to **−1**
+(fill loops `0x12D2C0` global / `0x1920E4` track / `0x193414` local) — confirms
+`DEFAULT_VARIABLE_VALUE = −1` on CTR.
+
+**The divergence that matters — the `[If]` (0xA2) gate covers Fin on CTR.** In `Parse`, doExec
+(r6) = cmpFlag (`0x2E3BF0`), arguments are always consumed, and the gate is checked before
+every handler — **including `0xFF` Fin (`cmp r6,#0` @`0x2E4000`: false → return 0, track keeps
+playing) and `0xFD` Return (default tail @`0x2E403C`: false → no stack pop)**. The Wii NW4R
+decomp returns `PARSE_RESULT_FINISH` for MML_FIN *outside* the gate — **the CTR port moved Fin
+inside it**, so `[If] Fin` truncates *conditionally* on 3DS where the Wii engine would truncate
+unconditionally. This is the first byte-verified behavioural NW4C≠NW4R divergence in this
+project; it directly shaped caesar's VM gate. Only `0xFE` alloctrack escapes the gate
+(`0x2E3FEC`: consumes the u16 mask, executes nothing either way — its consumer is the
+sequence-open path, not Parse). An `[If]`-skipped comparison therefore also cannot write
+cmpFlag (CommandProc is never entered).
+
+Takeaway for the suite: the "clean NW4R port" presumption now has a counterexample — small
+control-flow details CAN differ. Byte-verify anything gate- or lifecycle-shaped on CTR before
+porting Wii-decomp behaviour into the stage-2 player.
+
+---
+
 ## Why the RE stops here — *for the SF2/MIDI exporter only*
 
 > **Scope correction (2026-07-09, later the same day).** Everything in this section is correct

@@ -39,57 +39,27 @@ The plan is big; each goal is its own large step.
 The complete known backlog for the extraction/conversion tool (BCSAR →
 MIDI/SF2/WAV). This list plus the [Known bugs](#known-bugs-open) below is
 everything left on the converter; none of it is a prerequisite for starting
-the suite — the two biggest items are themselves shared groundwork (the VM is
-a down-payment on suite stage 4; ramp handling overlaps the stage-2/5
-timeline flattener), and the architecture bullet is subsumed by suite
-stage 0. Rough priority order within each group.
+the suite — the biggest item is itself shared groundwork (ramp handling
+overlaps the stage-2/5 timeline flattener), and the architecture bullet is
+subsumed by suite stage 0. Rough priority order within each group.
 
 ### Sequence (CSEQ → MIDI) fidelity
 
-- **The convert-time variable VM.** The 2026-07-11 triage
-  ([HISTORY.md](HISTORY.md#investigations)) quantified the gap: ~2.4M sequence
-  events corpus-wide convert wrong or drop (each now surfaced by a notice
-  since the warning-hygiene pass, but none evaluated), dominated by the
-  un-evaluated variable machinery — 353k `setvar` / 210k `cmp` ops ignored,
-  `[If]`-prefixed non-jump commands executing unconditionally (including 33k
-  conditional `Return`s and 8.5k conditional `Fin`s that can truncate tracks
-  in GardenSound/Alice/Jack/ctr_dash), and `Var`-valued parameters emitting
-  the variable *index* as the value. The settled plan is a small deterministic
-  VM in the converter: three variable scopes initialised to 0 (power-on
-  hardware state), the 12 arithmetic ops, the 6 comparisons setting a
-  per-track flag, `[If]` gating *every* command type, the existing revisit
-  guard for backward jumps, and a fixed documented `randvar` value. That
-  resolves sequence-internal `[If]`s bit-exactly, defaults game-driven globals
-  to the same "default section" the current heuristic aims for, strictly
-  supersedes the two-reachability heuristic, and is a direct down-payment on
-  suite stage 4. (Semantics are pinned: Gota7/GotaSequenceLib `CtrCafe.cs` is
-  the authoritative CTR byte map, plus the NW4R decomps — see the triage entry
-  for sources.)
-  **Corrections from the 2026-07-12 pre-implementation audit:** hardware
-  initialises all three variable scopes to **−1**, not 0 (NW4R
-  `DEFAULT_VARIABLE_VALUE` — the triage's fourth wrong semantic guess), so
-  init-0 must ship as a documented converter policy (the game-at-rest
-  "default section" value), settled by a two-init corpus A/B plus a
-  spot-check of the extended-op handler in the found 3DS dispatcher
-  (`MmlParser::CommandProc` @ `0x2E32D4`, MiiPlaza `code.bin` — carry it into
-  the disasm handoff, which still lists the sequence runtime as "next dig").
-  Also pinned: `cmpFlag` initialises **true** per track (reset it in
-  `advanceToNextTrack`); a skipped `[If]` command consumes its args and
-  advances no time; `randvar`'s fixed stand-in should be operand/2 (midpoint,
-  consistent with `Rnd` — the VM stays PRNG-free, so the `ReadArgs` comment
-  promising "real randomness" needs correcting). One design hole the triage
-  left: backward `[If]` jumps that evaluate true (spin-wait break-out vs
-  counted-loop unrolling — recommend allowing revisits while VM state changed
-  since the last visit, under a hard iteration budget, with no loop markers
-  on a broken conditional loop). The prerequisite `sp` call-stack fix has
-  already landed. Verification is the long pole (structural `.mid` diffs in
-  plausibly 3–5k files): non-`.mid` and machinery-free `.mid` byte-identical,
-  a silence-transition census with every sound→silent individually justified
-  (the 909 heuristic-rescued files are the named regression watch),
-  GotaSequenceLib as cross-oracle, and 2–3 in-game New 3DS spot checks for
-  the default-section ground truth.
+- [x] **The convert-time variable VM** — shipped 2026-07-13: variables,
+  comparisons and `[If]` execute with disasm-verified CTR semantics; full
+  narrative (incl. the NW4C≠NW4R `[If] Fin` divergence, the init-0 two-init
+  A/B, and the re-roll-loop escape rule) in [HISTORY.md](HISTORY.md#the-convert-time-variable-vm-2026-07-13).
+- **Opt-in trigger-seed "preview" mode** (concept, from the VM verification):
+  ~138 GardenSound-class game-triggered SEs are now honestly silent at rest —
+  they poll a never-written variable the game seeds at runtime (each named by
+  its read-before-write notice). If audible "what does this SE sound like
+  when fired" previews are wanted, the correct vehicle is an explicit opt-in
+  flag that seeds each read-before-write trigger variable to the first
+  note-unlocking value per entry — never a change to the default VM
+  semantics. Belongs naturally to the future player/editor (which will seed
+  real game state), but could ship converter-side earlier.
 - **Ramp synthesis — the `_t` family, `0xE3` sweep pitch, tie
-  single-envelope.** The largest remaining fidelity mass after the VM (~462k
+  single-envelope.** The largest remaining fidelity mass (~462k
   flattened events: 375k volume fades, 76k pan sweeps, 10.7k pitch-bend
   ramps, plus 871 sweep-pitch commands and the tie re-attack approximation).
   The converter currently only *surfaces* these with notices; nothing is
@@ -246,8 +216,8 @@ Hard-won conclusions — do not re-litigate without new evidence. Full stories i
 ## Known bugs (open)
 
 Fixed bugs and their verification stories are in
-[HISTORY.md](HISTORY.md#fixed-bugs). The large-mass fidelity gaps (the silent
-`Rnd`/`Var`/`[If]` machinery, ramp flattening) are tracked under
+[HISTORY.md](HISTORY.md#fixed-bugs). The one large-mass fidelity gap left
+(ramp flattening) is tracked under
 [Remaining converter scope](#remaining-converter-scope) above, not here — this
 list is the known defect tail.
 
@@ -274,12 +244,6 @@ list is the known defect tail.
   relative-to-64 while the engine args are absolute rates, so raw
   pass-through is "less wrong", not right.)
 
-- **`Rnd`/`Var` stand-ins latch persistent state at `0xC7`/`0xCE`/`0xB0`.** A
-  `Var`-prefixed note-wait latches the variable *index* as the flag (silently
-  re-timing the whole track); `0xCE` portamento on/off and the `0xB0` SMF
-  timebase latch stand-ins the same way. `0xC8` tie and `0xCC` mod type were
-  deliberately given drop-don't-latch guards for exactly this hazard; these
-  three were missed. Retires with the VM; a cheap interim guard is possible.
 - **`0xFE` track-enable mask is parsed but never enforced.** Tracks opened by
   `0x88` convert regardless of the allocation mask; if the engine gates
   OpenTrack on allocation (unverified), caesar renders tracks the console
