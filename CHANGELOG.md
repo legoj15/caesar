@@ -22,6 +22,32 @@ House rules:
 
 ## [Unreleased]
 
+### Fixed
+
+- **The `0x8A`/`0xFD` call stack no longer leaks across track boundaries** —
+  `sp`, the Call/Return stack, was a single `stack<uint32_t>` shared by all 16
+  tracks of a sequence, and `advanceToNextTrack` reset every other per-track
+  field (`absTime`, `noteWait`, pan, mod type, tie state, `offsetTime`, …) but
+  not it. A track that ended (`Fin`, a whole-song loop-back, or a stray Return)
+  while a Call frame was still on the stack left that frame behind, so the next
+  track's first unbalanced `0xFD` Return took the non-empty branch and jumped
+  into the **previous track's code**, replaying it under the new track's index
+  and channel — silently, since the "Return with empty call stack" notice only
+  fires when the stack *is* empty. The engine keeps the call stack per-track
+  (NW4R `callStack[]`/`callStackDepth`), so caesar now clears `sp` alongside the
+  other resets. The same commit hardens the `0x8A` Call handler: a call target
+  that is not a command boundary is now reported (`call target out of range;
+  call ignored`) and skipped, instead of silently ending the whole track walk
+  and dropping every remaining track; and a Call that is the last command in the
+  bank no longer reads one past the end of the command map for its return
+  address (undefined behaviour — the same family as the already-fixed
+  `--begin()` bug) but jumps without pushing, leaving a later Return to take the
+  honest empty-stack end-of-track path. (output-identical — byte-identical and
+  stderr-identical across the 82-archive / 257,097-file corpus, where no leaked
+  frame is ever consumed by a subsequent track's Return and every call target is
+  valid; the fix removes latent cross-track corruption and two undefined-
+  behaviour / silent-track-drop hazards that this corpus does not exercise)
+
 ## [0.5.1] — 2026-07-12
 
 ### Added

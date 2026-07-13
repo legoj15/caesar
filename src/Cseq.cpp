@@ -877,6 +877,14 @@ bool Cseq::Convert(uint32_t startOffset)
 					modWire[slot] = -1;
 				}
 
+				// The engine keeps the 0x8A/0xFD call stack per track (NW4R
+				// callStack[]/callStackDepth). A track that ends inside a Call
+				// (via Fin, a whole-song loop-back, or a stray Return) leaves
+				// its return frame behind; if that frame carried into the next
+				// track, that track's first unbalanced Return would jump back
+				// into this code and replay it under the wrong index/channel.
+				sp = {};
+
 				offsetTime.clear();
 
 				i = commands.find(trackOffsets[j]);
@@ -1114,10 +1122,33 @@ bool Cseq::Convert(uint32_t startOffset)
 			}
 			else if (i->second.Cmd == 0x8A)
 			{
-				sp.push(next(i, 1)->first);
+				// Call: resolve the target first. A target that is not a command
+				// boundary (malformed) must not silently stop the whole walk -- the
+				// while loop would exit and skip every remaining track -- so report
+				// it and fall through, mirroring the 0x89 jump guard. When the
+				// target is valid but next(i, 1) is end() (the Call is the last
+				// command, so there is no return address), jump WITHOUT pushing: a
+				// later Return then takes the honest empty-stack end-of-track path
+				// rather than dereferencing end().
+				auto target = commands.find(i->second.Args[0]);
 
-				i = commands.find(i->second.Args[0]);
-				redirected = true;
+				if (target == commands.end())
+				{
+					Common::Warning(here, "call target out of range; call ignored",
+						"call targets out of range (call ignored)");
+				}
+				else
+				{
+					auto ret = next(i, 1);
+
+					if (ret != commands.end())
+					{
+						sp.push(ret->first);
+					}
+
+					i = target;
+					redirected = true;
+				}
 			}
 			else if (i->second.Cmd == 0xB0)
 			{
@@ -1677,13 +1708,13 @@ bool Cseq::Convert(uint32_t startOffset)
 				else
 				{
 					// A Return with no matching Call. These archives pack many
-					// sequence entries into one shared bank and the converter
-					// currently starts every entry at the bank's first byte,
-					// which is often a helper subroutine that ends in Return
-					// (see the ROADMAP note on shared-bank start offsets). Rather
-					// than discard the whole in-progress MIDI, treat the stray
-					// Return as end-of-track, exactly like Fin: close this track
-					// and move to the next so the sequence still yields a file.
+					// sequence entries into one shared bank, and the converter
+					// starts each entry at its own start offset -- which often
+					// lands on a helper subroutine that ends in Return, so an
+					// entry can reach a Return it never Called. Rather than
+					// discard the whole in-progress MIDI, treat the stray Return
+					// as end-of-track, exactly like Fin: close this track and
+					// move to the next so the sequence still yields a file.
 					Common::Warning(Data + dataOffset + 8 + i->first, "Return with empty call stack; ending track");
 
 					if (!advanceToNextTrack())

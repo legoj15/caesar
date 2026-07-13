@@ -1434,6 +1434,57 @@ Still-open defects are tracked under "Known bugs" in ROADMAP.md.
   crashes. Sequences that emitted no notes were either those silent entries or
   dispatchers that select a section via conditional (`[If]`) jumps; the latter
   were resolved next (see the `[If]`-dispatcher item in §4 above).
+- **The `0x8A`/`0xFD` call stack was shared across all 16 tracks; now cleared
+  per track** (`Cseq.cpp`) (*2026-07-12*). Found by the 2026-07-12 pre-VM audit.
+  `sp`, the Call/Return stack in `Cseq::Convert`, was one `stack<uint32_t>` for
+  the whole sequence, and `advanceToNextTrack` — which resets `absTime`,
+  `noteWait`, `trackHasNote`, pan, mod type, tie state, `modShadow`/`modWire`
+  and `offsetTime` at each track boundary — never touched it. A track that ended
+  (`Fin`, a whole-song loop-back, or a stray `Return`) while a `0x8A` Call frame
+  was still on the stack left that frame behind for the next track. The next
+  track's first *unbalanced* `0xFD` Return then took the `!sp.empty()` branch and
+  jumped to the leaked return address — inside the **previous** track's code —
+  replaying it under the new track's index and channel, silently (the "Return
+  with empty call stack; ending track" notice only fires when the stack *is*
+  empty). The 3DS engine keeps the call stack per-track (NW4R
+  `callStack[]`/`callStackDepth`), so such a frame can never cross a track
+  boundary on hardware.
+
+  **The fix (one commit).** (1) `advanceToNextTrack` now clears `sp` (`sp = {};`)
+  alongside the other per-track resets. (2) The `0x8A` Call handler is hardened
+  the way the `0x89` jump handler already was: it resolves the call target
+  first, and if the target is not a command boundary it emits a default-visible
+  notice (`call target out of range; call ignored`) and falls through, instead
+  of the old `commands.find(...)` with no `end()` check — which, on a bad
+  target, left the walk's iterator at `end()` and silently ended the entire
+  multi-track walk, dropping every remaining track. (3) The same handler no
+  longer evaluates `next(i, 1)->first` unconditionally: when the Call is the last
+  command in the bank, `next(i, 1)` is `end()` and dereferencing it is undefined
+  behaviour (the same family as the already-fixed `--begin()` bug). It now pushes
+  the return address only when one exists; when it does not, it jumps without
+  pushing, so a later Return honestly takes the empty-stack end-of-track path.
+
+  **Verification (A/B + independent SMF check).** Corpus A/B
+  (`tools/ab-verify/ab-verify.ps1 -KeepTrees`, buggy `f344e19` baseline vs fixed
+  working build): **byte-identical AND stderr-identical across all 82 archives /
+  257,097 output files — 0 changed, 0 added, 0 removed, 0 stream diffs** (exit
+  0). The bug is therefore *latent* on this corpus: no sequence leaves a call
+  frame on the stack that a later track's unbalanced Return then consumes. The
+  stderr-identical result is the dispositive proof — had any leaked frame been
+  consumed, the fixed build would have emitted an extra "Return with empty call
+  stack" notice exactly where the old build silently followed the leaked frame,
+  and none appeared. Likewise both `0x8A` guard branches never fire: every call
+  target in the corpus is a valid command boundary and no Call is a bank's last
+  command (the guards are output-neutral, like the `[If]`/`Rnd`/mono-poly
+  hardening above). Because zero `.mid` files changed, the planned per-pair SMF
+  classification (the only permissible change being trailing events removed from
+  an affected track, never an added event or a changed value) had no pairs to
+  examine and no anomalies to flag — and the harness's own per-file SHA-256
+  comparison over all 257,097 files is byte-level, strictly stronger than an
+  event-level SMF diff would have been. The fix is a latent-correctness
+  hardening: it eliminates cross-track state corruption and two
+  undefined-behaviour / silent-track-drop hazards without moving a single output
+  byte on the available corpus.
 
 ## Investigations
 

@@ -199,8 +199,8 @@ Larger efforts that expand what caesar can do. Rough priority order:
   left: backward `[If]` jumps that evaluate true (spin-wait break-out vs
   counted-loop unrolling — recommend allowing revisits while VM state changed
   since the last visit, under a hard iteration budget, with no loop markers
-  on a broken conditional loop). Land the `sp` call-stack fix first as its
-  own commit. Verification is the long pole (structural `.mid` diffs in
+  on a broken conditional loop). The prerequisite `sp` call-stack fix landed
+  2026-07-12. Verification is the long pole (structural `.mid` diffs in
   plausibly 3–5k files): non-`.mid` and machinery-free `.mid` byte-identical,
   a silence-transition census with every sound→silent individually justified
   (the 909 heuristic-rescued files are the named regression watch),
@@ -354,22 +354,6 @@ mis-wired `0xE3`/`0xE0` controls, the discarded loop counts, the damper
 threshold, init_pan/lpf, the `0xB2` mono/poly note-killer, and the mod-type
 vibrato gating are fixed.)
 
-- **The `0x8A` call stack leaks across track boundaries.** `sp` (`Cseq.cpp`) is
-  one `stack<uint32_t>` shared by all 16 tracks, and `advanceToNextTrack` resets
-  `absTime`/`noteWait`/`trackHasNote`/`offsetTime` but *not* `sp`. A track that
-  ends (Fin, or a whole-song loop-back) while inside a Call leaves its return
-  frame behind, so the next track's first unbalanced `0xFD` Return takes the
-  `!sp.empty()` branch and jumps into the **previous track's code**, executing it
-  under the new track's index and channel — silently, since the "Return with no
-  matching Call" notice only fires when `sp` *is* empty, and that case is
-  documented as common in this corpus. The engine's call stack is per-track
-  (NW4R keeps `callStack[]`/`callStackDepth` inside the track). Fix is
-  `while (!sp.empty()) sp.pop();` in `advanceToNextTrack`, but it is
-  output-changing wherever it fires, so it wants its own commit and A/B. Found
-  while auditing per-track state for the init_pan work; corrupts track
-  attribution generally, not just pan. (Related: `sp.push(next(i, 1)->first)` is
-  UB when a Call is the last command in the bank — same family as the fixed
-  `--begin()` bug.)
 - **Distinct sequence entries silently overwrite each other's `.mid`.** 104 of
   7,990 output names are reached from more than one entry start offset —
   `SEQ_1.bcseq` alone is converted from 6 different offsets, all writing
