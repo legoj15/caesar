@@ -145,6 +145,13 @@ per stage. Status:
 
 - [ ] **Stage 0 — library-core refactor**: `ParseContext` over globals, kill
       the disk round-trip, split parser/exporter, `caesar_core` library.
+      Kickoff survey (2026-07-13) reordered the sub-steps — `.wav` in-memory
+      handoff first, then the context fold (gated on new diagnostics goldens),
+      then the per-file parser/exporter split (which also absorbs the
+      Csar/Cgrp child write-then-reopen family the plan never named), library
+      split last — and identified the `ReadArgs` Rnd-midpoint collapse as the
+      one lossless-model blocker. Full findings in
+      [HISTORY.md](HISTORY.md#2026-07-13--suite-stage-0-kickoff-survey).
 - [ ] **Stage 1 — byte-identical round-trip** of BCSEQ/BCBNK/BCSAR from a
       raw-backed model (**the next milestone** — the cheapest complete proof
       the format is understood, and the serializer everything else sits on).
@@ -274,3 +281,27 @@ list is the known defect tail.
   Surfaced by the 2026-07-11 `0xE3` research (sweep pitch and portamento are
   independent, additive mechanisms). Verify CC84 semantics across target
   players before changing anything.
+- **The bank's `.wav` read-back leaks a stale context frame on early failure.**
+  `Cbnk::Convert`'s manual `Push`/`Pop` around each sample's `.wav` (the one
+  non-RAII pair in the codebase) has nine early `return false` exits between
+  push and pop, and that path also skips `Common::Reset` (main resets only on
+  the exception path) — so the next input on the command line parses with a
+  stale entry in the bounds-check table, where wild pointers landing inside
+  the leaked buffer pass validation. Latent on a healthy corpus (those `.wav`s
+  are caesar's own output); same family as the fixed `sp` call-stack leak.
+  Dies naturally in suite stage 0's in-memory handoff. (2026-07-13 kickoff
+  survey.)
+- **Multi-input runs bleed the analysis `.log` across archives.** `Common::Log`
+  is cleared only on the exception path, so in `caesar a.bcsar b.bcsar`, `b`'s
+  `.log` also contains all of `a`'s rows (`Notices` doesn't bleed — it flushes
+  per input). Related byte-surface fact: `-w` positional output on
+  group-resident conversions is nondeterministic today (positions are computed
+  against whatever frame tops the shared file-name stack, across unrelated
+  heap buffers). The stage-0 context fold must reproduce both first and fix
+  them as a separate, deliberate output-changing commit. (2026-07-13 kickoff
+  survey.)
+- **The `.wav` writer never checks its output stream.** A failed or truncated
+  `.wav` write still reports success; today the bank's read-back turns that
+  into a clean abort by accident, but after stage 0's in-memory handoff the
+  SF2 would build fine while the on-disk `.wav` is bad. The handoff step must
+  add the stream check. (2026-07-13 kickoff survey.)

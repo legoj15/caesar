@@ -2069,3 +2069,91 @@ in Surround, equal in Mono — matches the schedule exactly). `split_run.py` was
 subsequently hardened to name segments by schedule order with aggressive
 gap-closing and a duration clamp that rejects the idle tail, keeping pip counts
 as a soft cross-check only.
+
+### 2026-07-13 — Suite stage-0 kickoff survey
+
+Run before writing the first line of suite code, to check the settled stage-0
+plan (SUITE-DESIGN.md "Library-core refactor", four steps) against the tree as
+it stands after the v0.5.1 and VM work. Method: five parallel survey agents
+(global-state census, disk-round-trip map, per-format parser/exporter
+coupling, CLI/build/library split, plan-delta audit) plus one adversarial
+critique agent instructed to verify every claim against source; the new bugs
+it surfaced were re-verified by hand before filing under Known bugs.
+
+**Verdict: the four steps survive, but the execution order changes —
+2 (narrowed to the `.wav` handoff) → 1 (context fold) → 3 (per-file split,
+widened) → 4 (library split).**
+
+- **Why step 2 goes first, narrowed.** The in-memory sample handoff deletes
+  the codebase's one non-RAII `Push`/`Pop` pair (and its latent stale-frame
+  leak), it sits under the strongest byte signal the A/B has (SF2 bytes,
+  default-on, corpus-wide), and it shrinks the later context fold. Its
+  contract has four traps a naive port would miss: (a) the missing-`.wav`
+  `RequireOpen` abort is currently the only thing between an out-of-range
+  sample id and out-of-bounds UB at the `SampleMode` lookup — the in-memory
+  path needs an explicit bounds check reproducing the same error text;
+  (b) decode-failure (no `.wav` today) and IMA-ADPCM (valid `.wav`, zero
+  samples) become indistinguishable in memory — a converted-successfully flag
+  keeps the failure paths byte-equivalent; (c) the `<id>.wav` stdout echo
+  lines come from the `Push` inside the loop and must be kept (push an empty
+  range); (d) the unchecked `.wav` `ofstream` must gain its check or disk and
+  SF2 output can silently diverge on I/O failure. The mono/stereo read-back
+  quirks (first `smpl` loop record only, no-loop default of
+  `0..LeftSamples.size()`, the >2-channel interleave-into-left degenerate)
+  must be copied, not fixed.
+- **Why step 1 is the riskiest step, not the safest.** Its ~600-site diff
+  lands almost entirely on surfaces the default A/B never exercises: `-w`
+  text, `Assert`/`Error` failure text, exception text, multi-input runs.
+  Guard committed *before* the fold: diagnostics goldens — corrupted-archive
+  stderr fixtures per failure family, a `-w` run restricted to
+  Csar-direct-path archives (group-path `-w` positions are nondeterministic
+  today), and one two-archive single-process run pinning the multi-input
+  `.log` bleed. The first fold commit can be zero-call-site: a `ParseContext`
+  struct holding the six members, with `Common`'s statics becoming references
+  bound to one process-lifetime instance — byte-identical by construction —
+  then the context threads through class-by-class on the existing `Options`
+  injection pattern. The context stays per-process in step 1; per-input
+  scoping (which fixes the `.log` bleed and changes bytes) is its own later
+  commit.
+- **Attribution is top-of-stack, never "my file" — and the wrong names are in
+  the shipped bytes.** Long-lived objects leave frames on the shared stack,
+  so `.log` rows and warnings on the Csar/Cgrp paths attribute to the
+  last-extracted `.cwav`/group file. The context must reproduce that, not
+  clean it up in the same change.
+- **A second disk round-trip family the plan never named:** Csar and Cgrp
+  write every embedded child (`.bcwar`/`.bcbnk`/`.bcseq`/`.bcgrp`) to disk
+  and immediately re-open it through the child's constructor. Folding it into
+  step 2 would broaden the weakest-verified step and touch all seven
+  constructors twice; it belongs to step 3's per-file migrations (span +
+  context + model per file, one signature change each; split order
+  Cwar → Cwav → Cgrp → Cbnk → Csar → Cseq by measured difficulty).
+- **Cseq is already model + interpreter.** Pass 1 builds a clean
+  `map<offset, CseqCmd>` with no I/O; the VM lives entirely in the emit walk
+  and needs no model state. The one genuine lossless-model blocker in the
+  codebase: `ReadArgs` collapses random-range (`Rnd`) argument bounds to
+  their midpoint *at parse time*, welding exporter policy into the model
+  layer — the bounds must survive parse and the midpoint decision move to
+  emit. Secondary: VM diagnostics rebuild raw source pointers for warning
+  positions and must become stored offsets (also a stage-1 drop-the-buffer
+  prerequisite).
+- **Scale drift and state census.** Own-source is ~5,020 LOC (the doc sized
+  ~3,744); Cseq.cpp alone is 2,165 — 43 % of the codebase, most of it one
+  function. No new globals since the doc: the VM's state is all
+  `Convert`-local, and the only mutable process state outside `struct Common`
+  is the `cerr` format-flag leakage (hex/fill/uppercase persist across
+  calls), which is itself part of the byte surface — reordering diagnostic
+  calls changes later output.
+- **Vendored code needs no touching** (zero `Common` references in
+  sf2cute/libsmfc), with one caution: sf2cute holds pointer-keyed hash maps
+  that are deterministic only because they are never iterated for output —
+  do not casually upgrade or iterate it.
+- **The library split (step 4) is cheap.** Format handlers have zero direct
+  console I/O (every diagnostic funnels through `Common` — one class to give
+  a pluggable sink), `Options` is already parameter-threaded, CI needs no
+  edits, and ab-verify constrains only the CLI surface (exe name/location,
+  `-o` semantics, exit codes, stdout echo, stderr notices). Keep sources
+  under `src/` — the harness's stale-exe guard watches only that tree.
+- **Doc hygiene:** SUITE-DESIGN's `Cbnk.cpp:213-293` citations were already
+  stale on the day the doc was committed (the read-back is the
+  `cwav.Id < 0xF000` block in `Cbnk::Convert`). Landmarks over line numbers
+  in design docs from here on.
