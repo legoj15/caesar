@@ -9,7 +9,8 @@ deep reverse-engineering findings (addresses, evidence chains) in
 [NW4C-disasm-handoff.md](NW4C-disasm-handoff.md).
 
 Entries are grouped by the v0.5.0 roadmap section they closed out, in the
-original roadmap order, followed by fixed bugs.
+original roadmap order, followed by the v0.5.1 release record, fixed bugs,
+and investigations.
 
 ---
 
@@ -637,6 +638,96 @@ conflict with caesar's GPL-3.0.
       `release.yml` published the first maintained GitHub Release, with
       `caesar-windows-x64.zip`, `caesar-linux-x64.zip`, and
       `caesar-macos-arm64.zip` attached.
+
+## v0.5.1 — MIDI-fidelity patch (shipped 2026-07-12)
+
+The item-level release record, moved here from the roadmap after release. A
+post-release opcode-by-opcode audit of the MIDI converter against the
+12,308-file corpus (scoped 2026-07-10) found the discrepancies below. All were
+exporter-side, bounded, and touched `.mid` output only; every item shipped in
+v0.5.1 (released 2026-07-12), each verified by corpus A/B and — where output
+changed — an independent SMF parse of every changed pair. Full narratives are
+in [Fixed bugs](#fixed-bugs) below; the user-facing summary is the changelog's
+`[0.5.1]` section. Two engine-level discoveries landed alongside: the
+note-wait default is ON (a long-standing timing bug affecting ~112k notes) and
+tie mode's true semantics — both also below.
+
+- **Fixed the GM percussion-channel collision** — track 9 now relocates off
+  GM channel 9 to a free channel (or, when all 16 tracks are used, stays put
+  with a GS "rhythm part off" SysEx for part 10); the SMF track layout is
+  unchanged, so sequences without a 10th track are byte-identical.
+- **Triaged the ~1,020 surfaced controller/parameter drops** — plain
+  out-of-range volume/pan/master-volume/expression values now clamp to 127
+  with an approximation notice (unevaluated `Rnd`/`Var` stand-ins keep
+  dropping with a notice until suite stage 4), and a caller-side `bpm > 0`
+  guard closes the vendored `libsmfcx.c` zero-BPM division UB. Corpus A/B
+  byte-identical (82 archives, 257,097 files).
+- **Fixed the two mis-wired vibrato/pitch controls** — `0xE3` sweep pitch
+  no longer masquerades as CC78 (it drops with an honest notice until the
+  stage-2 player can render pitch-bend ramps), and `0xE0` mod delay — s16
+  in **5 ms units** per the NW4R decomp, correcting the triage's
+  "milliseconds" — scales into CC78's relative upper half (64 = no delay,
+  saturating at 1 s). A/B: 1,772 `.mid` diffs, every one CC78-only by
+  independent SMF parse; out-of-range drops fell 1,020 → 230.
+- **Passed finite loop repeat counts through.** `0xD4`'s count now drives
+  EMIDI CC116 and `0xFC` emits the spec-fixed CC117 = 127, so EMIDI-aware
+  players honour a finite "play N×" instead of looping forever (0 stays
+  infinite in both conventions; counts ≥ 128 clamp to 127 with a notice).
+  (Fully unrolling repeats in the timeline stays stage-2/5 flattening work.)
+- **Damper pedal (`0xDF`) — the reported bug was a phantom; hardened
+  anyway.** The triage's "argument is a bool" premise was *refuted* (NW4R
+  thresholds it at `>= 64`, exactly as MIDI CC64 does, and every corpus
+  value is already 0 or 127), so the prescribed `? 127 : 0` would have
+  inverted args 1–63; caesar now applies the engine's own threshold, which
+  is byte-identical on the corpus and fixes a latent >127 drop.
+- **Implemented the two dropped commands — but neither was the prescribed
+  one-liner.** The engine *sums* `0xDC` init_pan with `0xC0` pan, so a raw
+  CC10 write clobbers the pan (76 corpus tracks set both); caesar now tracks
+  both terms and emits the combined position. And `0xD8` lpf_cutoff is
+  darken-only — the engine clamps its scale at 64, so a raw pass-through
+  would have told synths to brighten past the sample's own tone (261
+  commands). Both semantics confirmed in the 3DS binary itself (the CSEQ
+  dispatcher, found at last). A/B: `.mid`-only, 2,385 files, every diff
+  CC10/CC74 by independent SMF parse.
+- **Stopped `0xB2` mono/poly from silencing the channel** — the census
+  confirmed mid-track firings (56 of 249 corpus executions, 35 after notes
+  were already sounding), so the CC126/CC127 emission is demoted to a
+  default-visible "no MIDI equivalent" notice.
+- **Gated the vibrato CCs on mod type (`0xCC`)** — tracks whose LFO
+  targets volume (tremolo) or pan (auto-pan) no longer render as pitch
+  wobble: CC1/76/77/78 are suppressed on those spans, a live CC1 is
+  zeroed when the LFO leaves pitch, and persisted values are restored on
+  return (the engine keeps them across a retarget — NW4R-confirmed). A/B:
+  2,146 `.mid`-only diffs across 58 archives, every event a removed
+  CC1/76/77/78 or an inserted CC1=0 by independent SMF parse.
+- **Warning-hygiene pass over the drop sites** — every drop/approximation
+  is now a default-visible categorized notice: span/priority/front-bypass
+  demoted to benign "no MIDI equivalent", the dead extended-command warning
+  chain revived (parse now records the extended opcode) with its mod4
+  labels corrected against CtrCafe, per-execution notices for the silent
+  `Rnd`/`Var`/`[If]` manglings, and final unknown-opcode catch-alls
+  (`0xDE` FxSendC included). Byte-identical corpus A/B.
+- **Closed the two wrong-arg-count desync hazards** — the `_t` trailing
+  duration is now consumed for every command form (not just `0xB0–0xDF`),
+  and the fixed-1-byte group (plus `0xCC` and the extended mod-types) reads
+  its argument through the prefix-aware path; the `0x90`/`0x96`/`0xB7–0xBC`
+  non-opcodes now fail fast instead of swallowing guessed lengths, and `_t`
+  ramps surface a per-execution flatten notice. Byte-identical corpus A/B.
+- **`Rnd` values now convert as the range midpoint** instead of the
+  minimum (which silently biased 196k volumes, 177k pitch bends, and 94k
+  rest durations low) — the honest deterministic stand-in until the
+  convert-time VM brings real randomness. `.mid`-only A/B.
+- **Tie mode (`0xC8`) implemented** — tie regions flatten to gap-free
+  back-to-back segments (one note per commanded pitch/velocity, sustaining
+  through gates and rests, released at the next tie command/`Fin`/track
+  end; NW4R-confirmed semantics), replacing the per-note re-attacks. The
+  re-attack-at-pitch-change approximation is surfaced per region.
+  `.mid`-only A/B.
+- **Adopted a changelog** (`CHANGELOG.md`, Keep a Changelog format; release
+  zips bundle it and `release.yml` publishes the version's section as the
+  release notes). Convention: every user-facing change adds a line under
+  `[Unreleased]` in the same commit, stating its output impact
+  (output-identical vs which output types change).
 
 ## Fixed bugs
 
