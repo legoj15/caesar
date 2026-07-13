@@ -183,6 +183,50 @@ Larger efforts that expand what caesar can do. Rough priority order:
   is a direct down-payment on suite stage 4. (Semantics are pinned:
   Gota7/GotaSequenceLib `CtrCafe.cs` is the authoritative CTR byte map, plus
   the NW4R decomps — see the triage entry for sources.)
+  **Corrections from the 2026-07-12 pre-implementation audit:** hardware
+  initialises all three variable scopes to **−1**, not 0 (NW4R
+  `DEFAULT_VARIABLE_VALUE` — the triage's fourth wrong semantic guess), so
+  init-0 must ship as a documented converter policy (the game-at-rest
+  "default section" value), settled by a two-init corpus A/B plus a
+  spot-check of the extended-op handler in the found 3DS dispatcher
+  (`MmlParser::CommandProc` @ `0x2E32D4`, MiiPlaza `code.bin` — carry it into
+  the disasm handoff, which still lists the sequence runtime as "next dig").
+  Also pinned: `cmpFlag` initialises **true** per track (reset it in
+  `advanceToNextTrack`); a skipped `[If]` command consumes its args and
+  advances no time; `randvar`'s fixed stand-in should be operand/2 (midpoint,
+  consistent with `Rnd` — the VM stays PRNG-free, so the `ReadArgs` comment
+  promising "real randomness" needs correcting). One design hole the triage
+  left: backward `[If]` jumps that evaluate true (spin-wait break-out vs
+  counted-loop unrolling — recommend allowing revisits while VM state changed
+  since the last visit, under a hard iteration budget, with no loop markers
+  on a broken conditional loop). Land the `sp` call-stack fix first as its
+  own commit. Verification is the long pole (structural `.mid` diffs in
+  plausibly 3–5k files): non-`.mid` and machinery-free `.mid` byte-identical,
+  a silence-transition census with every sound→silent individually justified
+  (the 909 heuristic-rescued files are the named regression watch),
+  GotaSequenceLib as cross-oracle, and 2–3 in-game New 3DS spot checks for
+  the default-section ground truth.
+- **Ramp synthesis — the `_t` family, `0xE3` sweep pitch, tie
+  single-envelope.** The largest remaining fidelity mass after the VM (~462k
+  flattened events: 375k volume fades, 76k pan sweeps, 10.7k pitch-bend
+  ramps, plus 871 sweep-pitch commands and the tie re-attack approximation) —
+  v0.5.1 shipped only the surfacing notices. MIDI *can* carry all of these as
+  stepped CC / pitch-bend event streams, so the open decision is
+  converter-side stepped emission vs leaving them to the stage-2/5 timeline
+  flattener (sweep-pitch caveats: pitch bend is channel-global and collides
+  with real `0xC4` bends, and bend-range interplay must be handled). Until
+  filed here (2026-07-12) the converter's biggest known drop had no open
+  line anywhere.
+- **Convert-time-expressible drops never implemented** (surfaced by the
+  2026-07-12 audit; none had a tracking line): `0xB3` velocity range — the
+  engine scales each note-on velocity by the latched range, directly
+  expressible by scaling emitted velocities (needs a corpus census first);
+  `0xDD` track mute — the triage judged it fully doable in the one-pass walk
+  (512 occurrences, 2 archives); `0xFB` envelope reset — could re-emit
+  CC72/73/75 to their defaults (inert on FluidSynth-class players; low
+  value); `0xDB` main (dry) send — decide whether it is genuinely "no MIDI
+  equivalent" (likely: CC7 would clobber `0xC1` volume) and reword its "not
+  implemented" notice accordingly.
 - **Mid-sequence bank switching (`0xB6`).** 8,778 bank selects across 41
   archives (WarioWare Gold's `SoundData1` alone has 4,585); dropping them
   plays the wrong instrument wherever a track switches banks. Not a local
@@ -301,9 +345,10 @@ Hard-won conclusions — do not re-litigate without new evidence. Full stories i
 Fixed bugs and their verification stories are in
 [HISTORY.md](HISTORY.md#fixed-bugs).
 
-The remaining MIDI-converter discrepancies found in the 2026-07-11
-dropped-parameter triage (silent `Rnd`/`Var`/`[If]`/ramp handling) are scoped
-as work items under **v0.5.1** above rather than listed here twice. (The GM
+The 2026-07-11 triage's remaining discrepancies are tracked under **After the
+first release** above — the silent `Rnd`/`Var`/`[If]` machinery is the
+convert-time VM bullet, and ramp flattening is the ramp-synthesis bullet
+(v0.5.1 shipped the surfacing notices only, not the handling). (The GM
 drum-channel collision, the controller-range drops, the tempo-zero UB, the
 mis-wired `0xE3`/`0xE0` controls, the discarded loop counts, the damper
 threshold, init_pan/lpf, the `0xB2` mono/poly note-killer, and the mod-type
@@ -331,7 +376,13 @@ vibrato gating are fixed.)
   `SEQ_1.mid`, so only the last survives. The shared-bank fix gave *most* entries
   distinct names, but where the archive's symbol name collides the offset is not
   disambiguated. Silent data loss (the earlier entries' music never reaches
-  disk); the fix is to suffix colliding names with the entry offset.
+  disk); the fix is to suffix colliding names with the entry offset. (Audit
+  2026-07-12: the collision also clobbers the extracted `.bcseq` itself when
+  the colliding entries reference different file ids; the fix point is the
+  name composition in `Csar.cpp` — keep the first occurrence bare so
+  unaffected names stay byte-identical, and skip true duplicates (same id
+  *and* offset) instead of suffixing. Bank/WARC/GROUP naming shares the
+  symbol-collision hazard structurally — census before extending the fix.)
 - **The `(v/2)+64` transform on CC72/73/75/76/77** (attack/decay/release,
   vibrato rate/depth) compresses the unsigned 0–127 args into 64–127 — caesar
   can never express "faster/shorter than default". Root cause: the parse phase
@@ -342,13 +393,41 @@ vibrato gating are fixed.)
   *product* of `0xCA` depth and `0xCD` range — range, default 1, is a raw
   multiplier — so the width term largely lives in the CC77 caesar writes to
   an inert controller, while CC1 alone drives what players actually render.)
+  (Audit refinements 2026-07-12: the vibrato pair `0xCB`/`0xCD` already
+  parses unsigned, so its fix is emit-only; `0xD2` sustain level shares the
+  signed mis-typing and should be corrected in the same pass; and removing
+  the transform needs a calibration decision — GM2's CC72/73/75 are
+  relative-to-64 while the engine args are absolute rates, so raw
+  pass-through is "less wrong", not right.)
 
 - **The "plain values clamp to 127" invariant is not universal.**
   `clampPlainCtrl` is applied at `0xC0`/`0xC1`/`0xC2`/`0xD5` but not at `0xC5`
   (bend range), `0xC9` (portamento control), `0xCA` (modulation) or `0xCF`
   (portamento time), which are also plain `Uint8` (0–255) written into 7-bit
   controls — those still drop-with-notice instead of clamping. Surfaced rather
-  than silent, so it is a consistency wart, not a silent data loss.
+  than silent, so it is a consistency wart, not a silent data loss. (Fix note
+  from the 2026-07-12 audit: `0xCA` latches the raw value into the mod shadow
+  before emitting, so the clamp must cover the shadow too or the `0xCC`
+  restore path replays the unclamped value.)
+- **`Rnd`/`Var` stand-ins latch persistent state at `0xC7`/`0xCE`/`0xB0`.** A
+  `Var`-prefixed note-wait latches the variable *index* as the flag (silently
+  re-timing the whole track); `0xCE` portamento on/off and the `0xB0` SMF
+  timebase latch stand-ins the same way. `0xC8` tie and `0xCC` mod type were
+  deliberately given drop-don't-latch guards for exactly this hazard; these
+  three were missed. Retires with the VM; a cheap interim guard is possible.
+- **Two approximations are comment-only — no notice fires.** `0xD8` → CC74's
+  cut reads ~20% shallow (hardware 187.5 cents/unit vs GM2's ~150 — the
+  accepted residual is recorded in HISTORY but invisible at run time), and
+  `0xE0` mod delay saturates at 1,000 ms while the corpus maximum is
+  1,150 ms. Both should emit the standard approximation notice.
+- **`0xFE` track-enable mask is parsed but never enforced.** Tracks opened by
+  `0x88` convert regardless of the allocation mask; if the engine gates
+  OpenTrack on allocation (unverified), caesar renders tracks the console
+  never plays. Zero observed impact on the corpus.
+- **A malformed `0x88` OpenTrack offset off a command boundary silently ends
+  the whole track walk** — the lookup misses, the loop exits, and every
+  remaining track is skipped with no notice (the start-offset and jump-target
+  fallbacks are noticed; this path is not). Malformed-input edge only.
 - **Bank note fields are read at hardcoded offsets** (`Cbnk.cpp`, the
   note-parse loop). The format actually locates the ADSHR envelope through a
   `DataRef` chain (`note+0x10 + *(note+0x2C)`, then `+8`), and which optional
