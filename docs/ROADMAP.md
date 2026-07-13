@@ -25,7 +25,7 @@ The plan is big; each goal is its own large step.
 
 | # | Goal | Status |
 |---|------|--------|
-| 1 | Get the caesar MIDI/SF2 debugged to the best effort — fix the known bugs, apply the obvious UX fixes, ship as **v0.5.0** | ✅ Shipped 2026-07-10; **v0.5.1 fidelity patch scoped ← we are here** |
+| 1 | Get the caesar MIDI/SF2 debugged to the best effort — fix the known bugs, apply the obvious UX fixes, ship as **v0.5.0** | ✅ v0.5.0 shipped 2026-07-10; ✅ **v0.5.1 fidelity patch shipped 2026-07-12** — next: goal 2 or the post-v0.5.1 backlog below |
 | 2 | Rebrand the repo as **"caesar salad"**, a play on the mix of things this repo strives to bring | Not started |
 | 3 | Make an honest, **accurate-to-console player** | Design settled ([SUITE-DESIGN.md](SUITE-DESIGN.md)); suite stages 0–4 below |
 | 4 | Make said player play at a **higher fidelity than console** *(ultimate goal)* | After goal 3 — a genuinely second pipeline clocked at the output rate (see the Nyquist correction in the design doc) |
@@ -61,14 +61,17 @@ Remaining:
       likeliest place a latent `std::filesystem`/float-formatting issue would
       surface). Not release-blocking; needs a Mac with test archives.
 
-## v0.5.1 — MIDI-fidelity patch (scoped 2026-07-10)
+## v0.5.1 — MIDI-fidelity patch (scoped 2026-07-10, ✅ shipped 2026-07-12)
 
 A post-release opcode-by-opcode audit of the MIDI converter against the
-12,308-file corpus found the discrepancies below. All are exporter-side,
-bounded, and **touch `.mid` output only** — the standard byte-identical A/B
-should show every `.sf2`/`.wav`/`.log`/raw dump unchanged and `.mid` diffs
-confined to the affected sequences, which is itself the verification signal.
-Ranked by priority:
+12,308-file corpus found the discrepancies below. All were exporter-side,
+bounded, and touched `.mid` output only; every item shipped in v0.5.1
+(released 2026-07-12), each verified by corpus A/B and — where output
+changed — an independent SMF parse of every changed pair. The section stays
+as the item-level record; full narratives in
+[HISTORY.md](HISTORY.md#fixed-bugs). Two engine-level discoveries landed
+alongside: the note-wait default is ON (a long-standing timing bug affecting
+~112k notes) and tie mode's true semantics — both in HISTORY.
 
 - [x] **Fixed the GM percussion-channel collision** — track 9 now relocates off
       GM channel 9 to a free channel (or, when all 16 tracks are used, stays put
