@@ -62,6 +62,29 @@ House rules:
   relocated collision siblings of a 17-entry `SEQ_1` group), and changes 1 bare
   `.mid` to carry the first entry's output instead of the last's; no `.sf2`,
   `.wav`, raw-dump, stderr, or exit-code output changes)
+- **The plain-value clamp is now universal, and the two comment-only sequence
+  approximations emit a run-time notice.** `clampPlainCtrl` — a plain
+  (un-prefixed) out-of-range `Uint8` clamps to 127 with an approximation notice,
+  while unevaluated `Rnd`/`Var` stand-ins keep dropping — was applied at pan,
+  volume, master volume, expression and init pan, but not at bend range (`0xC5`),
+  portamento control (`0xC9`), modulation depth (`0xCA`) or portamento time
+  (`0xCF`), which dropped a plain out-of-range write instead. All four now clamp;
+  `0xCA` clamps once into the value it both latches into the mod shadow and
+  emits, so the `0xCC` restore path can never replay an unclamped value.
+  Separately, the `0xD8` LPF-cutoff → CC74 curve (which reads ~20% shallower than
+  hardware) and `0xE0` mod delays above 1 s (which flatten to CC78 = 127) — both
+  previously documented only in code comments — now fire the standard
+  default-visible approximation notice. (changes `.mid` only, and only from the
+  clamp: the corpus carries 228 plain portamento-time (`0xCF`) values above 127 —
+  160 in `JokerSound.bcsar`, 68 in `QueenSound.bcsar`, refuting the v0.5.1
+  triage's assumption that the remaining out-of-range drops were all `Rnd`/`Var` —
+  which previously dropped their glide-time write and now clamp to CC5 = 127,
+  changing 47 `.mid` across those two archives, every differing event a
+  newly-emitted CC5 = 127 by independent SMF parse; `0xC5`/`0xC9`/`0xCA` never
+  fire on the corpus. The two notices change no emitted value — stderr only:
+  +4,121 LPF notices across 35 archives and +2 mod-delay notices, matching the
+  documented p99 = 500 ms / max = 1,150 ms delay distribution. No `.sf2`/`.wav`/
+  raw dump differs and no file is added or removed.)
 
 ## [0.5.1] — 2026-07-12
 

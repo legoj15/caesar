@@ -1548,6 +1548,62 @@ Still-open defects are tracked under "Known bugs" in ROADMAP.md.
   this corpus simply contains a single true collision site. MSVC Release build
   warning-clean.
 
+- **Made the plain-value clamp universal and gave the two comment-only
+  approximations a run-time notice** (`Cseq.cpp`) (*2026-07-12*). Closes two open
+  "Known bugs" items. `clampPlainCtrl` (a plain, un-prefixed out-of-range `Uint8`
+  clamps to 127 with an approximation notice; unevaluated `Rnd`/`Var` stand-ins
+  keep dropping through the `emitCtrl` notice, since a range midpoint or a
+  variable index is not a real value to bake in) was wired at `0xC0`/`0xC1`/
+  `0xC2`/`0xD5`/`0xDC` but not at four other plain-`Uint8`→7-bit sites: `0xC5`
+  bend range, `0xC9` portamento control, `0xCA` modulation depth and `0xCF`
+  portamento time all dropped a plain out-of-range write instead of clamping it.
+  All four now call the helper. `0xCA` was the one with teeth: it latches its
+  value into the mod-wheel shadow (`modShadow[0]`) that the `0xCC` retarget
+  restore path later replays, so the value is now clamped **once** into a local
+  used for both the shadow latch and the CC1 emission — clamping only the emitted
+  copy would have left the `0xCC` path replaying an unclamped >127 that the writer
+  drops.
+
+  **The two silent approximations.** `0xD8` LPF cutoff → CC74 gets the direction
+  and end-points of a relative darken right, but the mapped curve reads ~20%
+  shallow (hardware steps 187.5 cents/unit against GM2's ~150); that residual was
+  recorded only in a code comment. It now fires a default-visible per-execution
+  notice — but only when an actual cut is emitted (`CC74 != 64`; a value of
+  exactly 64 is a no-op open filter). `0xE0` mod delay scales into CC78's upper
+  half saturating at 1,000 ms, so real delays above 1 s all flatten to
+  CC78 = 127; that too was comment-only and now notices on the saturating branch
+  (`ms > 1000`). Neither changes an emitted value.
+
+  **Verification (corpus A/B) — and a refuted triage assumption.** Baseline HEAD
+  `fe2d717`, 82-archive / 257,125-file corpus. Exit 1, as the fallback path
+  anticipated: **47 `.mid` changed, 0 added, 0 removed**, every one in a single
+  pair of archives — `Majora/sound/sequence/JokerSound.bcsar` (23) and
+  `Ocarina/sound/QueenSound.bcsar` (24). The 2026-07-11 triage had assumed the
+  corpus's remaining ~230 out-of-range drops were "100% `Rnd`/`Var` stand-ins";
+  they are not. All **228** are plain (un-prefixed) `0xCF` portamento-time values
+  above 127 — 160 in JokerSound, 68 in QueenSound — which previously dropped their
+  glide-time write outright and now clamp to a single new **CC5 = 127** event per
+  command (confirmed by parsing every changed pair: the sole per-file delta is an
+  added CC5 = 127, its count matching the per-archive notice tally exactly).
+  Clamping is the right call here — strictly better than the old silent drop (the
+  glide command now reaches the synth as "slowest portamento time" instead of
+  vanishing), surfaced by the "clamped to 127" notice, and exactly the
+  plain-`Uint8`→7-bit convention the other five sites already use. `0xC5`/`0xC9`/
+  `0xCA` never fired on this corpus (no CC6/CC84/CC1 added anywhere), so the value
+  change is `0xCF`-only.
+
+  **stderr classification.** 37 archives changed stderr, exhaustively accounted
+  for: (a) `+4,121` new "lpf cutoff approximated (CC74 curve reads ~20% shallow)"
+  notices across 35 archives; (b) `+2` new "mod delay saturated (CC78 caps at
+  1000 ms)" notices, both in `CTR_SOUND.bcsar` (its two corpus copies),
+  reconciling with the documented delay distribution (p99 = 500 ms, max =
+  1,150 ms — only values in (1000, 1150] ms saturate); (c) in JokerSound and
+  QueenSound the existing "control/parameter events dropped (value out of range)"
+  category is renamed to "…values clamped to 127 (above range)" with its count
+  unchanged (160 and 68). No other notice category's count moved, no existing
+  category vanished, stdout and exit codes are unchanged everywhere, and the two
+  Part-B notices change no output file. MSVC Release build warning-clean.
+
 ## Investigations
 
 ### 2026-07-11 — Dropped-parameter triage (full census + provenance)

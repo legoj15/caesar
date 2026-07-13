@@ -377,26 +377,12 @@ vibrato gating are fixed.)
   relative-to-64 while the engine args are absolute rates, so raw
   pass-through is "less wrong", not right.)
 
-- **The "plain values clamp to 127" invariant is not universal.**
-  `clampPlainCtrl` is applied at `0xC0`/`0xC1`/`0xC2`/`0xD5` but not at `0xC5`
-  (bend range), `0xC9` (portamento control), `0xCA` (modulation) or `0xCF`
-  (portamento time), which are also plain `Uint8` (0–255) written into 7-bit
-  controls — those still drop-with-notice instead of clamping. Surfaced rather
-  than silent, so it is a consistency wart, not a silent data loss. (Fix note
-  from the 2026-07-12 audit: `0xCA` latches the raw value into the mod shadow
-  before emitting, so the clamp must cover the shadow too or the `0xCC`
-  restore path replays the unclamped value.)
 - **`Rnd`/`Var` stand-ins latch persistent state at `0xC7`/`0xCE`/`0xB0`.** A
   `Var`-prefixed note-wait latches the variable *index* as the flag (silently
   re-timing the whole track); `0xCE` portamento on/off and the `0xB0` SMF
   timebase latch stand-ins the same way. `0xC8` tie and `0xCC` mod type were
   deliberately given drop-don't-latch guards for exactly this hazard; these
   three were missed. Retires with the VM; a cheap interim guard is possible.
-- **Two approximations are comment-only — no notice fires.** `0xD8` → CC74's
-  cut reads ~20% shallow (hardware 187.5 cents/unit vs GM2's ~150 — the
-  accepted residual is recorded in HISTORY but invisible at run time), and
-  `0xE0` mod delay saturates at 1,000 ms while the corpus maximum is
-  1,150 ms. Both should emit the standard approximation notice.
 - **`0xFE` track-enable mask is parsed but never enforced.** Tracks opened by
   `0x88` convert regardless of the allocation mask; if the engine gates
   OpenTrack on allocation (unverified), caesar renders tracks the console

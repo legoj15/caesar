@@ -1261,7 +1261,7 @@ bool Cseq::Convert(uint32_t startOffset)
 			{
 				smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_RPNM, 0);
 				smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_RPNL, 0);
-				emitCtrl(smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_DATAENTRYM, i->second.Args[0]), here);
+				emitCtrl(smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_DATAENTRYM, clampPlainCtrl(i->second, here)), here);
 			}
 			else if (i->second.Cmd == 0xC6)
 			{
@@ -1302,20 +1302,25 @@ bool Cseq::Convert(uint32_t startOffset)
 			}
 			else if (i->second.Cmd == 0xC9)
 			{
-				emitCtrl(smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_PORTAMENTOCTRL, i->second.Args[0]), here);
+				emitCtrl(smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_PORTAMENTOCTRL, clampPlainCtrl(i->second, here)), here);
 			}
 			else if (i->second.Cmd == 0xCA)
 			{
+				// Clamp once so the latched shadow and the emitted CC1 carry the same
+				// value: the 0xCC restore path replays modShadow[0], so an unclamped
+				// >127 there would drop on the replay even after clamping now.
+				int32_t depth = clampPlainCtrl(i->second, here);
+
 				if (i->second.Suffix1 == SuffixType::None)
 				{
-					modShadow[0] = i->second.Args[0];
+					modShadow[0] = depth;
 				}
 
 				if (trackModType == 0)
 				{
-					if (emitCtrl(smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_MODULATION, i->second.Args[0]), here))
+					if (emitCtrl(smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_MODULATION, depth), here))
 					{
-						modWire[0] = i->second.Args[0];
+						modWire[0] = depth;
 					}
 				}
 				else
@@ -1437,7 +1442,7 @@ bool Cseq::Convert(uint32_t startOffset)
 			}
 			else if (i->second.Cmd == 0xCF)
 			{
-				emitCtrl(smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_PORTAMENTOTIME, i->second.Args[0]), here);
+				emitCtrl(smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_PORTAMENTOTIME, clampPlainCtrl(i->second, here)), here);
 			}
 			else if (i->second.Cmd == 0xD0)
 			{
@@ -1530,7 +1535,17 @@ bool Cseq::Convert(uint32_t startOffset)
 				// carry. A Rnd/Var stand-in is not a cutoff, so it keeps dropping.
 				if (i->second.Suffix1 == SuffixType::None)
 				{
-					emitCtrl(smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_BRIGHTNESS, clamp(i->second.Args[0], 0, 64)), here);
+					int32_t cutoff = clamp(i->second.Args[0], 0, 64);
+
+					// Only an actual cut carries the ~20% curve error; landing on the
+					// neutral 64 is a no-op that needs no notice.
+					if (cutoff != 64)
+					{
+						Common::Warning(here, "lpf cutoff approximated (CC74 cuts ~20% shallower than hardware)",
+							"lpf cutoff approximated (CC74 curve reads ~20% shallow)");
+					}
+
+					emitCtrl(smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_BRIGHTNESS, cutoff), here);
 				}
 				else
 				{
@@ -1626,6 +1641,14 @@ bool Cseq::Convert(uint32_t startOffset)
 					// MIDI range entirely.
 					int32_t ms = max(i->second.Args[0], 0) * 5;
 					int32_t delay = 64 + min(ms * 63 / 1000, 63);
+
+					// CC78's upper half tops out at 1000 ms, but the corpus reaches
+					// 1150 ms; delays past 1 s all flatten to 127, so surface the loss.
+					if (ms > 1000)
+					{
+						Common::Warning(here, "mod delay above 1000 ms saturates CC78 (flattened to 127)",
+							"mod delay saturated (CC78 caps at 1000 ms)");
+					}
 
 					modShadow[3] = delay;
 
