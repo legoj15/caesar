@@ -87,11 +87,14 @@ jobs:
         uses: actions/checkout@v5
 
       - name: Extract this release's changelog section
-        # The first "## [" section of CHANGELOG.md is the version being
-        # released — the release convention rotates [Unreleased] to the
-        # version + date before the tag is pushed. GitHub appends the
-        # auto-generated notes after this body.
-        run: awk '/^## \[/{n++} n==1' CHANGELOG.md > release-body.md
+        # The first VERSION section ("## [<digit>...") of CHANGELOG.md is the
+        # release being cut — the convention rotates [Unreleased] to the
+        # version + date (and starts a fresh empty [Unreleased] above it)
+        # before the tag is pushed. Matching the digit skips that empty
+        # [Unreleased] header, which the old "first ## [ section" form would
+        # have published as an empty body. GitHub appends the auto-generated
+        # notes after this body.
+        run: awk '/^## \[[0-9]/{n++} n==1' CHANGELOG.md > release-body.md
 
       - name: Download all build artifacts
         uses: actions/download-artifact@v8

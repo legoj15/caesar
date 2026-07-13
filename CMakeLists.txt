@@ -7,7 +7,7 @@
 cmake_minimum_required(VERSION 3.21)
 
 project(caesar
-    VERSION 0.5.0
+    VERSION 0.5.1
     DESCRIPTION "Extracts Nintendo 3DS BCSAR sound archives into SoundFont and MIDI files"
     HOMEPAGE_URL "https://github.com/legoj15/caesar"
     LANGUAGES C CXX)

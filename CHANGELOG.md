@@ -22,6 +22,8 @@ House rules:
 
 ## [Unreleased]
 
+## [0.5.1] — 2026-07-12
+
 ### Added
 
 - **Tie mode (`0xC8`) is now converted** — tied notes previously re-attacked
@@ -89,9 +91,9 @@ House rules:
   silent). Notably: the extended (`0xF0`) command space — 353k `setvar`, 210k
   comparison ops corpus-wide — warned through a dead code path that could never
   fire (the parser never recorded the extended opcode) and is now surfaced;
-  `Rnd`/`Var`-valued arguments (which convert as the range minimum / the
-  variable *index*) and `[If]`-prefixed non-jump commands (which execute
-  unconditionally) get per-execution notices; `span`, `priority`, and
+  `Rnd`/`Var`-valued arguments (which convert as a deterministic stand-in —
+  the range midpoint / the variable *index*) and `[If]`-prefixed non-jump
+  commands (which execute unconditionally) get per-execution notices; `span`, `priority`, and
   `front bypass` are demoted to benign "no MIDI equivalent" notices (span is
   the console's front/rear surround axis — real on hardware under Surround
   mode, but MIDI has no surround axis in any mode); `0xDE` FX-send-C and any
@@ -301,5 +303,6 @@ The first maintained release, continuing
 - The vendored `libsmfc`'s MIT notice restored, and all third-party licenses
   documented and bundled into the release zips — binaries are distributable.
 
-[Unreleased]: https://github.com/legoj15/caesar/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/legoj15/caesar/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/legoj15/caesar/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/legoj15/caesar/releases/tag/v0.5.0
