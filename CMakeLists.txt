@@ -102,6 +102,14 @@ add_library(caesar_core STATIC
 # below, and later the suite front-ends).
 target_compile_features(caesar_core PUBLIC cxx_std_17)
 
+# The library's own include surface: consumers include the class headers by their
+# bare name ("Csar.hpp", ...). Until now the src/ dir reached consumers only as a
+# side effect of libsmfc's PUBLIC include (an accident of the vendored dep); make
+# it an explicit, intentional part of caesar_core's API instead. Output-identical
+# for caesar itself: src/ is already on its include path via that same libsmfc
+# route, so the resolved header paths (and object bytes) do not move.
+target_include_directories(caesar_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
+
 # sf2cute and libsmfc are PUBLIC dependencies: the core's own translation units
 # (Cbnk/Cseq) include their headers, and anything linking caesar_core needs both
 # their object code and headers. Linking them PUBLIC also re-exports libsmfc's
@@ -142,4 +150,23 @@ if(MSVC)
     target_compile_options(caesar PRIVATE /W3 /WX)
 else()
     target_compile_options(caesar PRIVATE -Wall -Wextra -Werror)
+endif()
+
+# ---------------------------------------------------------------------------
+# caesar-roundtrip — a DEVELOPMENT tool, NOT part of any release. caesar_core's
+# first external consumer (the reason the explicit PUBLIC src include above now
+# exists). It scaffolds the stage-1 byte-identical round-trip verifier and runs
+# the two one-time corpus scans (VarLen canonicality, FILE-section gaps). It
+# never links into the shipped `caesar` exe, and the release workflow packages
+# only `caesar`, so this binary is built by CI but never shipped. Its source
+# lives under src/ so the ab-verify stale-exe guard sees changes to it.
+# ---------------------------------------------------------------------------
+add_executable(caesar-roundtrip src/roundtrip/main.cpp)
+target_link_libraries(caesar-roundtrip PRIVATE caesar_core)
+
+# Same warnings-as-errors bar as the rest of the first-party code.
+if(MSVC)
+    target_compile_options(caesar-roundtrip PRIVATE /W3 /WX)
+else()
+    target_compile_options(caesar-roundtrip PRIVATE -Wall -Wextra -Werror)
 endif()

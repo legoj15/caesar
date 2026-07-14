@@ -176,6 +176,18 @@ per stage. Status:
       re-embed. VarLen canonicality is the one open risk (corpus scan first).
       Full blueprint in
       [HISTORY.md](HISTORY.md#suite-stage-1--the-round-trip-serializer-blueprint-2026-07-14-survey).
+    - [x] **Commit 0 — scans + harness scaffold (2026-07-14).** The
+      `caesar-roundtrip` dev exe (+ `tools/roundtrip-verify` wrapper, the
+      `caesar_core PUBLIC src` include) landed, `caesar` output-identical.
+      **VarLen verdict: canonical-only** (3,268,437 VarLen args over 20,791
+      sequences, 0 non-canonical) so commit 1 emits canonical, no `CseqCmd`
+      raw-length field. **Gap verdict: all gap bytes zero, reproduce-by-rule
+      viable** (top-level FILE inter-blob 11,050 gaps, section pads, and CGRP
+      inter-file 509 gaps all zero corpus-wide) — but the FILE section nests:
+      4,747 CBNK/CSEQ/CWAR live inside CGRP container blobs yet also appear as
+      their own FILE entries, so commit 4 must re-point a nested entry into the
+      copied container, never double-copy it. Write-up in
+      [HISTORY.md](HISTORY.md#suite-stage-1-commit-0--scans--round-trip-harness-scaffold-2026-07-14).
 - [ ] **Stage 2 — dry player**: native-rate voices, console interpolation,
       solved envelopes, priority voice stealing (RE'd and confirmed), tempo
       clock, single final upsample.

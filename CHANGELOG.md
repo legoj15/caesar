@@ -24,6 +24,22 @@ House rules:
 
 ### Added
 
+- **`caesar-roundtrip` — a development tool (not shipped) that scaffolds the
+  stage-1 byte-identical round-trip verifier and carries the two one-time corpus
+  scans that gate the serializer commits.** It is `caesar_core`'s first external
+  consumer, which is why `caesar_core` now carries an explicit
+  `target_include_directories(... PUBLIC src)` instead of borrowing the header
+  path from libsmfc. `--verify` parses an archive read-only, enumerates every
+  embedded child plus the container, copies each source span out, and (once a
+  `Serialize()` lands) compares a re-serialisation against that copy; with no
+  serializers yet it reports every format SKIPPED and exits 2 ("nothing
+  verifiable"), so the harness can never print a false pass. `--scan-varlen` and
+  `--scan-gaps` produced the commit-0 gate verdicts. A `tools/roundtrip-verify`
+  corpus fan-out wrapper (ab-verify-grade guards + a self-test) drives it.
+  (`output-identical` for the shipped `caesar` — new dev binary only; public CI
+  builds it but the release zip does not package it; 82-archive / 257,125-file
+  corpus A/B byte-identical with identical stdout/stderr, exit 0; 18-surface
+  diagnostics goldens byte-identical.)
 - **The convert-time variable VM — sequence variables, comparisons, and `[If]`
   conditions now execute during conversion.** The extended command space that
   previously dropped with notices (353k `setvar`-family ops, 210k comparisons

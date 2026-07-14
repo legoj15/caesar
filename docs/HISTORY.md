@@ -3338,3 +3338,110 @@ corrupt-only edge (out-of-range 0x220C raw words) is noted, not blocking.
 2 — Cbnk retained-model split (full stage-0 gate, output-identical);
 3 — BCBNK Serialize; 4 — BCSAR container Serialize (**the stage-1 proof
 criterion**); 5 — optional deep-re-embed capstone.
+
+## Suite stage 1 commit 0 — scans + round-trip harness scaffold (2026-07-14)
+
+The blueprint's commit 0: the two decision-gate corpus scans, the round-trip
+verifier scaffold, and the `caesar_core PUBLIC src` include the stage-0 handoff
+scheduled. The shipped `caesar` is untouched (output-identical on every surface);
+everything here is a new dev binary + a new `tools/` wrapper + docs.
+
+**The new target.** `caesar-roundtrip` (`src/roundtrip/main.cpp`) is `caesar_core`'s
+first external consumer — which is why `caesar_core` now carries an explicit
+`target_include_directories(caesar_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")`
+instead of leaning on libsmfc's PUBLIC include side effect. That change is provably
+output-neutral: `src/` is already on caesar's include path via that same libsmfc
+route, so CMake dedupes the directory and Ninja re-links **only** `caesar-roundtrip`
+on reconfigure — `caesar_core`/`caesar` objects are not even recompiled (their
+compile commands are byte-identical), and the corpus A/B confirms the exe bytes'
+output is unchanged. The source lives under `src/` so the ab-verify / diag-goldens
+stale-exe guards see edits to it; the CMake target is separate, links `caesar_core`
+PRIVATE under the same `/W3 /WX`, and the release workflow packages only `caesar`
+(`cp "$BIN"`), so the new exe is built by CI but never shipped and cannot break the
+zip. `.github/workflows/build.yml` and `release.yml` both run generic
+`cmake --build … --config Release` (all targets, located purely by path), so
+nothing there needed editing.
+
+**The exe.** Read-only: it calls `Csar::Parse()` (no I/O, no directories, no
+child construction), never `Extract`/`Export`, and keeps the archive in memory.
+Three modes:
+
+- `--verify` (default, the scaffold) enumerates every embedded child — BCSEQ /
+  BCBNK (the deep targets), BCWAR / BCWAV / BCWSD / BCGRP (opaque), plus the BCSAR
+  container — recursing into embedded groups and **de-duplicating by archive
+  offset** (a grouped archive lists a file both as a top-level FILE entry and
+  through its container's file table; both resolve to one offset). For each it
+  **copies the source span out** and compares a re-serialisation against that copy,
+  never the live buffer — so the future buffer-drop honesty guard is structural. A
+  format with no `Serialize()` reports SKIPPED. Exit contract mirrors ab-verify:
+  `0` all-match, `1` mismatch, `2` harness error. With zero serializers today every
+  format is SKIPPED and the run exits `2` ("nothing verifiable") — the harness can
+  never print a false pass before the serializers land. Whole-corpus scaffold run:
+  82 archives, **44,825 children walked** (BCSEQ 20,791 · BCBNK 11,136 · BCWAR
+  10,564 · BCWSD 1,157 · BCGRP 1,095 · BCSAR 82), all SKIPPED, every archive exit
+  `2`. The `tools/roundtrip-verify/roundtrip-verify.ps1` fan-out (ab-verify-grade:
+  Stop-harness funnel, `trap`, AST shadowed-helper guard, stale-exe guard,
+  zero-children guard, `-SelfTest`) aggregates to exit `2` — never a false pass.
+- `--scan-varlen` / `--scan-gaps` carry the two gate scans (below).
+
+**Scan 1 — VarLen canonicality (the commit-1 gate).** `ReadVarLen` accepts padded
+encodings but the model stores only the decoded value, in exactly three Arg1 slots
+(note gate time for status `< 0x80`, the `0x80` wait, the `0x81` program) — and only
+when no `Rnd`/`Var` prefix retyped Arg1, so `cmd.Arg1 == VarLen` marks them uniquely
+(verified against `Cseq::Parse` — VarLen is assigned nowhere else). Method: for each
+such command, replay its own prefix + status (+ velocity for a note) byte layout to
+reach the VarLen slot, decode it, and compare the measured byte count to the
+canonical (minimum) length; a non-canonical encoding is equivalently a leading `0x80`
+continuation byte, and the scan asserts both definitions agree. Every decode is
+**self-checked** against `Args.back()` (the stored value), which throws on any replay
+drift — that invariant held for all 3.27M args, proving the replay correct.
+**Verdict: canonical-only.** 82 archives, 20,791 sequences, **3,268,437** VarLen
+args, **0 non-canonical**, 0 harness errors. → **Commit 1 emits canonical VarLen
+with no model change** (no raw-length field on `CseqCmd`).
+
+**Scan 2 — FILE-section gaps (the commit-4 gate).** Sites: CSAR inter-blob, CSAR
+section boundaries (FILE-section leading + trailing pad), CGRP inter-file. The scan
+first surfaced a structural fact that the naive "flat array of non-overlapping
+blobs" model got wrong: **the CSAR FILE section nests.** In grouped archives
+(GardenSound, and the ctr_dash class) a CGRP container blob physically holds its
+CBNK/CSEQ/CWAR, and each contained file **also** appears as its own top-level FILE
+entry whose data offset points *inside* the container — so "gap between consecutive
+FILE entries" is meaningless (entries nest, and a naive scan reports huge overlaps
+and non-zero "gaps" that are really other files' magic bytes). The corrected model
+splits blobs into the **maximal (top-level)** set — a blob whose end does not exceed
+the running max-end of everything sorted before it is contained in an earlier
+(≥ start, ≥ end) blob — and measures gaps only between top-level blobs (extents from
+the INFO-declared allocation length). CGRP file offsets are group-relative and were
+lifted to archive-relative; ctr_dash's FILE-section length runs past its own end
+(external content), so the trailing bound is clamped to the physical archive. A
+standalone Python reimplementation of the corrected model cross-checked the C++
+number-for-number.
+
+**Gap verdict: every gap byte is zero — reproduce-by-rule is viable at all three
+sites.** 82 archives: CSAR top-level inter-blob **11,050 gaps, 0 non-zero, 0
+partial-overlap anomalies**; CSAR section pads (78–80 lead/trail) **0 non-zero**;
+CGRP inter-file **509 gaps, 0 non-zero, 0 overlaps, 0 nesting**. **The load-bearing
+caveat for commit 4:** **4,747** CBNK/CSEQ/CWAR are nested inside CGRP container
+blobs (across the 11 grouped archives). The BCSAR serializer must recognise a FILE
+entry whose data lies inside another (container) blob and **re-point** it into the
+copied container span rather than copy it independently — copying both would
+duplicate the data and desync every downstream offset. Blueprint default was opaque
+gap-spans; the proven all-zero result **upgrades all three sites to reproduce-by-rule
+(align + zero-fill)**, with the container-nesting handling as the real new work.
+
+**Gate (all green).** Warning-clean MSVC Release build (`caesar-roundtrip` under
+`/W3 /WX`). Corpus A/B vs `HEAD` (`fd76cc3`): **82 archives / 257,125 files
+byte-identical, stdout/stderr identical, exit 0** (baseline 77 s, new 61 s).
+Diagnostics goldens **18/18 byte-identical** (exit 0). `roundtrip-verify -SelfTest`
+green (exit-2-when-nothing-verifiable, missing-archive → harness error, verdict maps
+0/1/2 and vacuous→2 exactly); the corpus fan-out aggregates to exit 2.
+
+**For commits 1 and 4.** Commit 1 (BCSEQ Serialize): go — emit canonical VarLen, no
+`CseqCmd` change; the harness will flip BCSEQ from SKIPPED to a per-`.bcseq` sha
+proof (20,791 sequences). Commit 4 (BCSAR container Serialize): the three
+padding/section-gap sites are reproduce-by-rule (align + zero-fill), but it must
+carry the container-nesting model — a nested FILE entry is re-pointed into the copied
+container, never re-copied. When a serializer lands, extend `roundtrip-verify
+-SelfTest` with the byte-flip proof (mutate one source byte of a verified child,
+require exactly one mismatch), the one contract the self-test cannot exercise until
+there is something to verify.
