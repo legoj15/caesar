@@ -328,7 +328,11 @@ bool Csar::Extract(const string& outputDir)
 			// Csar::Data in ~Csar, so borrowing (ownsData = false) is safe.
 			Cwars[id] = new Cwar(warcFile, pos, cwarLength, false, Ctx);
 
-			if (!Cwars[id]->Extract())
+			// Parse the model, then write the sub-files and recurse into the child
+			// Cwavs: two phases split out of the former one-pass Extract, invoked
+			// back to back per file so the .bcwav dumps, the stdout echoes, and
+			// every parse-phase diagnostic stay byte-identical.
+			if (!Cwars[id]->Parse() || !Cwars[id]->Export())
 			{
 				return false;
 			}

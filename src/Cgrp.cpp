@@ -212,7 +212,10 @@ bool Cgrp::Extract()
 				// private copy (ownsData = true), not borrow.
 				(*Cwars)[files[i].Id] = new Cwar(warcFile, pos, cwarLength, true, Ctx);
 
-				if (!(*Cwars)[files[i].Id]->Extract())
+				// Parse the model, then write the sub-files and recurse into the
+				// child Cwavs, back to back per file (see the Csar call site) so
+				// the .bcwav dumps, stdout echoes, and diagnostics stay identical.
+				if (!(*Cwars)[files[i].Id]->Parse() || !(*Cwars)[files[i].Id]->Export())
 				{
 					return false;
 				}

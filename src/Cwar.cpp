@@ -57,7 +57,7 @@ Cwar::~Cwar()
 	}
 }
 
-bool Cwar::Extract()
+bool Cwar::Parse()
 {
 	uint8_t* pos = Data;
 
@@ -65,7 +65,7 @@ bool Cwar::Extract()
 	if (!Ctx.Assert(pos, 0xFEFF, Ctx.ReadFixLen(pos, 2))) { return false; }
 	if (!Ctx.Assert(pos, 0x40, Ctx.ReadFixLen(pos, 2))) { return false; }
 
-	[[maybe_unused]] uint32_t cwarVersion = Ctx.ReadFixLen(pos, 4);
+	Version = Ctx.ReadFixLen(pos, 4);
 
 	if (!Ctx.Assert<uint64_t>(pos, Length, Ctx.ReadFixLen(pos, 4))) { return false; }
 	if (!Ctx.Assert(pos, 0x2, Ctx.ReadFixLen(pos, 4))) { return false; }
@@ -76,8 +76,8 @@ bool Cwar::Extract()
 
 	if (!Ctx.Assert(pos, 0x6801, Ctx.ReadFixLen(pos, 4))) { return false; }
 
-	uint32_t fileOffset = Ctx.ReadFixLen(pos, 4);
-	uint32_t fileLength = Ctx.ReadFixLen(pos, 4);
+	FileSpanOffset = Ctx.ReadFixLen(pos, 4);
+	FileSpanLength = Ctx.ReadFixLen(pos, 4);
 
 	pos = Data + infoOffset;
 
@@ -86,43 +86,49 @@ bool Cwar::Extract()
 
 	uint32_t cwavCount = Ctx.ReadFixLen(pos, 4);
 
-	vector<CwarCwav> cwavs;
-
 	for (uint32_t i = 0; i < cwavCount; ++i)
 	{
 		if (!Ctx.Assert(pos, 0x1F00, Ctx.ReadFixLen(pos, 4))) { return false; }
 
+		// Offsets are span-relative (against Data); Export resolves Data + Offset.
 		CwarCwav cwav{};
-		cwav.Offset = Data + fileOffset + 8 + Ctx.ReadFixLen(pos, 4);
+		cwav.Offset = FileSpanOffset + 8 + Ctx.ReadFixLen(pos, 4);
 		cwav.Length = Ctx.ReadFixLen(pos, 4);
 
-		cwavs.push_back(cwav);
+		CwavRecords.push_back(cwav);
 	}
 
-	pos = Data + fileOffset;
+	pos = Data + FileSpanOffset;
 
 	if (!Ctx.Assert(pos, 0x46494C45, Ctx.ReadFixLen(pos, 4, false))) { return false; }
-	if (!Ctx.Assert<uint32_t>(pos, fileLength, Ctx.ReadFixLen(pos, 4))) { return false; }
+	if (!Ctx.Assert<uint32_t>(pos, FileSpanLength, Ctx.ReadFixLen(pos, 4))) { return false; }
 
+	return true;
+}
+
+bool Cwar::Export()
+{
 	// Write each sub-file into this wave-archive's own directory (the folder its
 	// dump was written into), composed from the full path rather than relying on
 	// the working directory.
 	filesystem::path dir = filesystem::path(FileName).parent_path();
 
-	for (uint32_t i = 0; i < cwavCount; ++i)
+	for (uint32_t i = 0; i < CwavRecords.size(); ++i)
 	{
-		Ctx.CheckBounds(cwavs[i].Offset, cwavs[i].Length);
+		uint8_t* cwavOffset = Data + CwavRecords[i].Offset;
+
+		Ctx.CheckBounds(cwavOffset, CwavRecords[i].Length);
 
 		string cwavFile = (dir / (to_string(i) + ".bcwav")).string();
 		ofstream ofs(cwavFile, ofstream::binary);
-		ofs.write(reinterpret_cast<const char*>(cwavs[i].Offset), cwavs[i].Length);
+		ofs.write(reinterpret_cast<const char*>(cwavOffset), CwavRecords[i].Length);
 		ofs.close();
 
 		// The .bcwav was just written from [Offset, Offset + Length) into this
 		// wave archive's own buffer; hand that span to the child instead of
 		// re-reading the file. This Cwav lives in Cwavs, freed before Data in
 		// ~Cwar, so the borrow is safe.
-		Cwavs.push_back(new Cwav(cwavFile, cwavs[i].Offset, cwavs[i].Length, Ctx));
+		Cwavs.push_back(new Cwav(cwavFile, cwavOffset, CwavRecords[i].Length, Ctx));
 
 		// Parse (INFO walk + PCM decode into the model), then export the .wav from
 		// that model: two phases split out of the former one-pass Convert, invoked
