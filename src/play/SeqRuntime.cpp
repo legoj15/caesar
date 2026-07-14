@@ -61,6 +61,10 @@ namespace play
 			float portaFromSemis = 0.0f;
 			uint32_t portaDurSamples = 0;
 			int tieRegion = -1;
+
+			// C10: the track's CURRENT bank (0xB6) at note-on -- the voice resolves its
+			// instrument against this bank, so a mid-sequence switch re-points it.
+			uint32_t bankIndex = 0;
 		};
 
 		// A 48-slot variable file with the converter's scoping: 0-31 are shared
@@ -120,6 +124,15 @@ namespace play
 			int portaTime = 0;        // 0xCF
 			int lastNoteKey = -1;     // previous note's key (default glide origin)
 
+			// C10 track features. bankIndex (0xB6) re-points the instrument lookup to
+			// another CbnkRecords bank mid-sequence; velRange (0xB3) scales note-on
+			// velocities (127 = identity); muted (0xDD) suppresses this track's notes
+			// (time still advances). Damper (0xDF) and the LPF (0xD8) live as curves on
+			// the timeline (they affect a sounding voice per frame / at note-off).
+			uint32_t bankIndex = 0;
+			int velRange = 127;
+			bool muted = false;
+
 			bool cmpFlag = true;
 			int16_t vars[16] = { 0 };        // slots 32-47 (track-local)
 			bool varWritten[16] = { false };
@@ -140,6 +153,8 @@ namespace play
 
 			double tempoBpm = kDefaultTempoBpm;
 			uint32_t timebase = kDefaultTimebase;
+
+			uint32_t defaultBankIndex = 0;   // the sequence's bound bank (0xB6 default)
 
 			ParamCurve masterVolume;   // 0xC2, sequence-wide, live (C7)
 
@@ -360,6 +375,31 @@ namespace play
 			t.tieRegion = -1;
 		}
 
+		// C10 damper (0xDF): if the track's damper is down (>= 64) at the note-off,
+		// defer the release until it lifts. Returns the effective gate (note-on to the
+		// deferred note-off). A damper that never engaged returns the original gate.
+		uint32_t damperGate(const ParamCurve& damper, uint32_t start, uint32_t gate, uint32_t cap)
+		{
+			uint32_t off = start + gate;
+
+			if (damper.valueAt(off) < 64.0f)
+			{
+				return gate;   // pedal up at note-off: normal release
+			}
+
+			// Held: the first later step where the damper drops below the threshold.
+			for (const ParamCurve::Seg& seg : damper.segs)
+			{
+				if (seg.start > off && seg.to < 64.0f)
+				{
+					uint32_t end = (seg.start < cap) ? seg.start : cap;
+					return (end > start) ? (end - start) : gate;
+				}
+			}
+
+			return (cap > start) ? (cap - start) : gate;   // never lifts: hold to the cap
+		}
+
 		// The portamento glide duration for a 0xCF time value, in samples. The exact
 		// CTR portaTime -> duration mapping is not byte-confirmed in the disasm (the
 		// doc records no portamento address), so this uses the NW4R precedent that the
@@ -493,6 +533,7 @@ namespace play
 			TrackState& t = rt.tracks[idx];
 			t = TrackState{};
 			t.timeline.reset();   // fresh SeqTrack::InitParam defaults (assignment above cleared it)
+			t.bankIndex = rt.defaultBankIndex;   // inherit the sequence's bank until 0xB6
 			t.active = true;
 			t.cursor = it;
 			t.waitTicks = 0;
@@ -562,9 +603,16 @@ namespace play
 						len = 0;
 					}
 
-					int velocity = cmd.Args.empty() ? 0 : cmd.Args[0];
+					int rawVel = cmd.Args.empty() ? 0 : cmd.Args[0];
 
-					if (velocity > 0 && velocity <= 127)
+					// C10 velocity range (0xB3): scale the note-on velocity (127 =
+					// identity). The note is still gated on the RAW velocity, so a
+					// velocity-0 note stays a silent-but-timed note as before.
+					int velocity = clamp<int>(rawVel * t.velRange / 127, 0, 127);
+
+					// C10 mute (0xDD): a muted track produces no notes; time still
+					// advances below.
+					if (!t.muted && rawVel > 0 && rawVel <= 127)
 					{
 						double spt = samplesPerTick(rt);
 						uint64_t gate = static_cast<uint64_t>(static_cast<double>(len) * spt + 0.5);
@@ -613,6 +661,7 @@ namespace play
 							ev.priority = clamp<int>(64 + t.trackPriority, 0, 255);
 							ev.track = track;
 							ev.mono = t.mono;
+							ev.bankIndex = t.bankIndex;   // C10: resolve against the current bank
 
 							// C8 sweep (0xE3): a pending signed pitch offset gliding to 0
 							// over this note's gate.
@@ -1089,6 +1138,67 @@ namespace play
 					continue;
 				}
 
+				// C10 track features. Bank switch (0xB6): re-point the track's instrument
+				// lookup to another CbnkRecords bank; captured per note at note-on.
+				if (c == 0xB6)
+				{
+					bool drop = false;
+					int32_t v = cmd.Args.empty() ? 0 : resolveArg(rt, track, cmd, 0, drop);
+
+					if (!drop && v >= 0)
+					{
+						t.bankIndex = static_cast<uint32_t>(v);
+
+						if (rt.stats) { ++rt.stats->bankSwitches; }
+					}
+
+					++t.cursor;
+					continue;
+				}
+
+				// Velocity range (0xB3): scale note-on velocities (127 = identity).
+				if (c == 0xB3)
+				{
+					bool drop = false;
+					int32_t v = cmd.Args.empty() ? 0 : resolveArg(rt, track, cmd, 0, drop);
+
+					if (!drop)
+					{
+						t.velRange = clamp<int32_t>(v, 0, 127);
+					}
+
+					++t.cursor;
+					continue;
+				}
+
+				// Track mute (0xDD): nonzero suppresses this track's notes; time still
+				// advances (so the rest of the sequence stays in sync).
+				if (c == 0xDD)
+				{
+					bool drop = false;
+					int32_t v = cmd.Args.empty() ? 0 : resolveArg(rt, track, cmd, 0, drop);
+
+					if (!drop)
+					{
+						t.muted = (v != 0);
+					}
+
+					++t.cursor;
+					continue;
+				}
+
+				// LPF cutoff (0xD8) + damper (0xDF): live curves. The LPF cuts a sounding
+				// voice per frame; the damper defers a note's release while it is down.
+				if (c == 0xD8) { setParam(rt, track, cmd, currentSample, t.timeline.lpfCutoff, 0, 127); ++t.cursor; continue; }
+				if (c == 0xDF) { setParam(rt, track, cmd, currentSample, t.timeline.damper,    0, 127); ++t.cursor; continue; }
+
+				// Biquad type / value (0xB4 / 0xB5): a general voice biquad. The disasm
+				// doc records no filter topology, so these fold into the same LPF path
+				// (0xB5 as an added cut) and are FLAGGED -- the exact type mapping is a
+				// console-capture item. Tracked so they are audible, not dropped.
+				if (c == 0xB5) { setParam(rt, track, cmd, currentSample, t.timeline.lpfCutoff, 0, 127); ++t.cursor; continue; }
+				if (c == 0xB4) { ++t.cursor; continue; }   // biquad type select (flagged; no distinct topology modelled)
+
 				// Native volume / pan / pitch (C7), as LIVE curves. A `_t` suffix glides
 				// the parameter from its current value to the target over the trailing
 				// duration (ticks -> samples at the current tempo); a plain command is an
@@ -1289,7 +1399,7 @@ namespace play
 		}
 	}
 
-	bool renderSequence(const LoadedArchive& arch, StereoBus& bus, uint32_t maxSeconds, RenderStats& stats)
+	bool renderSequence(LoadedArchive& arch, StereoBus& bus, uint32_t maxSeconds, RenderStats& stats)
 	{
 		if (!arch.seq)
 		{
@@ -1298,6 +1408,7 @@ namespace play
 
 		Runtime rt(arch.seq->Commands);
 		rt.stats = &stats;
+		rt.defaultBankIndex = arch.bankIndex;   // C10: the bank 0xB6 switches away from
 
 		// Start the conductor track at the entry's start offset (fall back to the
 		// top if it is not a command boundary, as Cseq::Export does).
@@ -1318,6 +1429,7 @@ namespace play
 
 		rt.tracks[0].active = true;
 		rt.tracks[0].cursor = start;
+		rt.tracks[0].bankIndex = arch.bankIndex;
 
 		const uint32_t maxSamples = maxSeconds * kNativeRate;
 
@@ -1366,7 +1478,11 @@ namespace play
 		{
 			VoiceSpec v;
 
-			if (!resolveVoice(arch, ev.program, ev.key, ev.velocity, v))
+			// C10: resolve against the track's CURRENT bank (a 0xB6 switch may have
+			// re-pointed it), built + cached on demand.
+			Cbnk* bank = getBank(arch, ev.bankIndex);
+
+			if (!bank || !resolveVoice(*bank, ev.program, ev.key, ev.velocity, v))
 			{
 				++stats.notesDropped;
 				continue;
@@ -1385,11 +1501,15 @@ namespace play
 			// loop). The VoiceSpec keeps only the note's static base (velocity x zone
 			// volume, note pan, key/root/tune step).
 
+			// C10 damper: defer the note-off while the pedal is held.
+			uint32_t gate = damperGate(rt.tracks[ev.track].timeline.damper,
+				ev.startSample, ev.gateSamples, renderCap);
+
 			PoolVoice p;
 			p.v = v;
 			p.start = ev.startSample;
-			p.gate = ev.gateSamples;
-			p.naturalEnd = voiceEndSample(v, ev.startSample, ev.gateSamples, renderCap);
+			p.gate = gate;
+			p.naturalEnd = voiceEndSample(v, ev.startSample, gate, renderCap);
 			p.priority = ev.priority;
 			p.track = ev.track;
 			p.mono = ev.mono;

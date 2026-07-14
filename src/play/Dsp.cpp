@@ -31,6 +31,44 @@ namespace play
 		constexpr float kLfoRateHz = 5.0f / 64.0f;     // Hz per rate unit (anchored, flagged)
 		constexpr float kLfoMaxCents = 1200.0f;        // defensive clamp on depth x range
 
+		// --- The voice low-pass filter (C10, 0xD8 / 0xB4 / 0xB5) ------------------
+		//
+		// The disasm doc records NO filter topology, so this is a standard RBJ
+		// low-pass BIQUAD (Butterworth Q, FLAGGED). The 0xD8 cutoff byte follows the
+		// converter's model: 64 = fully open (no filtering), below it the cutoff drops
+		// 187.5 cents/unit, and the engine clamps the cutoff scale to [0,1] of Nyquist.
+		// Returns false (no filtering) at/above the open point.
+		struct Biquad { double b0, b1, b2, a1, a2; };
+
+		bool lpfBiquad(float cutoffByte, Biquad& q)
+		{
+			if (cutoffByte >= 64.0f)
+			{
+				return false;   // open: pass-through
+			}
+
+			float c = cutoffByte < 0.0f ? 0.0f : cutoffByte;
+
+			// 187.5 cents per unit below the open point; the result is a fraction of
+			// Nyquist, clamped to (0, 1].
+			double octaves = (c - 64.0) * 187.5 / 1200.0;
+			double frac = pow(2.0, octaves);      // c=63 -> ~0.90, c=0 -> ~1/1024
+			frac = frac < 1e-4 ? 1e-4 : (frac > 0.999 ? 0.999 : frac);
+
+			double w0 = kPi * frac;                // = 2*pi*(frac*Nyquist)/rate
+			double cw = cos(w0), sw = sin(w0);
+			double alpha = sw / (2.0 * 0.70710678);   // Q = 1/sqrt(2)
+
+			double a0 = 1.0 + alpha;
+			q.b0 = (1.0 - cw) / 2.0 / a0;
+			q.b1 = (1.0 - cw) / a0;
+			q.b2 = q.b0;
+			q.a1 = (-2.0 * cw) / a0;
+			q.a2 = (1.0 - alpha) / a0;
+
+			return true;
+		}
+
 		// Read one source sample (normalised to [-1, 1)), honouring the loop for a
 		// looped voice and returning silence past the end of a one-shot. idx is a
 		// signed index so the interpolator's i0-1 / i0+1 neighbours are safe at the
@@ -364,15 +402,8 @@ namespace play
 		return gainFromValue(value);
 	}
 
-	bool resolveVoice(const LoadedArchive& arch, uint32_t program, int key, int velocity, VoiceSpec& out)
+	bool resolveVoice(const Cbnk& bank, uint32_t program, int key, int velocity, VoiceSpec& out)
 	{
-		if (!arch.bank)
-		{
-			return false;
-		}
-
-		const Cbnk& bank = *arch.bank;
-
 		if (program >= bank.Insts.size() || !bank.Insts[program].Exists)
 		{
 			return false;
@@ -584,6 +615,14 @@ namespace play
 		float mgR = v.gainR;
 		double effStep = v.step;
 
+		// C10 voice LPF (0xD8/B4/B5): an RBJ biquad, coefficients recomputed per frame
+		// from the live cutoff, per-channel state carried across the note. Inactive
+		// (pass-through) while the cutoff is at/above the open point.
+		Biquad bq{};
+		bool filtOn = false;
+		double lx1 = 0, lx2 = 0, ly1 = 0, ly2 = 0;
+		double rx1 = 0, rx2 = 0, ry1 = 0, ry2 = 0;
+
 		double pos = 0.0;
 		float gCur = env.gain();
 		float gStep = 0.0f;
@@ -667,6 +706,12 @@ namespace play
 					mgR = v.gainR * volAmp * static_cast<float>(sin(angle));
 
 					effStep = (semis != 0.0) ? v.step * pow(2.0, semis / 12.0) : v.step;
+
+					// The voice LPF cutoff (0xD8/B4/B5), recomputed for this frame.
+					if (mod->track)
+					{
+						filtOn = lpfBiquad(mod->track->lpfCutoff.valueAt(absPos), bq);
+					}
 				}
 			}
 
@@ -689,6 +734,14 @@ namespace play
 
 			float sL = interp(*v.chan0, pos, v);
 			float sR = interp(*v.chan1, pos, v);
+
+			if (filtOn)
+			{
+				double yl = bq.b0 * sL + bq.b1 * lx1 + bq.b2 * lx2 - bq.a1 * ly1 - bq.a2 * ly2;
+				lx2 = lx1; lx1 = sL; ly2 = ly1; ly1 = yl; sL = static_cast<float>(yl);
+				double yr = bq.b0 * sR + bq.b1 * rx1 + bq.b2 * rx2 - bq.a1 * ry1 - bq.a2 * ry2;
+				rx2 = rx1; rx1 = sR; ry2 = ry1; ry1 = yr; sR = static_cast<float>(yr);
+			}
 
 			size_t idx = static_cast<size_t>(startSample) + s;
 			bus.l[idx] += sL * mgL * gCur;
@@ -817,7 +870,7 @@ namespace play
 				int key = static_cast<int>(n.RootKey);
 				VoiceSpec v;
 
-				if (resolveVoice(arch, static_cast<uint32_t>(p), key, 100, v))
+				if (resolveVoice(bank, static_cast<uint32_t>(p), key, 100, v))
 				{
 					// A 1 s gate: the NW4R envelope now shapes attack/hold/decay/
 					// sustain over the note and its release tail past the gate (bus

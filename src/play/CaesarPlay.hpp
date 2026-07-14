@@ -50,6 +50,14 @@ namespace play
 		std::unique_ptr<Csar> csar;
 		std::unique_ptr<Cbnk> bank;  // the chosen sequence's bank; null until resolveSequence
 		std::unique_ptr<Cseq> seq;   // the chosen sequence; null until resolveSequence
+		uint32_t bankIndex = 0;      // the sequence's default bank (index into CbnkRecords)
+
+		// C10: additional banks a 0xB6 mid-sequence switch selects, built on demand and
+		// cached by CbnkRecords index (null = not built / not in-archive). Declared
+		// after `seq` so it destructs BEFORE ~Csar frees the wave archives these banks
+		// resolve against (the same ordered-teardown rule the members above follow).
+		std::vector<std::unique_ptr<Cbnk>> switchBanks;
+
 		uint32_t startOffset = 0;    // the chosen entry's start offset
 
 		LoadedArchive();
@@ -74,6 +82,13 @@ namespace play
 	// The bank's samples resolve live against the already-decoded Csar::Cwars, so
 	// no disk round-trip happens. Returns false on failure (message to stderr).
 	bool resolveSequence(LoadedArchive& arch, const SequenceInfo& info);
+
+	// Return the parsed bank at CbnkRecords index `bankIndex`, building + caching it
+	// on demand -- a 0xB6 mid-sequence bank switch's target (C10). The sequence's own
+	// default bank is returned directly; others are constructed against the already-
+	// decoded Cwars, exactly like resolveSequence's bank. Null if the index is out of
+	// range or the bank has no in-archive data (an external bank).
+	Cbnk* getBank(LoadedArchive& arch, uint32_t bankIndex);
 
 	// --- The voice DSP + native mix bus (C2) --------------------------------
 
@@ -208,6 +223,10 @@ namespace play
 		// The voice biquad low-pass cutoff (C10). 0xD8, 0..127; 64 = open (no cut).
 		ParamCurve lpfCutoff;   // 0xD8
 
+		// The damper pedal (C10). 0xDF; >= 64 = down, which suppresses a note's release
+		// until it lifts (a sounding voice's note-off is deferred).
+		ParamCurve damper;      // 0xDF (0..127)
+
 		void reset()
 		{
 			volume.reset(127.0f);
@@ -223,6 +242,7 @@ namespace play
 			lfoDelayMs.reset(0.0f);
 			lfoTarget.reset(0.0f);
 			lpfCutoff.reset(64.0f);
+			damper.reset(0.0f);
 		}
 	};
 
@@ -313,8 +333,10 @@ namespace play
 	// the instrument's key-split zone containing `key`, take its root key / volume
 	// / tune, then resolve the live Cwav through the positional Cwars index.
 	// Returns false for a note with no matching instrument, zone, or sample
-	// (a dropped note), leaving `out` untouched.
-	bool resolveVoice(const LoadedArchive& arch, uint32_t program, int key, int velocity, VoiceSpec& out);
+	// (a dropped note), leaving `out` untouched. `bank` is the track's CURRENT bank
+	// (the sequence default, or a 0xB6-switched one), so a mid-sequence bank change
+	// re-points the instrument lookup (C10).
+	bool resolveVoice(const Cbnk& bank, uint32_t program, int key, int velocity, VoiceSpec& out);
 
 	// Render one voice into the native-rate bus: loop-aware, linearly-interpolated
 	// sample fetch, shaped by the NW4R EnvGenerator (attack/hold/decay/sustain, then
@@ -389,6 +411,10 @@ namespace play
 		// tremolo / auto-pan track shows a positive count.
 		uint32_t lfoCommands = 0;
 
+		// C10: mid-sequence bank switches executed (0xB6). A SoundData1 bank-switcher
+		// shows many; the notes that were dropped without them now resolve.
+		uint32_t bankSwitches = 0;
+
 		// Opcodes the walk safe-skipped (never desyncing time): plain command byte,
 		// or 0x100 | ext for an extended (0xF0-prefixed) op. For the handoff report.
 		std::vector<uint32_t> skippedOps;
@@ -440,5 +466,6 @@ namespace play
 	// producing note events that drive voices through resolveVoice/renderVoice.
 	// `maxSeconds` caps a forever-looping sequence. Returns false only on a hard
 	// setup error; an empty/instant sequence still returns true with 0 notes.
-	bool renderSequence(const LoadedArchive& arch, StereoBus& bus, uint32_t maxSeconds, RenderStats& stats);
+	// Non-const: a 0xB6 bank switch lazily builds + caches its target bank (C10).
+	bool renderSequence(LoadedArchive& arch, StereoBus& bus, uint32_t maxSeconds, RenderStats& stats);
 }

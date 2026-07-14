@@ -205,6 +205,12 @@ $Invocations = @(
     # modulation (controlled proof: rate linear in the commanded value at 5/64 Hz per
     # unit, peak deviation = depth x range cents; targets 0/1/2 route pitch/vol/pan).
     @{ Name = 'vibrato-zelda';  Mode = '--render'; Source = 'sounddata1'; Seq = 'SEQ_M_ZELDA1';            Rate = 48000; MaxSeconds = 20;  ExpectExit = 0 }
+
+    # C10 — the mid-sequence bank-switch witness. SEQ_M_BLACKBOARD1 fires 5 0xB6
+    # switches across 9 tracks and, with the switches honoured, resolves all 122
+    # notes (0 dropped) against the correct target banks -- where without them notes
+    # drop (SEQ_M_ZUKAN_TEST_NG1: 12/12 dropped -> 0 once the switch loads its bank).
+    @{ Name = 'bank-blackboard'; Mode = '--render'; Source = 'sounddata1'; Seq = 'SEQ_M_BLACKBOARD1';       Rate = 48000; MaxSeconds = 20;  ExpectExit = 0 }
 )
 
 # ---------------------------------------------------------------------------

@@ -231,6 +231,8 @@ namespace play
 			}
 
 			arch.startOffset = info.startOffset;
+			arch.bankIndex = info.bankIndex;
+			arch.switchBanks.resize(csar.CbnkRecords.size());
 		}
 		catch (const exception& e)
 		{
@@ -239,5 +241,61 @@ namespace play
 		}
 
 		return true;
+	}
+
+	Cbnk* getBank(LoadedArchive& arch, uint32_t bankIndex)
+	{
+		// The sequence's own default bank is already built (resolveSequence).
+		if (bankIndex == arch.bankIndex)
+		{
+			return arch.bank.get();
+		}
+
+		Csar& csar = *arch.csar;
+
+		if (bankIndex >= csar.CbnkRecords.size())
+		{
+			return nullptr;
+		}
+
+		if (bankIndex >= arch.switchBanks.size())
+		{
+			arch.switchBanks.resize(csar.CbnkRecords.size());
+		}
+
+		// Already built (or already found to have no in-archive data -> stays null).
+		if (arch.switchBanks[bankIndex])
+		{
+			return arch.switchBanks[bankIndex].get();
+		}
+
+		try
+		{
+			CoutSilencer hush;
+
+			const CsarCbnk& bankRec = csar.CbnkRecords[bankIndex];
+			uint8_t* bankData = nullptr;
+			uint32_t bankLen = 0;
+
+			if (!locateChild(csar, bankRec.Id, bankData, bankLen))
+			{
+				return nullptr;   // external bank: no in-archive data
+			}
+
+			auto bank = make_unique<Cbnk>(bankRec.FileName + ".bcbnk", bankData, bankLen, &csar.Cwars, csar.Opts, *arch.ctx);
+
+			if (!bank->Parse())
+			{
+				return nullptr;
+			}
+
+			arch.switchBanks[bankIndex] = std::move(bank);
+
+			return arch.switchBanks[bankIndex].get();
+		}
+		catch (const exception&)
+		{
+			return nullptr;   // a malformed switch target must not abort the render
+		}
 	}
 }

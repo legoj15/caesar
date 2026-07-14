@@ -192,6 +192,11 @@ namespace
 			cout << "  lfo: " << stats.lfoCommands << " command(s) (depth/rate/target/range/delay)\n";
 		}
 
+		if (stats.bankSwitches > 0)
+		{
+			cout << "  bank: " << stats.bankSwitches << " mid-sequence switch(es) (0xB6)\n";
+		}
+
 		if (stats.loopDetected)
 		{
 			cout << "  whole-song loop detected: body rendered once (a track's backward jump ended it)\n";
