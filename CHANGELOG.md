@@ -136,6 +136,10 @@ House rules:
 
 ### Fixed
 
+- **macOS build fixed (again)** — the Cbnk model/exporter split introduced
+  three more unqualified `move(...)` calls, rejected by Apple Clang under
+  `-Werror` (`-Wunqualified-std-cast-call`); qualified as `std::move`.
+  Windows/Linux builds were unaffected. (output-identical — build only)
 - **Multi-input runs no longer bleed the analysis `.log` across archives** — in
   `caesar a.bcsar b.bcsar` the single process reused one parser context, whose
   `Log` was cleared only on the exception path, so `b`'s `.log` was `a`'s

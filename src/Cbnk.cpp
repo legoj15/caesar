@@ -556,12 +556,12 @@ bool Cbnk::Convert()
 
 		if (chanCount == 1)
 		{
-			leftSamples[cwavs[i].Id] = sf2.NewSample(to_string(cwavs[i].Id), move(leftPcm), loopStart, loopEnd, sampleRate, cwavs[i].Key, 0);
+			leftSamples[cwavs[i].Id] = sf2.NewSample(to_string(cwavs[i].Id), std::move(leftPcm), loopStart, loopEnd, sampleRate, cwavs[i].Key, 0);
 		}
 		else
 		{
-			leftSamples[cwavs[i].Id] = sf2.NewSample(to_string(cwavs[i].Id) + "l", move(leftPcm), loopStart, loopEnd, sampleRate, cwavs[i].Key, 0);
-			rightSamples[cwavs[i].Id] = sf2.NewSample(to_string(cwavs[i].Id) + "r", move(rightPcm), loopStart, loopEnd, sampleRate, cwavs[i].Key, 0);
+			leftSamples[cwavs[i].Id] = sf2.NewSample(to_string(cwavs[i].Id) + "l", std::move(leftPcm), loopStart, loopEnd, sampleRate, cwavs[i].Key, 0);
+			rightSamples[cwavs[i].Id] = sf2.NewSample(to_string(cwavs[i].Id) + "r", std::move(rightPcm), loopStart, loopEnd, sampleRate, cwavs[i].Key, 0);
 
 			leftSamples[cwavs[i].Id]->set_link(rightSamples[cwavs[i].Id]);
 			rightSamples[cwavs[i].Id]->set_link(leftSamples[cwavs[i].Id]);
