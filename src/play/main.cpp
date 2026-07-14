@@ -173,7 +173,11 @@ namespace
 			<< "  notes: " << stats.notesFired << " fired, " << stats.notesDropped << " dropped"
 			<< "; tracks: " << stats.tracksOpened
 			<< "; tempo " << stats.tempoBpm << " BPM, timebase " << stats.timebase
-			<< "; " << stats.tickLength << " ticks\n";
+			<< "; " << stats.tickLength << " ticks\n"
+			<< "  voices: peak " << stats.maxConcurrent << "/24"
+			<< "; " << stats.notesRefused << " refused (pool full)"
+			<< ", " << stats.voicesStolen << " stolen (" << stats.voicesStolenHeld << " still held)"
+			<< ", " << stats.monoRetriggers << " mono re-triggers\n";
 
 		if (stats.loopDetected)
 		{

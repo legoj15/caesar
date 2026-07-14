@@ -173,10 +173,53 @@ namespace play
 		bool loopDetected = false;    // a whole-song loop-back ended a track (rendered once)
 		bool cappedByMaxSeconds = false;
 
+		// The 24-voice priority pool (C5). notesRefused: allocation refused because
+		// the pool was full of higher-priority voices (the note silently did not
+		// sound). voicesStolen: a sounding voice cut short because a higher-priority
+		// note stole its slot. monoRetriggers: a mono track's previous voice released
+		// early for a new note. maxConcurrent: peak simultaneous voices (<= 24).
+		uint32_t notesRefused = 0;
+		uint32_t voicesStolen = 0;      // total voices force-stopped by a steal
+		uint32_t voicesStolenHeld = 0;  // of those, ones still held (audibly cut)
+		uint32_t monoRetriggers = 0;
+		uint32_t maxConcurrent = 0;
+
 		// Opcodes the walk safe-skipped (never desyncing time): plain command byte,
 		// or 0x100 | ext for an extended (0xF0-prefixed) op. For the handoff report.
 		std::vector<uint32_t> skippedOps;
 	};
+
+	// --- The 24-voice priority pool (C5) ------------------------------------
+
+	// One note competing for the 24-voice pool. `naturalEnd` is voiceEndSample for
+	// the (start, gate) note; the allocator fills `stopAt` (a steal / mono re-trigger
+	// force-stop, else UINT32_MAX = natural) and `sounds` (false = the pool refused
+	// it). Priority is playerPriority(64) + the track's 0xC6 value. Public so the
+	// allocator is independently unit-testable (the C5 stress + refuse proofs).
+	struct PoolVoice
+	{
+		VoiceSpec v;
+		uint32_t start = 0;
+		uint32_t gate = 0;
+		uint32_t naturalEnd = 0;
+		uint32_t stopAt = UINT32_MAX;
+		int priority = 64;
+		int track = 0;
+		bool mono = false;
+		bool sounds = true;
+
+		uint32_t effectiveEnd() const { return (stopAt < naturalEnd) ? stopAt : naturalEnd; }
+	};
+
+	// Run the single 24-voice priority pool over `voices` (which MUST be in
+	// non-decreasing `start` order, as the sequencer emits them), filling each
+	// voice's `stopAt`/`sounds` and the pool RenderStats. The steal policy is
+	// verbatim from docs/NW4C-disasm-handoff.md session 3: reuse a free voice; else
+	// take the FRONT of the priority-sorted active list (lowest current priority,
+	// released voices dropped to priority 1); REFUSE if the front outranks the
+	// requester; else evict the front. `capSample` bounds a mono re-trigger's
+	// recomputed release tail. Deterministic.
+	void allocateVoicePool(std::vector<PoolVoice>& voices, uint32_t capSample, RenderStats& stats);
 
 	// Render a resolved sequence (arch.seq bound to arch.bank) to the native-rate
 	// bus. Runs the concurrent per-tick VM (notes/rests/program/tempo/timebase/

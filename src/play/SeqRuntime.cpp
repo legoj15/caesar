@@ -38,6 +38,13 @@ namespace play
 			int key;
 			int velocity;
 			int envOverride[5] = { -1, -1, -1, -1, -1 };
+
+			// The 24-voice pool inputs (C5), captured at note-on. priority is
+			// playerPriority(64) + the track's 0xC6 priority; the track index and mono
+			// flag drive mono re-trigger. Released voices drop to priority 1 in the sim.
+			int priority = 64;
+			int track = 0;
+			bool mono = false;
 		};
 
 		// A 48-slot variable file with the converter's scoping: 0-31 are shared
@@ -59,6 +66,13 @@ namespace play
 			// note's own byte). Order: attack, hold, decay, sustain, release. The
 			// converter drops these (no MIDI equivalent); the player honours them.
 			int envOverride[5] = { -1, -1, -1, -1, -1 };
+
+			// Voice-allocation state (C5). trackPriority: the track's 0xC6 priority
+			// (added to the player's 64). mono: 0xB2 monophonic flag (a new note
+			// re-triggers the track's single voice). Both drop the converter on the
+			// floor; the player uses them.
+			int trackPriority = 0;
+			bool mono = false;
 
 			bool cmpFlag = true;
 			int16_t vars[16] = { 0 };        // slots 32-47 (track-local)
@@ -399,6 +413,11 @@ namespace play
 							ev.envOverride[e] = t.envOverride[e];
 						}
 
+						// The 24-voice pool inputs, latched at note-on.
+						ev.priority = clamp<int>(64 + t.trackPriority, 0, 255);
+						ev.track = track;
+						ev.mono = t.mono;
+
 						rt.events.push_back(ev);
 
 						if (rt.stats)
@@ -671,6 +690,41 @@ namespace play
 					continue;
 				}
 
+				// Voice-steal priority (C5): the track's priority, added to the
+				// player's 64 at note-on. The converter drops this; the player's pool
+				// uses it to decide which voices to steal.
+				if (c == 0xC6)
+				{
+					bool drop = false;
+					int32_t val = cmd.Args.empty() ? 0 : resolveArg(rt, track, cmd, 0, drop);
+
+					if (!drop)
+					{
+						t.trackPriority = clamp<int32_t>(val, 0, 255);
+					}
+
+					++t.cursor;
+					continue;
+				}
+
+				// Mono/poly (C5): a per-track voice-allocation flag MIDI cannot carry
+				// (the converter demotes it to a notice). Nonzero = mono: a new note on
+				// the track re-triggers its single voice (the previous note releases at
+				// the new note-on). Toggling does not touch already-sounding voices.
+				if (c == 0xB2)
+				{
+					bool drop = false;
+					int32_t val = cmd.Args.empty() ? 0 : resolveArg(rt, track, cmd, 0, drop);
+
+					if (!drop)
+					{
+						t.mono = (val != 0);
+					}
+
+					++t.cursor;
+					continue;
+				}
+
 				// Everything else is a parameter/effect command that does NOT bear
 				// time (volume, pan, pitch bend, LFO, fx sends, ...). Safe-skip it so
 				// the cursor never desyncs; native rendering of these is C6+.
@@ -697,6 +751,163 @@ namespace play
 				{
 					processTrack(rt, t, currentSample, maxSamples);
 				}
+			}
+		}
+	}
+
+	void allocateVoicePool(vector<PoolVoice>& voices, uint32_t capSample, RenderStats& stats)
+	{
+		// A single pool of 24 voices (byte-confirmed three ways in the disasm). A slot
+		// holds an index into `voices` (-1 = free). Released voices (note-off passed)
+		// drop to the release priority so they are stolen before any held note.
+		constexpr int kVoicePool = 24;
+		constexpr int kReleasePriority = 1;
+
+		int slots[kVoicePool];
+
+		for (int s = 0; s < kVoicePool; ++s)
+		{
+			slots[s] = -1;
+		}
+
+		// The current priority of a slot's voice at time t: a voice whose note-off has
+		// passed is releasing, and drops to the release priority.
+		auto slotPriority = [&](int vi, uint32_t t) -> int
+		{
+			const PoolVoice& p = voices[static_cast<size_t>(vi)];
+
+			if (p.start + p.gate <= t)
+			{
+				return kReleasePriority;
+			}
+
+			return p.priority;
+		};
+
+		for (size_t i = 0; i < voices.size(); ++i)
+		{
+			PoolVoice& cur = voices[i];
+			uint32_t t = cur.start;
+
+			// 1. Reclaim voices that fell silent at or before this note-on.
+			for (int s = 0; s < kVoicePool; ++s)
+			{
+				if (slots[s] >= 0 && voices[static_cast<size_t>(slots[s])].effectiveEnd() <= t)
+				{
+					slots[s] = -1;
+				}
+			}
+
+			// 2. Mono: the track's previous voice releases at this note-on. Shorten its
+			// gate to end here so it drops into release, then reclaim its slot if that
+			// release finishes by now.
+			if (cur.mono)
+			{
+				for (int s = 0; s < kVoicePool; ++s)
+				{
+					if (slots[s] < 0)
+					{
+						continue;
+					}
+
+					PoolVoice& prev = voices[static_cast<size_t>(slots[s])];
+
+					if (prev.track == cur.track && prev.stopAt == UINT32_MAX)
+					{
+						uint32_t newGate = (t > prev.start) ? (t - prev.start) : 0;
+
+						if (newGate < prev.gate)
+						{
+							prev.gate = newGate;
+							prev.naturalEnd = voiceEndSample(prev.v, prev.start, newGate, capSample);
+							++stats.monoRetriggers;
+
+							if (prev.effectiveEnd() <= t)
+							{
+								slots[s] = -1;
+							}
+						}
+					}
+				}
+			}
+
+			// 3. Find a free slot.
+			int chosen = -1;
+
+			for (int s = 0; s < kVoicePool; ++s)
+			{
+				if (slots[s] < 0)
+				{
+					chosen = s;
+					break;
+				}
+			}
+
+			// 4. Pool full: find the front (lowest current priority; among a tie, the
+			// oldest = lowest allocation index, since events are start-ordered -- this
+			// is the deterministic FIFO-within-priority tie-break, flagged for Net-B).
+			if (chosen < 0)
+			{
+				int frontSlot = -1;
+				int frontPrio = 0;
+				int frontIdx = 0;
+
+				for (int s = 0; s < kVoicePool; ++s)
+				{
+					int vi = slots[s];
+					int prio = slotPriority(vi, t);
+
+					if (frontSlot < 0 || prio < frontPrio || (prio == frontPrio && vi < frontIdx))
+					{
+						frontSlot = s;
+						frontPrio = prio;
+						frontIdx = vi;
+					}
+				}
+
+				// Refuse if the front outranks the requester (the NW4R bgt -> NULL guard,
+				// verbatim): the note silently does not sound.
+				if (frontPrio > cur.priority)
+				{
+					cur.sounds = false;
+					++stats.notesRefused;
+					continue;
+				}
+
+				// Steal the front: force-stop it here and take its slot. Every steal
+				// truncates a render -- a still-held note is cut audibly, a releasing
+				// one loses (largely inaudible) tail. Count both; the report notes how
+				// many were still held.
+				PoolVoice& victim = voices[static_cast<size_t>(slots[frontSlot])];
+
+				++stats.voicesStolen;
+
+				if (victim.start + victim.gate > t)
+				{
+					++stats.voicesStolenHeld;
+				}
+
+				victim.stopAt = t;
+				slots[frontSlot] = -1;
+				chosen = frontSlot;
+			}
+
+			slots[chosen] = static_cast<int>(i);
+
+			// Peak concurrency (occupied slots after this allocation).
+			uint32_t occupied = 0;
+
+			for (int s = 0; s < kVoicePool; ++s)
+			{
+				if (slots[s] >= 0)
+				{
+					++occupied;
+				}
+			}
+
+			if (occupied > stats.maxConcurrent)
+			{
+				stats.maxConcurrent = occupied;
 			}
 		}
 	}
@@ -764,11 +975,15 @@ namespace play
 			stats.cappedByMaxSeconds = true;
 		}
 
-		// Phase B: render each note event's voice into the bus, in event order
-		// (deterministic accumulation). A note with no resolvable voice is dropped.
-		// A hard cap bounds each voice's envelope release tail (a release byte 0 is a
-		// ~19-minute tail) so the bus cannot grow unbounded past the render window.
+		// Phase B: resolve each note to a voice, run the 24-voice priority pool over
+		// the note-ons in time order (they are pushed in non-decreasing startSample),
+		// then render the surviving voices. A hard cap bounds each voice's envelope
+		// release tail (a release byte 0 is a ~19-minute tail) so the bus cannot grow
+		// unbounded past the render window.
 		const uint32_t renderCap = maxSamples + 2u * kNativeRate;
+
+		vector<PoolVoice> voices;
+		voices.reserve(rt.events.size());
 
 		for (const NoteEvent& ev : rt.events)
 		{
@@ -788,7 +1003,29 @@ namespace play
 			if (ev.envOverride[3] >= 0) v.envSustain = static_cast<uint8_t>(ev.envOverride[3]);
 			if (ev.envOverride[4] >= 0) v.envRelease = static_cast<uint8_t>(ev.envOverride[4]);
 
-			renderVoice(bus, v, ev.startSample, ev.gateSamples, renderCap);
+			PoolVoice p;
+			p.v = v;
+			p.start = ev.startSample;
+			p.gate = ev.gateSamples;
+			p.naturalEnd = voiceEndSample(v, ev.startSample, ev.gateSamples, renderCap);
+			p.priority = ev.priority;
+			p.track = ev.track;
+			p.mono = ev.mono;
+
+			voices.push_back(p);
+		}
+
+		allocateVoicePool(voices, renderCap, stats);
+
+		// Render the surviving voices in event order (deterministic accumulation).
+		for (const PoolVoice& p : voices)
+		{
+			if (!p.sounds)
+			{
+				continue;
+			}
+
+			renderVoice(bus, p.v, p.start, p.gate, (p.stopAt < renderCap) ? p.stopAt : renderCap);
 		}
 
 		// Stats.
