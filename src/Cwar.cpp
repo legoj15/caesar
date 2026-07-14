@@ -9,15 +9,15 @@
 
 using namespace std;
 
-Cwar::Cwar(const char* fileName) : FileName(fileName)
+Cwar::Cwar(const char* fileName, ParseContext& ctx) : Ctx(ctx), FileName(fileName)
 {
 	ifstream ifs(FileName, ios::binary | ios::ate);
 
 	Length = ifs.tellg();
-	Common::RequireOpen(ifs.good(), Length, FileName);
+	Ctx.RequireOpen(ifs.good(), Length, FileName);
 	Data = new uint8_t[Length];
 
-	Common::Push(filesystem::path(FileName).filename().string(), Data, Length);
+	Ctx.Push(filesystem::path(FileName).filename().string(), Data, Length);
 
 	ifs.seekg(0, ios::beg);
 	ifs.read(reinterpret_cast<char*>(Data), Length);
@@ -31,7 +31,7 @@ Cwar::~Cwar()
 		delete cwav;
 	}
 
-	Common::Pop();
+	Ctx.Pop();
 
 	delete[] Data;
 }
@@ -40,48 +40,48 @@ bool Cwar::Extract()
 {
 	uint8_t* pos = Data;
 
-	if (!Common::Assert(pos, 0x43574152, ReadFixLen(pos, 4, false))) { return false; }
-	if (!Common::Assert(pos, 0xFEFF, ReadFixLen(pos, 2))) { return false; }
-	if (!Common::Assert(pos, 0x40, ReadFixLen(pos, 2))) { return false; }
+	if (!Ctx.Assert(pos, 0x43574152, Ctx.ReadFixLen(pos, 4, false))) { return false; }
+	if (!Ctx.Assert(pos, 0xFEFF, Ctx.ReadFixLen(pos, 2))) { return false; }
+	if (!Ctx.Assert(pos, 0x40, Ctx.ReadFixLen(pos, 2))) { return false; }
 
-	[[maybe_unused]] uint32_t cwarVersion = ReadFixLen(pos, 4);
+	[[maybe_unused]] uint32_t cwarVersion = Ctx.ReadFixLen(pos, 4);
 
-	if (!Common::Assert<uint64_t>(pos, Length, ReadFixLen(pos, 4))) { return false; }
-	if (!Common::Assert(pos, 0x2, ReadFixLen(pos, 4))) { return false; }
-	if (!Common::Assert(pos, 0x6800, ReadFixLen(pos, 4))) { return false; }
+	if (!Ctx.Assert<uint64_t>(pos, Length, Ctx.ReadFixLen(pos, 4))) { return false; }
+	if (!Ctx.Assert(pos, 0x2, Ctx.ReadFixLen(pos, 4))) { return false; }
+	if (!Ctx.Assert(pos, 0x6800, Ctx.ReadFixLen(pos, 4))) { return false; }
 
-	uint32_t infoOffset = ReadFixLen(pos, 4);
-	uint32_t infoLength = ReadFixLen(pos, 4);
+	uint32_t infoOffset = Ctx.ReadFixLen(pos, 4);
+	uint32_t infoLength = Ctx.ReadFixLen(pos, 4);
 
-	if (!Common::Assert(pos, 0x6801, ReadFixLen(pos, 4))) { return false; }
+	if (!Ctx.Assert(pos, 0x6801, Ctx.ReadFixLen(pos, 4))) { return false; }
 
-	uint32_t fileOffset = ReadFixLen(pos, 4);
-	uint32_t fileLength = ReadFixLen(pos, 4);
+	uint32_t fileOffset = Ctx.ReadFixLen(pos, 4);
+	uint32_t fileLength = Ctx.ReadFixLen(pos, 4);
 
 	pos = Data + infoOffset;
 
-	if (!Common::Assert(pos, 0x494E464F, ReadFixLen(pos, 4, false))) { return false; }
-	if (!Common::Assert<uint32_t>(pos, infoLength, ReadFixLen(pos, 4))) { return false; }
+	if (!Ctx.Assert(pos, 0x494E464F, Ctx.ReadFixLen(pos, 4, false))) { return false; }
+	if (!Ctx.Assert<uint32_t>(pos, infoLength, Ctx.ReadFixLen(pos, 4))) { return false; }
 
-	uint32_t cwavCount = ReadFixLen(pos, 4);
+	uint32_t cwavCount = Ctx.ReadFixLen(pos, 4);
 
 	vector<CwarCwav> cwavs;
 
 	for (uint32_t i = 0; i < cwavCount; ++i)
 	{
-		if (!Common::Assert(pos, 0x1F00, ReadFixLen(pos, 4))) { return false; }
+		if (!Ctx.Assert(pos, 0x1F00, Ctx.ReadFixLen(pos, 4))) { return false; }
 
 		CwarCwav cwav{};
-		cwav.Offset = Data + fileOffset + 8 + ReadFixLen(pos, 4);
-		cwav.Length = ReadFixLen(pos, 4);
+		cwav.Offset = Data + fileOffset + 8 + Ctx.ReadFixLen(pos, 4);
+		cwav.Length = Ctx.ReadFixLen(pos, 4);
 
 		cwavs.push_back(cwav);
 	}
 
 	pos = Data + fileOffset;
 
-	if (!Common::Assert(pos, 0x46494C45, ReadFixLen(pos, 4, false))) { return false; }
-	if (!Common::Assert<uint32_t>(pos, fileLength, ReadFixLen(pos, 4))) { return false; }
+	if (!Ctx.Assert(pos, 0x46494C45, Ctx.ReadFixLen(pos, 4, false))) { return false; }
+	if (!Ctx.Assert<uint32_t>(pos, fileLength, Ctx.ReadFixLen(pos, 4))) { return false; }
 
 	// Write each sub-file into this wave-archive's own directory (the folder its
 	// dump was written into), composed from the full path rather than relying on
@@ -90,14 +90,14 @@ bool Cwar::Extract()
 
 	for (uint32_t i = 0; i < cwavCount; ++i)
 	{
-		Common::CheckBounds(cwavs[i].Offset, cwavs[i].Length);
+		Ctx.CheckBounds(cwavs[i].Offset, cwavs[i].Length);
 
 		string cwavFile = (dir / (to_string(i) + ".bcwav")).string();
 		ofstream ofs(cwavFile, ofstream::binary);
 		ofs.write(reinterpret_cast<const char*>(cwavs[i].Offset), cwavs[i].Length);
 		ofs.close();
 
-		Cwavs.push_back(new Cwav(cwavFile.c_str()));
+		Cwavs.push_back(new Cwav(cwavFile.c_str(), Ctx));
 
 		if (!Cwavs[i]->Convert())
 		{

@@ -8,6 +8,8 @@
 #include <map>
 #include <string>
 
+struct ParseContext;
+
 struct CsarStrg
 {
 	uint8_t* Offset;
@@ -49,6 +51,8 @@ struct CsarCgrp
 
 struct Csar
 {
+	ParseContext& Ctx;
+
 	std::string FileName;
 	std::streamoff Length;
 	uint8_t* Data = nullptr;
@@ -56,7 +60,7 @@ struct Csar
 	std::map<int, Cwar*> Cwars;
 	Options Opts;
 
-	Csar(const char* fileName, const Options& opts);
+	Csar(const char* fileName, const Options& opts, ParseContext& ctx);
 	~Csar();
 
 	// outputDir is the base directory to extract into. When empty (the default),

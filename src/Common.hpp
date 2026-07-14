@@ -25,11 +25,11 @@ std::string TypedName(const std::string& name, const std::string& type);
 // the helpers that read and diagnose against it: the file-name and base-offset
 // stacks that diagnostics are positioned against, the loaded buffer extents
 // CheckBounds validates against, the analysis Log, the per-input
-// dropped/approximated Notices tally, and the -w flag. Today one
-// process-lifetime instance backs all of it (the `Common::` statics below are
-// references into it, and its methods forward here), so behaviour is unchanged;
-// holding the state and its helpers on an object is the stage-0 fold toward
-// passing it by reference, which will unlock reentrancy and per-input scoping.
+// dropped/approximated Notices tally, and the -w flag. One instance is created
+// in main and passed by reference (Csar -> Cgrp -> Cbnk/Cwar/Cwav/Cseq, mirroring
+// the Options injection), which is what makes the readers reentrant. Its lifetime
+// today still spans the whole run, so cross-input behaviour is unchanged;
+// per-input scoping is a later, deliberate, output-changing step.
 struct ParseContext
 {
 	bool ShowWarnings = false;
@@ -85,50 +85,4 @@ struct ParseContext
 
 	int32_t ReadFixLen(uint8_t*& pos, size_t bytes, bool littleEndian = true, bool isSigned = false);
 	int32_t ReadVarLen(uint8_t*& pos);
-};
-
-// The one process-lifetime parse context (defined in Common.cpp). The `Common`
-// facade and the free read functions below forward to it.
-extern ParseContext gParseContext;
-
-// Free-function reads, kept during the fold so the ~280 call sites compile
-// unchanged; they forward to gParseContext. Retired in favour of the
-// ParseContext methods once every reader threads a context.
-int32_t ReadFixLen(uint8_t*& pos, size_t bytes, bool littleEndian = true, bool isSigned = false);
-int32_t ReadVarLen(uint8_t*& pos);
-
-// Transitional facade: every `Common::X` name resolves to the one gParseContext
-// instance (data members are references into it; methods forward to it), so
-// existing call sites are byte-identical. Threaded away class-by-class.
-struct Common
-{
-	static bool& ShowWarnings;
-	static std::stack<std::string>& FileNames;
-	static std::stack<uint8_t*>& Offsets;
-	static std::vector<Range>& Buffers;
-	static std::vector<std::string>& Log;
-	static std::map<std::string, size_t>& Notices;
-
-	template<typename T>
-	static bool Assert(uint8_t* pos, T expected, T found)
-	{
-		return gParseContext.Assert(pos, expected, found);
-	}
-
-	template<typename T>
-	static void Error(uint8_t* pos, std::string expected, T found)
-	{
-		gParseContext.Error(pos, expected, found);
-	}
-
-	static void Warning(uint8_t* pos, std::string msg, const std::string& noticeCategory = "");
-	static void FlushNotices(const std::string& inputName);
-	static void Push(std::string fileName, uint8_t* data, std::streamoff length);
-	static void Pop();
-	static void Reset();
-	static void RequireOpen(bool streamOk, std::streamoff length, const std::string& fileName);
-	static std::string TypedName(const std::string& name, const std::string& type);
-	static void CheckBounds(uint8_t* pos, size_t bytes);
-	static void Analyse(std::string tag, uint32_t val);
-	static void Dump(std::string fileName);
 };

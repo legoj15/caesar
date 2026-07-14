@@ -168,9 +168,14 @@ per stage. Status:
       goldens shipped 2026-07-13 (`tools/diag-goldens/`, 17 diagnostic
       surfaces pinned, self-test green; write-up in
       [HISTORY.md](HISTORY.md#suite-stage-0--session-2-the-diagnostics-goldens-harness-2026-07-13)).
-      **Next up: the `ParseContext` fold** — recapture the goldens from the
-      pre-fold build, then run `tools/diag-goldens/diag-goldens.ps1` after each
-      rebuild (byte-identical guard for the ~600-site diff).
+      The `ParseContext` fold shipped 2026-07-13: the six `Common::` globals
+      and their helpers are now a `ParseContext` threaded by reference through
+      every reader (`Common` struct deleted); output-identical, guarded by the
+      goldens + the full A/B (write-up in HISTORY). The context still spans the
+      whole run. **Next up: per-input context scoping** — the deliberate,
+      output-changing commit that fixes the multi-input `.log` bleed and the
+      group-path `-w` position nondeterminism (now a localized change), then the
+      per-file parser/exporter split, then the `caesar_core` library split.
 - [ ] **Stage 1 — byte-identical round-trip** of BCSEQ/BCBNK/BCSAR from a
       raw-backed model (**the next milestone** — the cheapest complete proof
       the format is understood, and the serializer everything else sits on).

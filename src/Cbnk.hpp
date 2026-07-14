@@ -9,6 +9,8 @@
 #include <map>
 #include <vector>
 
+struct ParseContext;
+
 struct CbnkCwav
 {
 	uint32_t Cwar;
@@ -69,6 +71,8 @@ struct CbnkInst
 
 struct Cbnk
 {
+	ParseContext& Ctx;
+
 	std::string FileName;
 	std::streamoff Length;
 	uint8_t* Data = nullptr;
@@ -76,7 +80,7 @@ struct Cbnk
 	std::map<int, Cwar*>* Cwars;
 	Options Opts;
 
-	Cbnk(const char* fileName, std::map<int, Cwar*>* cwars, const Options& opts);
+	Cbnk(const char* fileName, std::map<int, Cwar*>* cwars, const Options& opts, ParseContext& ctx);
 	~Cbnk();
 	bool Convert();
 };

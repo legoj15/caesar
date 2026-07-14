@@ -6,6 +6,8 @@
 #include <utility>
 #include <vector>
 
+struct ParseContext;
+
 enum class SuffixType { None, Rnd, Var, Time, TimeRnd, TimeVar, If };
 enum class ArgType { None, Uint8, Int8, Uint16, Int16, Rnd, Var, VarLen };
 
@@ -14,7 +16,7 @@ enum class ArgType { None, Uint8, Int8, Uint16, Int16, Rnd, Var, VarLen };
 // non-null) so the model keeps them losslessly; the returned vector then carries
 // the first bound as the slot's inert placeholder value -- never read as a value,
 // since the exporter's midpoint stand-in is computed at emit (see Cseq::Convert).
-std::vector<int32_t> ReadArgs(uint8_t*& pos, ArgType argType,
+std::vector<int32_t> ReadArgs(ParseContext& Ctx, uint8_t*& pos, ArgType argType,
 	std::pair<int32_t, int32_t>* rndBounds = nullptr);
 
 struct CseqCmd
@@ -53,11 +55,13 @@ struct CseqLabl
 
 struct Cseq
 {
+	ParseContext& Ctx;
+
 	std::string FileName;
 	std::streamoff Length;
 	uint8_t* Data = nullptr;
 
-	Cseq(const char* fileName);
+	Cseq(const char* fileName, ParseContext& ctx);
 	~Cseq();
 
 	// startOffset is the entry's start position within the sequence data,

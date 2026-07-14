@@ -5,6 +5,8 @@
 #include <string>
 #include <vector>
 
+struct ParseContext;
+
 struct DspContext
 {
 	uint8_t PredScal;
@@ -29,6 +31,8 @@ struct CwavChan
 
 struct Cwav
 {
+	ParseContext& Ctx;
+
 	std::string FileName;
 	std::streamoff Length;
 	uint8_t* Data = nullptr;
@@ -44,7 +48,7 @@ struct Cwav
 
 	bool Converted = false;
 
-	Cwav(const char* fileName);
+	Cwav(const char* fileName, ParseContext& ctx);
 	~Cwav();
 	bool Convert();
 };

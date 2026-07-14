@@ -11,6 +11,8 @@
 #include <string>
 #include <vector>
 
+struct ParseContext;
+
 struct CgrpFile
 {
 	uint32_t Id;
@@ -20,6 +22,8 @@ struct CgrpFile
 
 struct Cgrp
 {
+	ParseContext& Ctx;
+
 	std::string FileName;
 	std::streamoff Length;
 	uint8_t* Data = nullptr;
@@ -36,7 +40,7 @@ struct Cgrp
 	std::map<int, std::string> NamesFromCsar;
 	Options Opts;
 
-	Cgrp(const char* fileName, std::map<int, Cwar*>* cwars, const std::map<int, bool>& cseqsFromCsar, const std::map<int, std::string>& namesFromCsar, const Options& opts);
+	Cgrp(const char* fileName, std::map<int, Cwar*>* cwars, const std::map<int, bool>& cseqsFromCsar, const std::map<int, std::string>& namesFromCsar, const Options& opts, ParseContext& ctx);
 	~Cgrp();
 	bool Extract();
 };

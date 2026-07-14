@@ -59,6 +59,21 @@ House rules:
 
 ### Changed
 
+- **The global mutable parser state is now a `ParseContext` passed by
+  reference** (stage-0 library-core fold). The six process-globals behind the
+  old `Common::` facade (`ShowWarnings`, `FileNames`, `Offsets`, `Buffers`,
+  `Log`, `Notices`) and the parse helpers that operate on them (`Assert`,
+  `Error`, `Warning`, `FlushNotices`, `Push`/`Pop`/`Reset`, `RequireOpen`,
+  `CheckBounds`, `Analyse`, `Dump`, `ReadFixLen`/`ReadVarLen`) now live on a
+  `ParseContext` object created in `main` and threaded through every reader
+  (`Csar` → `Cgrp` → `Cbnk`/`Cwar`/`Cwav`/`Cseq`), mirroring the existing
+  `Options` injection; the `Common` struct and the free read functions are
+  gone (`TypedName`, being context-free, stays a free function). The context's
+  lifetime still spans the whole run, so cross-input behaviour is unchanged;
+  this is the internal-architecture prerequisite for reentrancy and later
+  per-input scoping. (`output-identical` — 82-archive / 257,125-file corpus
+  A/B byte-identical with identical stdout/stderr, exit 0; 17-surface
+  diagnostics goldens byte-identical.)
 - **`Rnd` argument bounds now survive parse; the midpoint stand-in is computed
   at emit** (`Cseq.cpp`/`Cseq.hpp`). `ReadArgs` used to collapse a random
   range's two raw `s16` bounds to their `(lo + hi) / 2` midpoint at parse time,

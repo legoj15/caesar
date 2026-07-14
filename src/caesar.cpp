@@ -49,6 +49,13 @@ int main(int argc, char* argv[])
 
 	int exitCode = 0;
 
+	// One parse context for the whole run, threaded into every reader. Its
+	// lifetime spans all inputs (as the former process-global did), so
+	// cross-input behaviour -- the analysis .log carried between archives, the
+	// leaked cerr format flags -- is unchanged; per-input scoping is a later,
+	// deliberate, output-changing step.
+	ParseContext ctx;
+
 	for (int i = 1; i < argc; ++i)
 	{
 		if (!strcmp(argv[i], "-v") || !strcmp(argv[i], "--version"))
@@ -63,7 +70,7 @@ int main(int argc, char* argv[])
 		}
 		else if (!strcmp(argv[i], "-w"))
 		{
-			Common::ShowWarnings = true;
+			ctx.ShowWarnings = true;
 		}
 		else if (!strcmp(argv[i], "--pad-sustain"))
 		{
@@ -109,7 +116,7 @@ int main(int argc, char* argv[])
 			// still process, instead of aborting the whole run.
 			try
 			{
-				Csar csar(argv[i], opts);
+				Csar csar(argv[i], opts, ctx);
 
 				if (!csar.Extract(outputDir))
 				{
@@ -123,14 +130,14 @@ int main(int argc, char* argv[])
 				cerr << "MESSAGE\t\t" << e.what() << endl;
 				cerr << endl;
 
-				Common::Reset();
+				ctx.Reset();
 				exitCode = 1;
 			}
 
 			// Report what this input skipped or approximated (shown by default;
 			// -w adds the per-item detail). Runs even if the input failed part
 			// way, so anything dropped before the failure is still surfaced.
-			Common::FlushNotices(argv[i]);
+			ctx.FlushNotices(argv[i]);
 		}
 	}
 

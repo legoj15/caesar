@@ -58,22 +58,22 @@ static constexpr uint32_t kTrackExecBudget = 1u << 20;
 // emitCtrl covers the channel controllers plus the value-carrying master volume,
 // pitch bend and tempo events (all "parameter" writes), so its wording stays
 // general rather than claiming every one is a MIDI control-change message.
-static bool emitCtrl(bool ok, uint8_t* pos)
+static bool emitCtrl(ParseContext& Ctx, bool ok, uint8_t* pos)
 {
 	if (!ok)
 	{
-		Common::Warning(pos, "control/parameter event out of MIDI range; dropped",
+		Ctx.Warning(pos, "control/parameter event out of MIDI range; dropped",
 			"MIDI control/parameter events dropped (value out of range)");
 	}
 
 	return ok;
 }
 
-static bool emitProgram(bool ok, uint8_t* pos)
+static bool emitProgram(ParseContext& Ctx, bool ok, uint8_t* pos)
 {
 	if (!ok)
 	{
-		Common::Warning(pos, "program number out of MIDI range; dropped",
+		Ctx.Warning(pos, "program number out of MIDI range; dropped",
 			"MIDI program changes dropped (value out of range)");
 	}
 
@@ -89,11 +89,11 @@ static bool emitProgram(bool ok, uint8_t* pos)
 // Suffix1 == None and let an unevaluated Rnd/Var stand-in drop through the
 // emitCtrl notice instead; the value now arrives evaluated, so both ends are
 // real and the caller no longer discriminates on the prefix.)
-static int32_t clampCtrl(int32_t value, uint8_t* pos)
+static int32_t clampCtrl(ParseContext& Ctx, int32_t value, uint8_t* pos)
 {
 	if (value > 127)
 	{
-		Common::Warning(pos, "control/parameter value above MIDI range; clamped to 127",
+		Ctx.Warning(pos, "control/parameter value above MIDI range; clamped to 127",
 			"MIDI control/parameter values clamped to 127 (above range)");
 
 		return 127;
@@ -101,7 +101,7 @@ static int32_t clampCtrl(int32_t value, uint8_t* pos)
 
 	if (value < 0)
 	{
-		Common::Warning(pos, "control/parameter value below MIDI range; clamped to 0",
+		Ctx.Warning(pos, "control/parameter value below MIDI range; clamped to 0",
 			"MIDI control/parameter values clamped to 0 (below range)");
 
 		return 0;
@@ -128,23 +128,23 @@ static int32_t combinePan(int32_t pan, int32_t initPan)
 	return clamp(pan + initPan - 64, 0, 127);
 }
 
-vector<int32_t> ReadArgs(uint8_t*& pos, ArgType argType, pair<int32_t, int32_t>* rndBounds)
+vector<int32_t> ReadArgs(ParseContext& Ctx, uint8_t*& pos, ArgType argType, pair<int32_t, int32_t>* rndBounds)
 {
 	if (argType == ArgType::Uint8)
 	{
-		return { ReadFixLen(pos, 1) };
+		return { Ctx.ReadFixLen(pos, 1) };
 	}
 	else if (argType == ArgType::Int8)
 	{
-		return { ReadFixLen(pos, 1, false, true) };
+		return { Ctx.ReadFixLen(pos, 1, false, true) };
 	}
 	else if (argType == ArgType::Uint16)
 	{
-		return { ReadFixLen(pos, 2, false) };
+		return { Ctx.ReadFixLen(pos, 2, false) };
 	}
 	else if (argType == ArgType::Int16)
 	{
-		return { ReadFixLen(pos, 2, false, true) };
+		return { Ctx.ReadFixLen(pos, 2, false, true) };
 	}
 	else if (argType == ArgType::Rnd)
 	{
@@ -161,8 +161,8 @@ vector<int32_t> ReadArgs(uint8_t*& pos, ArgType argType, pair<int32_t, int32_t>*
 		// value stored in Args is the first bound as an inert placeholder that
 		// keeps the slot count intact; no consumer reads a Rnd slot's Args value
 		// (every Rnd read goes through resolveArg, which uses the bounds).
-		int32_t rndA = ReadFixLen(pos, 2, false, true);
-		int32_t rndB = ReadFixLen(pos, 2, false, true);
+		int32_t rndA = Ctx.ReadFixLen(pos, 2, false, true);
+		int32_t rndB = Ctx.ReadFixLen(pos, 2, false, true);
 
 		if (rndBounds)
 		{
@@ -173,25 +173,25 @@ vector<int32_t> ReadArgs(uint8_t*& pos, ArgType argType, pair<int32_t, int32_t>*
 	}
 	else if (argType == ArgType::Var)
 	{
-		return { ReadFixLen(pos, 1) };
+		return { Ctx.ReadFixLen(pos, 1) };
 	}
 	else if (argType == ArgType::VarLen)
 	{
-		return { ReadVarLen(pos) };
+		return { Ctx.ReadVarLen(pos) };
 	}
 
 	return { };
 }
 
-Cseq::Cseq(const char* fileName) : FileName(fileName)
+Cseq::Cseq(const char* fileName, ParseContext& ctx) : Ctx(ctx), FileName(fileName)
 {
 	ifstream ifs(FileName, ios::binary | ios::ate);
 
 	Length = ifs.tellg();
-	Common::RequireOpen(ifs.good(), Length, FileName);
+	Ctx.RequireOpen(ifs.good(), Length, FileName);
 	Data = new uint8_t[Length];
 
-	Common::Push(filesystem::path(FileName).filename().string(), Data, Length);
+	Ctx.Push(filesystem::path(FileName).filename().string(), Data, Length);
 
 	ifs.seekg(0, ios::beg);
 	ifs.read(reinterpret_cast<char*>(Data), Length);
@@ -200,7 +200,7 @@ Cseq::Cseq(const char* fileName) : FileName(fileName)
 
 Cseq::~Cseq()
 {
-	Common::Pop();
+	Ctx.Pop();
 
 	delete[] Data;
 }
@@ -278,38 +278,38 @@ bool Cseq::Convert(uint32_t startOffset)
 {
 	uint8_t* pos = Data;
 
-	if (!Common::Assert(pos, 0x43534551, ReadFixLen(pos, 4, false))) { return false; }
-	if (!Common::Assert(pos, 0xFEFF, ReadFixLen(pos, 2))) { return false; }
-	if (!Common::Assert(pos, 0x40, ReadFixLen(pos, 2))) { return false; }
+	if (!Ctx.Assert(pos, 0x43534551, Ctx.ReadFixLen(pos, 4, false))) { return false; }
+	if (!Ctx.Assert(pos, 0xFEFF, Ctx.ReadFixLen(pos, 2))) { return false; }
+	if (!Ctx.Assert(pos, 0x40, Ctx.ReadFixLen(pos, 2))) { return false; }
 
-	[[maybe_unused]] uint32_t cseqVersion = ReadFixLen(pos, 4);
+	[[maybe_unused]] uint32_t cseqVersion = Ctx.ReadFixLen(pos, 4);
 
-	if (!Common::Assert<uint64_t>(pos, Length, ReadFixLen(pos, 4))) { return false; }
-	if (!Common::Assert(pos, 0x2, ReadFixLen(pos, 4))) { return false; }
-	if (!Common::Assert(pos, 0x5000, ReadFixLen(pos, 4))) { return false; }
+	if (!Ctx.Assert<uint64_t>(pos, Length, Ctx.ReadFixLen(pos, 4))) { return false; }
+	if (!Ctx.Assert(pos, 0x2, Ctx.ReadFixLen(pos, 4))) { return false; }
+	if (!Ctx.Assert(pos, 0x5000, Ctx.ReadFixLen(pos, 4))) { return false; }
 
-	uint32_t dataOffset = ReadFixLen(pos, 4);
-	uint32_t dataLength = ReadFixLen(pos, 4);
+	uint32_t dataOffset = Ctx.ReadFixLen(pos, 4);
+	uint32_t dataLength = Ctx.ReadFixLen(pos, 4);
 
-	if (!Common::Assert(pos, 0x5001, ReadFixLen(pos, 4))) { return false; }
+	if (!Ctx.Assert(pos, 0x5001, Ctx.ReadFixLen(pos, 4))) { return false; }
 
-	uint32_t lablOffset = ReadFixLen(pos, 4);
-	uint32_t lablLength = ReadFixLen(pos, 4);
+	uint32_t lablOffset = Ctx.ReadFixLen(pos, 4);
+	uint32_t lablLength = Ctx.ReadFixLen(pos, 4);
 
 	pos = Data + lablOffset;
 
-	if (!Common::Assert(pos, 0x4C41424C, ReadFixLen(pos, 4, false))) { return false; }
-	if (!Common::Assert<uint32_t>(pos, lablLength, ReadFixLen(pos, 4))) { return false; }
+	if (!Ctx.Assert(pos, 0x4C41424C, Ctx.ReadFixLen(pos, 4, false))) { return false; }
+	if (!Ctx.Assert<uint32_t>(pos, lablLength, Ctx.ReadFixLen(pos, 4))) { return false; }
 
-	uint32_t lablCount = ReadFixLen(pos, 4);
+	uint32_t lablCount = Ctx.ReadFixLen(pos, 4);
 
 	vector<uint8_t*> lablOffsets;
 
 	for (uint32_t i = 0; i < lablCount; ++i)
 	{
-		if (!Common::Assert(pos, 0x5100, ReadFixLen(pos, 4))) { return false; }
+		if (!Ctx.Assert(pos, 0x5100, Ctx.ReadFixLen(pos, 4))) { return false; }
 
-		lablOffsets.push_back(Data + lablOffset + 8 + ReadFixLen(pos, 4));
+		lablOffsets.push_back(Data + lablOffset + 8 + Ctx.ReadFixLen(pos, 4));
 	}
 
 	map<uint8_t*, CseqLabl> labls;
@@ -318,12 +318,12 @@ bool Cseq::Convert(uint32_t startOffset)
 	{
 		pos = lablOffsets[i];
 
-		if (!Common::Assert(pos, 0x1F00, ReadFixLen(pos, 4))) { return false; }
+		if (!Ctx.Assert(pos, 0x1F00, Ctx.ReadFixLen(pos, 4))) { return false; }
 
 		CseqLabl labl;
-		labl.Offset = Data + dataOffset + 8 + ReadFixLen(pos, 4);
-		uint32_t lablLength = ReadFixLen(pos, 4);
-		Common::CheckBounds(pos, lablLength);
+		labl.Offset = Data + dataOffset + 8 + Ctx.ReadFixLen(pos, 4);
+		uint32_t lablLength = Ctx.ReadFixLen(pos, 4);
+		Ctx.CheckBounds(pos, lablLength);
 		labl.Label = string(reinterpret_cast<const char*>(pos), lablLength);
 
 		labls[labl.Offset] = labl;
@@ -331,8 +331,8 @@ bool Cseq::Convert(uint32_t startOffset)
 
 	pos = Data + dataOffset;
 
-	if (!Common::Assert(pos, 0x44415441, ReadFixLen(pos, 4, false))) { return false; }
-	if (!Common::Assert<uint32_t>(pos, dataLength, ReadFixLen(pos, 4))) { return false; }
+	if (!Ctx.Assert(pos, 0x44415441, Ctx.ReadFixLen(pos, 4, false))) { return false; }
+	if (!Ctx.Assert<uint32_t>(pos, dataLength, Ctx.ReadFixLen(pos, 4))) { return false; }
 
 	map<uint32_t, CseqCmd> commands;
 
@@ -346,13 +346,13 @@ bool Cseq::Convert(uint32_t startOffset)
 			cmd.Label = labls[pos].Label;
 		}
 
-		uint8_t statusByte = ReadFixLen(pos, 1);
+		uint8_t statusByte = Ctx.ReadFixLen(pos, 1);
 
 		if (statusByte == 0xA2)
 		{
 			cmd.Suffix3 = SuffixType::If;
 
-			statusByte = ReadFixLen(pos, 1);
+			statusByte = Ctx.ReadFixLen(pos, 1);
 		}
 
 		if (statusByte == 0xA3)
@@ -360,21 +360,21 @@ bool Cseq::Convert(uint32_t startOffset)
 			cmd.Suffix2 = SuffixType::Time;
 			cmd.Arg2 = ArgType::Int16;
 
-			statusByte = ReadFixLen(pos, 1);
+			statusByte = Ctx.ReadFixLen(pos, 1);
 		}
 		else if (statusByte == 0xA4)
 		{
 			cmd.Suffix2 = SuffixType::TimeRnd;
 			cmd.Arg2 = ArgType::Rnd;
 
-			statusByte = ReadFixLen(pos, 1);
+			statusByte = Ctx.ReadFixLen(pos, 1);
 		}
 		else if (statusByte == 0xA5)
 		{
 			cmd.Suffix2 = SuffixType::TimeVar;
 			cmd.Arg2 = ArgType::Var;
 
-			statusByte = ReadFixLen(pos, 1);
+			statusByte = Ctx.ReadFixLen(pos, 1);
 		}
 
 		if (statusByte == 0xA0)
@@ -382,28 +382,28 @@ bool Cseq::Convert(uint32_t startOffset)
 			cmd.Suffix1 = SuffixType::Rnd;
 			cmd.Arg1 = ArgType::Rnd;
 
-			statusByte = ReadFixLen(pos, 1);
+			statusByte = Ctx.ReadFixLen(pos, 1);
 		}
 		else if (statusByte == 0xA1)
 		{
 			cmd.Suffix1 = SuffixType::Var;
 			cmd.Arg1 = ArgType::Var;
 
-			statusByte = ReadFixLen(pos, 1);
+			statusByte = Ctx.ReadFixLen(pos, 1);
 		}
 
 		cmd.Cmd = statusByte;
 
 		if (statusByte < 0x80)
 		{
-			cmd.Args.push_back(ReadFixLen(pos, 1));
+			cmd.Args.push_back(Ctx.ReadFixLen(pos, 1));
 
 			if (cmd.Arg1 == ArgType::None)
 			{
 				cmd.Arg1 = ArgType::VarLen;
 			}
 
-			vector<int32_t> args = ReadArgs(pos, cmd.Arg1, &cmd.Arg1Rnd);
+			vector<int32_t> args = ReadArgs(Ctx, pos, cmd.Arg1, &cmd.Arg1Rnd);
 
 			cmd.Args.insert(cmd.Args.end(), args.begin(), args.end());
 		}
@@ -414,18 +414,18 @@ bool Cseq::Convert(uint32_t startOffset)
 				cmd.Arg1 = ArgType::VarLen;
 			}
 
-			vector<int32_t> args = ReadArgs(pos, cmd.Arg1, &cmd.Arg1Rnd);
+			vector<int32_t> args = ReadArgs(Ctx, pos, cmd.Arg1, &cmd.Arg1Rnd);
 
 			cmd.Args.insert(cmd.Args.end(), args.begin(), args.end());
 		}
 		else if (statusByte == 0x88)
 		{
-			cmd.Args.push_back(ReadFixLen(pos, 1));
-			cmd.Args.push_back(ReadFixLen(pos, 3, false));
+			cmd.Args.push_back(Ctx.ReadFixLen(pos, 1));
+			cmd.Args.push_back(Ctx.ReadFixLen(pos, 3, false));
 		}
 		else if ((statusByte == 0x89) || (statusByte == 0x8A))
 		{
-			cmd.Args.push_back(ReadFixLen(pos, 3, false));
+			cmd.Args.push_back(Ctx.ReadFixLen(pos, 3, false));
 		}
 		// 0x90 and 0x96 are not CTR opcodes either (they exist only as
 		// extended second-bytes; verified against CtrCafe.cs). The original
@@ -442,7 +442,7 @@ bool Cseq::Convert(uint32_t startOffset)
 			// byte. Zero corpus occurrences.
 			if ((statusByte >= 0xB7) && (statusByte <= 0xBC))
 			{
-				Common::Error(pos - 1, "A valid command", statusByte);
+				Ctx.Error(pos - 1, "A valid command", statusByte);
 
 				return false;
 			}
@@ -475,7 +475,7 @@ bool Cseq::Convert(uint32_t startOffset)
 				cmd.Arg1 = ArgType::Uint8;
 			}
 
-			vector<int32_t> args = ReadArgs(pos, cmd.Arg1, &cmd.Arg1Rnd);
+			vector<int32_t> args = ReadArgs(Ctx, pos, cmd.Arg1, &cmd.Arg1Rnd);
 
 			cmd.Args.insert(cmd.Args.end(), args.begin(), args.end());
 
@@ -491,7 +491,7 @@ bool Cseq::Convert(uint32_t startOffset)
 			// value drives the same suppression. Zero corpus occurrences.
 			if ((statusByte == 0xCC) && (cmd.Suffix1 == SuffixType::None) && (cmd.Args.back() > 2))
 			{
-				Common::Warning(pos - 1, "mod type above 2; the engine applies no LFO",
+				Ctx.Warning(pos - 1, "mod type above 2; the engine applies no LFO",
 					"mod type out of range (engine applies no LFO)");
 			}
 		}
@@ -502,7 +502,7 @@ bool Cseq::Convert(uint32_t startOffset)
 				cmd.Arg1 = ArgType::Int16;
 			}
 
-			vector<int32_t> args = ReadArgs(pos, cmd.Arg1, &cmd.Arg1Rnd);
+			vector<int32_t> args = ReadArgs(Ctx, pos, cmd.Arg1, &cmd.Arg1Rnd);
 
 			cmd.Args.insert(cmd.Args.end(), args.begin(), args.end());
 		}
@@ -510,7 +510,7 @@ bool Cseq::Convert(uint32_t startOffset)
 		{
 			cmd.Extended = true;
 
-			statusByte = ReadFixLen(pos, 1);
+			statusByte = Ctx.ReadFixLen(pos, 1);
 
 			// Record the extended opcode itself. Cmd used to stay 0xF0 here,
 			// which matched nothing in the walk's Extended branch, so every
@@ -521,7 +521,7 @@ bool Cseq::Convert(uint32_t startOffset)
 
 			if (((statusByte >= 0x80) && (statusByte <= 0x8B)) || ((statusByte >= 0x90) && (statusByte <= 0x95)))
 			{
-				vector<int32_t> args1 = ReadArgs(pos, ArgType::Var);
+				vector<int32_t> args1 = ReadArgs(Ctx, pos, ArgType::Var);
 
 				cmd.Args.insert(cmd.Args.end(), args1.begin(), args1.end());
 
@@ -530,7 +530,7 @@ bool Cseq::Convert(uint32_t startOffset)
 					cmd.Arg1 = ArgType::Int16;
 				}
 
-				vector<int32_t> args2 = ReadArgs(pos, cmd.Arg1, &cmd.Arg1Rnd);
+				vector<int32_t> args2 = ReadArgs(Ctx, pos, cmd.Arg1, &cmd.Arg1Rnd);
 
 				cmd.Args.insert(cmd.Args.end(), args2.begin(), args2.end());
 			}
@@ -541,7 +541,7 @@ bool Cseq::Convert(uint32_t startOffset)
 					cmd.Arg1 = ArgType::Uint8;
 				}
 
-				vector<int32_t> args = ReadArgs(pos, cmd.Arg1, &cmd.Arg1Rnd);
+				vector<int32_t> args = ReadArgs(Ctx, pos, cmd.Arg1, &cmd.Arg1Rnd);
 
 				cmd.Args.insert(cmd.Args.end(), args.begin(), args.end());
 
@@ -562,7 +562,7 @@ bool Cseq::Convert(uint32_t startOffset)
 					cmd.Arg1 = ArgType::Uint16;
 				}
 
-				vector<int32_t> args = ReadArgs(pos, cmd.Arg1, &cmd.Arg1Rnd);
+				vector<int32_t> args = ReadArgs(Ctx, pos, cmd.Arg1, &cmd.Arg1Rnd);
 
 				cmd.Args.insert(cmd.Args.end(), args.begin(), args.end());
 			}
@@ -573,13 +573,13 @@ bool Cseq::Convert(uint32_t startOffset)
 					cmd.Arg1 = ArgType::Int16;
 				}
 
-				vector<int32_t> args = ReadArgs(pos, cmd.Arg1, &cmd.Arg1Rnd);
+				vector<int32_t> args = ReadArgs(Ctx, pos, cmd.Arg1, &cmd.Arg1Rnd);
 
 				cmd.Args.insert(cmd.Args.end(), args.begin(), args.end());
 			}
 			else
 			{
-				Common::Error(pos - 1, "A valid extended command", statusByte);
+				Ctx.Error(pos - 1, "A valid extended command", statusByte);
 
 				return false;
 			}
@@ -590,11 +590,11 @@ bool Cseq::Convert(uint32_t startOffset)
 		}
 		else if (statusByte == 0xFE)
 		{
-			cmd.Args.push_back(ReadFixLen(pos, 2, false));
+			cmd.Args.push_back(Ctx.ReadFixLen(pos, 2, false));
 		}
 		else
 		{
-			Common::Error(pos - 1, "A valid command", statusByte);
+			Ctx.Error(pos - 1, "A valid command", statusByte);
 
 			return false;
 		}
@@ -609,7 +609,7 @@ bool Cseq::Convert(uint32_t startOffset)
 		// range). Error paths above return before reaching this, as before.
 		if (cmd.Arg2 != ArgType::None)
 		{
-			vector<int32_t> args = ReadArgs(pos, cmd.Arg2, &cmd.Arg2Rnd);
+			vector<int32_t> args = ReadArgs(Ctx, pos, cmd.Arg2, &cmd.Arg2Rnd);
 
 			cmd.Args.insert(cmd.Args.end(), args.begin(), args.end());
 		}
@@ -744,7 +744,7 @@ bool Cseq::Convert(uint32_t startOffset)
 	{
 		if (startOffset != 0)
 		{
-			Common::Warning(Data + dataOffset + 8, "sequence start offset is not a command boundary; starting from the top");
+			Ctx.Warning(Data + dataOffset + 8, "sequence start offset is not a command boundary; starting from the top");
 		}
 
 		i = commands.begin();
@@ -828,7 +828,7 @@ bool Cseq::Convert(uint32_t startOffset)
 			&& !smfInsertNote(smf, tieStart, channelOf[track], track, tieKey, tieVel, end - tieStart)
 			&& (tieVel > 127))
 		{
-			Common::Warning(Data + dataOffset + 8 + tieCmdOffset, "note velocity out of MIDI range; note dropped",
+			Ctx.Warning(Data + dataOffset + 8 + tieCmdOffset, "note velocity out of MIDI range; note dropped",
 				"MIDI notes dropped (velocity out of range)");
 		}
 	};
@@ -928,7 +928,7 @@ bool Cseq::Convert(uint32_t startOffset)
 		// recovery every other "this track is done here" case uses.
 		if (++trackExecs > kTrackExecBudget)
 		{
-			Common::Warning(here, "track exceeded the execution budget (likely a call cycle); ending track",
+			Ctx.Warning(here, "track exceeded the execution budget (likely a call cycle); ending track",
 				"track execution budget exceeded (track ended)");
 
 			if (!advanceToNextTrack())
@@ -994,7 +994,7 @@ bool Cseq::Convert(uint32_t startOffset)
 				char msg[80];
 				snprintf(msg, sizeof(msg),
 					"variable %d read before any write; converter default %d stands in", idx, kVarInit);
-				Common::Warning(here, msg,
+				Ctx.Warning(here, msg,
 					"variables read before any write (converter init-0 default)");
 			}
 
@@ -1009,7 +1009,7 @@ bool Cseq::Convert(uint32_t startOffset)
 			{
 				if ((raw < 0) || (raw >= 48))
 				{
-					Common::Warning(here, "variable index out of range; command dropped",
+					Ctx.Warning(here, "variable index out of range; command dropped",
 						"variable index out of range (command dropped)");
 					dropCommand = true;
 
@@ -1021,7 +1021,7 @@ bool Cseq::Convert(uint32_t startOffset)
 
 			if (i->second.Suffix1 == SuffixType::Rnd)
 			{
-				Common::Warning(here, "Rnd argument approximated by its range midpoint",
+				Ctx.Warning(here, "Rnd argument approximated by its range midpoint",
 					"Rnd-valued arguments approximated (range midpoint)");
 
 				// The exporter's midpoint stand-in, decided here at emit rather
@@ -1084,7 +1084,7 @@ bool Cseq::Convert(uint32_t startOffset)
 		// previously silent). Real interpolation is stage-2/5 flattening work.
 		if (i->second.Suffix2 != SuffixType::None)
 		{
-			Common::Warning(here, "ramped (_t) change flattened to an instant jump at the command tick",
+			Ctx.Warning(here, "ramped (_t) change flattened to an instant jump at the command tick",
 				"ramped (_t) changes flattened to instant jumps");
 		}
 
@@ -1100,7 +1100,7 @@ bool Cseq::Convert(uint32_t startOffset)
 
 				if (len < 0)
 				{
-					Common::Warning(here, "negative note length from variable; treated as 0",
+					Ctx.Warning(here, "negative note length from variable; treated as 0",
 						"negative note length/rest from variable (treated as 0)");
 
 					len = 0;
@@ -1147,7 +1147,7 @@ bool Cseq::Convert(uint32_t startOffset)
 				else if (!smfInsertNote(smf, absTime, chan, track, i->second.Cmd, i->second.Args[0], len)
 					&& i->second.Args[0] > 127)
 				{
-					Common::Warning(here, "note velocity out of MIDI range; note dropped",
+					Ctx.Warning(here, "note velocity out of MIDI range; note dropped",
 						"MIDI notes dropped (velocity out of range)");
 				}
 
@@ -1164,7 +1164,7 @@ bool Cseq::Convert(uint32_t startOffset)
 
 				if (wait < 0)
 				{
-					Common::Warning(here, "negative rest duration from variable; treated as 0",
+					Ctx.Warning(here, "negative rest duration from variable; treated as 0",
 						"negative note length/rest from variable (treated as 0)");
 
 					wait = 0;
@@ -1192,9 +1192,9 @@ bool Cseq::Convert(uint32_t startOffset)
 				// The convert-time VM can make the resolved value negative (a Var/Rnd
 				// s16); a negative value keeps its sign through /128 and %128, so the
 				// emit* wrappers still surface anything the writer rejects.
-				emitCtrl(smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_BANKSELM, (arg / 128) % 128), here);
-				emitCtrl(smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_BANKSELL, 0), here);
-				emitProgram(smfInsertProgram(smf, absTime, chan, track, arg % 128), here);
+				emitCtrl(Ctx, smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_BANKSELM, (arg / 128) % 128), here);
+				emitCtrl(Ctx, smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_BANKSELL, 0), here);
+				emitProgram(Ctx, smfInsertProgram(smf, absTime, chan, track, arg % 128), here);
 			}
 			else if (i->second.Cmd == 0x88)
 			{
@@ -1210,7 +1210,7 @@ bool Cseq::Convert(uint32_t startOffset)
 				}
 				else
 				{
-					Common::Warning(here, "OpenTrack index out of range (>= 16); track ignored",
+					Ctx.Warning(here, "OpenTrack index out of range (>= 16); track ignored",
 						"OpenTrack index out of range");
 				}
 			}
@@ -1232,7 +1232,7 @@ bool Cseq::Convert(uint32_t startOffset)
 
 					if (n == commands.end())
 					{
-						Common::Warning(here, "jump target out of range; jump ignored",
+						Ctx.Warning(here, "jump target out of range; jump ignored",
 							"jump targets out of range (jump ignored)");
 					}
 					else if (!offsetTime.count(target))
@@ -1267,12 +1267,12 @@ bool Cseq::Convert(uint32_t startOffset)
 						}
 						else if (!stateChanged)
 						{
-							Common::Warning(here, "conditional backward jump with unchanged state; loop not repeated (spin-wait broken out)",
+							Ctx.Warning(here, "conditional backward jump with unchanged state; loop not repeated (spin-wait broken out)",
 								"conditional loops broken (unchanged state / spin-wait)");
 						}
 						else
 						{
-							Common::Warning(here, "conditional loop exceeded the revisit budget; loop broken",
+							Ctx.Warning(here, "conditional loop exceeded the revisit budget; loop broken",
 								"conditional loops broken (revisit budget exhausted)");
 						}
 					}
@@ -1315,7 +1315,7 @@ bool Cseq::Convert(uint32_t startOffset)
 
 					if (rescued)
 					{
-						Common::Warning(here, "re-roll loop exit taken once (sequence-rolled condition always clears on hardware)",
+						Ctx.Warning(here, "re-roll loop exit taken once (sequence-rolled condition always clears on hardware)",
 							"re-roll loop exits taken once (PRNG-free stand-in never clears them)");
 
 						i = commands.find(rescueTarget);
@@ -1352,7 +1352,7 @@ bool Cseq::Convert(uint32_t startOffset)
 					}
 					else
 					{
-						Common::Warning(here, "jump target out of range; jump ignored",
+						Ctx.Warning(here, "jump target out of range; jump ignored",
 							"jump targets out of range (jump ignored)");
 					}
 				}
@@ -1371,7 +1371,7 @@ bool Cseq::Convert(uint32_t startOffset)
 
 				if (target == commands.end())
 				{
-					Common::Warning(here, "call target out of range; call ignored",
+					Ctx.Warning(here, "call target out of range; call ignored",
 						"call targets out of range (call ignored)");
 				}
 				else
@@ -1394,7 +1394,7 @@ bool Cseq::Convert(uint32_t startOffset)
 			else if (i->second.Cmd == 0xB1)
 			{
 				// NW4C ADSHR hold-stage override; no GM/GS controller exists for it.
-				Common::Warning(here, "envelope hold has no MIDI equivalent; dropped",
+				Ctx.Warning(here, "envelope hold has no MIDI equivalent; dropped",
 					"envelope hold dropped (no MIDI equivalent)");
 			}
 			else if (i->second.Cmd == 0xB2)
@@ -1414,23 +1414,23 @@ bool Cseq::Convert(uint32_t startOffset)
 				// per-channel MIDI control with the engine's semantics, so drop
 				// with a notice. The future player reads the flag from the
 				// sequence itself; nothing is lost for suite stage 2.
-				Common::Warning(here, "mono/poly is a voice-allocation flag with no MIDI equivalent; dropped",
+				Ctx.Warning(here, "mono/poly is a voice-allocation flag with no MIDI equivalent; dropped",
 					"mono/poly dropped (no MIDI equivalent)");
 			}
 			else if (i->second.Cmd == 0xB3)
 			{
-				Common::Warning(here, "velocity range not implemented; dropped",
+				Ctx.Warning(here, "velocity range not implemented; dropped",
 					"velocity range dropped (not implemented)");
 			}
 			else if (i->second.Cmd == 0xB4)
 			{
 				// Voice biquad response select; no audible MIDI target.
-				Common::Warning(here, "biquad type has no MIDI equivalent; dropped",
+				Ctx.Warning(here, "biquad type has no MIDI equivalent; dropped",
 					"biquad filter dropped (no MIDI equivalent)");
 			}
 			else if (i->second.Cmd == 0xB5)
 			{
-				Common::Warning(here, "biquad value has no MIDI equivalent; dropped",
+				Ctx.Warning(here, "biquad value has no MIDI equivalent; dropped",
 					"biquad filter dropped (no MIDI equivalent)");
 			}
 			else if (i->second.Cmd == 0xB6)
@@ -1438,17 +1438,17 @@ bool Cseq::Convert(uint32_t startOffset)
 				// A real fidelity gap (wrong instrument wherever a track switches
 				// banks mid-sequence), but the emitted CC0 must be co-designed with
 				// Cbnk's SF2 bank layout -- see the roadmap item.
-				Common::Warning(here, "mid-sequence bank select not implemented; instrument may be wrong",
+				Ctx.Warning(here, "mid-sequence bank select not implemented; instrument may be wrong",
 					"bank select dropped (not implemented)");
 			}
 			else if (i->second.Cmd == 0xBD)
 			{
-				Common::Warning(here, "mod phase has no MIDI equivalent; dropped",
+				Ctx.Warning(here, "mod phase has no MIDI equivalent; dropped",
 					"LFO phase/curve dropped (no MIDI equivalent)");
 			}
 			else if (i->second.Cmd == 0xBE)
 			{
-				Common::Warning(here, "mod curve has no MIDI equivalent; dropped",
+				Ctx.Warning(here, "mod curve has no MIDI equivalent; dropped",
 					"LFO phase/curve dropped (no MIDI equivalent)");
 			}
 			else if (i->second.Cmd == 0xBF)
@@ -1456,7 +1456,7 @@ bool Cseq::Convert(uint32_t startOffset)
 				// Surround-path routing flag (bypass the front virtualization);
 				// only meaningful under the console's Surround output mode, and
 				// MIDI has no surround axis at all.
-				Common::Warning(here, "front bypass is surround routing with no MIDI equivalent; dropped",
+				Ctx.Warning(here, "front bypass is surround routing with no MIDI equivalent; dropped",
 					"front bypass dropped (no MIDI equivalent)");
 			}
 			else if (i->second.Cmd == 0xC0)
@@ -1466,42 +1466,42 @@ bool Cseq::Convert(uint32_t startOffset)
 				// so those files are untouched. The value is now always resolved (a plain
 				// byte, a Var read or the Rnd midpoint), so the latch-and-combine runs
 				// unconditionally rather than writing an unevaluated stand-in raw.
-				int32_t pan = clampCtrl(arg, here);
+				int32_t pan = clampCtrl(Ctx, arg, here);
 
 				trackPan = pan;
 				pan = combinePan(trackPan, trackInitPan);
 
-				emitCtrl(smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_PANPOT, pan), here);
+				emitCtrl(Ctx, smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_PANPOT, pan), here);
 			}
 			else if (i->second.Cmd == 0xC1)
 			{
-				emitCtrl(smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_VOLUME, clampCtrl(arg, here)), here);
+				emitCtrl(Ctx, smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_VOLUME, clampCtrl(Ctx, arg, here)), here);
 			}
 			else if (i->second.Cmd == 0xC2)
 			{
-				emitCtrl(smfInsertMasterVolume(smf, absTime, 0, track, clampCtrl(arg, here)), here);
+				emitCtrl(Ctx, smfInsertMasterVolume(smf, absTime, 0, track, clampCtrl(Ctx, arg, here)), here);
 			}
 			else if (i->second.Cmd == 0xC3)
 			{
 				smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_RPNM, 0);
 				smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_RPNL, 2);
-				emitCtrl(smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_DATAENTRYM, arg + 64), here);
+				emitCtrl(Ctx, smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_DATAENTRYM, arg + 64), here);
 			}
 			else if (i->second.Cmd == 0xC4)
 			{
-				emitCtrl(smfInsertPitchBend(smf, absTime, chan, track, arg * 64), here);
+				emitCtrl(Ctx, smfInsertPitchBend(smf, absTime, chan, track, arg * 64), here);
 			}
 			else if (i->second.Cmd == 0xC5)
 			{
 				smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_RPNM, 0);
 				smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_RPNL, 0);
-				emitCtrl(smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_DATAENTRYM, clampCtrl(arg, here)), here);
+				emitCtrl(Ctx, smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_DATAENTRYM, clampCtrl(Ctx, arg, here)), here);
 			}
 			else if (i->second.Cmd == 0xC6)
 			{
 				// Voice-steal priority: engine scheduling state with no meaning in
 				// MIDI (the future player must preserve it; nothing is lost here).
-				Common::Warning(here, "voice priority has no MIDI equivalent; dropped",
+				Ctx.Warning(here, "voice priority has no MIDI equivalent; dropped",
 					"priority dropped (no MIDI equivalent)");
 			}
 			else if (i->second.Cmd == 0xC7)
@@ -1523,13 +1523,13 @@ bool Cseq::Convert(uint32_t startOffset)
 
 				if (tieOn)
 				{
-					Common::Warning(here, "tie region approximated as back-to-back segments (single-envelope legato not expressible in MIDI)",
+					Ctx.Warning(here, "tie region approximated as back-to-back segments (single-envelope legato not expressible in MIDI)",
 						"tie regions approximated (segments re-attack at pitch changes)");
 				}
 			}
 			else if (i->second.Cmd == 0xC9)
 			{
-				emitCtrl(smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_PORTAMENTOCTRL, clampCtrl(arg, here)), here);
+				emitCtrl(Ctx, smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_PORTAMENTOCTRL, clampCtrl(Ctx, arg, here)), here);
 			}
 			else if (i->second.Cmd == 0xCA)
 			{
@@ -1537,20 +1537,20 @@ bool Cseq::Convert(uint32_t startOffset)
 				// value: the 0xCC restore path replays modShadow[0], so an unclamped
 				// >127 there would drop on the replay even after clamping now. The
 				// depth is always resolved now, so the shadow always latches.
-				int32_t depth = clampCtrl(arg, here);
+				int32_t depth = clampCtrl(Ctx, arg, here);
 
 				modShadow[0] = depth;
 
 				if (trackModType == 0)
 				{
-					if (emitCtrl(smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_MODULATION, depth), here))
+					if (emitCtrl(Ctx, smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_MODULATION, depth), here))
 					{
 						modWire[0] = depth;
 					}
 				}
 				else
 				{
-					Common::Warning(here, "mod depth while the track LFO targets volume/pan; CC1 suppressed",
+					Ctx.Warning(here, "mod depth while the track LFO targets volume/pan; CC1 suppressed",
 						"pitch-vibrato CCs suppressed (track LFO targets volume/pan)");
 				}
 			}
@@ -1562,14 +1562,14 @@ bool Cseq::Convert(uint32_t startOffset)
 
 				if (trackModType == 0)
 				{
-					if (emitCtrl(smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_VIBRATORATE, rate), here))
+					if (emitCtrl(Ctx, smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_VIBRATORATE, rate), here))
 					{
 						modWire[1] = rate;
 					}
 				}
 				else
 				{
-					Common::Warning(here, "mod speed while the track LFO targets volume/pan; CC76 suppressed",
+					Ctx.Warning(here, "mod speed while the track LFO targets volume/pan; CC76 suppressed",
 						"pitch-vibrato CCs suppressed (track LFO targets volume/pan)");
 				}
 			}
@@ -1601,12 +1601,12 @@ bool Cseq::Convert(uint32_t startOffset)
 
 							if (newType <= 2)
 							{
-								Common::Warning(here, "track LFO retargeted to volume/pan; tremolo/auto-pan not rendered",
+								Ctx.Warning(here, "track LFO retargeted to volume/pan; tremolo/auto-pan not rendered",
 									"tremolo/auto-pan LFO dropped (no MIDI equivalent)");
 							}
 							else
 							{
-								Common::Warning(here, "track LFO target out of range; the engine applies no LFO",
+								Ctx.Warning(here, "track LFO target out of range; the engine applies no LFO",
 									"mod type out of range (engine applies no LFO)");
 							}
 						}
@@ -1620,7 +1620,7 @@ bool Cseq::Convert(uint32_t startOffset)
 						{
 							if ((modShadow[slot] >= 0) && (modShadow[slot] != modWire[slot]))
 							{
-								if (emitCtrl(smfInsertControl(smf, absTime, chan, track, modCtrl[slot], modShadow[slot]), here))
+								if (emitCtrl(Ctx, smfInsertControl(smf, absTime, chan, track, modCtrl[slot], modShadow[slot]), here))
 								{
 									modWire[slot] = modShadow[slot];
 								}
@@ -1637,14 +1637,14 @@ bool Cseq::Convert(uint32_t startOffset)
 
 				if (trackModType == 0)
 				{
-					if (emitCtrl(smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_VIBRATODEPTH, range), here))
+					if (emitCtrl(Ctx, smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_VIBRATODEPTH, range), here))
 					{
 						modWire[2] = range;
 					}
 				}
 				else
 				{
-					Common::Warning(here, "mod range while the track LFO targets volume/pan; CC77 suppressed",
+					Ctx.Warning(here, "mod range while the track LFO targets volume/pan; CC77 suppressed",
 						"pitch-vibrato CCs suppressed (track LFO targets volume/pan)");
 				}
 			}
@@ -1654,26 +1654,26 @@ bool Cseq::Convert(uint32_t startOffset)
 			}
 			else if (i->second.Cmd == 0xCF)
 			{
-				emitCtrl(smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_PORTAMENTOTIME, clampCtrl(arg, here)), here);
+				emitCtrl(Ctx, smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_PORTAMENTOTIME, clampCtrl(Ctx, arg, here)), here);
 			}
 			else if (i->second.Cmd == 0xD0)
 			{
-				emitCtrl(smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_ATTACKTIME, (arg / 2) + 64), here);
+				emitCtrl(Ctx, smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_ATTACKTIME, (arg / 2) + 64), here);
 			}
 			else if (i->second.Cmd == 0xD1)
 			{
-				emitCtrl(smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_DECAYTIME, (arg / 2) + 64), here);
+				emitCtrl(Ctx, smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_DECAYTIME, (arg / 2) + 64), here);
 			}
 			else if (i->second.Cmd == 0xD2)
 			{
 				// ADSR sustain LEVEL (not the pedal -- that is 0xDF); no GM2/GS
 				// controller exists for it.
-				Common::Warning(here, "envelope sustain level has no MIDI equivalent; dropped",
+				Ctx.Warning(here, "envelope sustain level has no MIDI equivalent; dropped",
 					"sustain level dropped (no MIDI equivalent)");
 			}
 			else if (i->second.Cmd == 0xD3)
 			{
-				emitCtrl(smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_RELEASETIME, (arg / 2) + 64), here);
+				emitCtrl(Ctx, smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_RELEASETIME, (arg / 2) + 64), here);
 			}
 			else if (i->second.Cmd == 0xD4)
 			{
@@ -1692,14 +1692,14 @@ bool Cseq::Convert(uint32_t startOffset)
 
 				if (count > 127)
 				{
-					Common::Warning(here, "loop repeat count above MIDI range; clamped to 127",
+					Ctx.Warning(here, "loop repeat count above MIDI range; clamped to 127",
 						"MIDI loop repeat counts clamped to 127 (above range)");
 
 					count = 127;
 				}
 				else if (count < 0)
 				{
-					Common::Warning(here, "loop repeat count below MIDI range; clamped to 0 (loop forever)",
+					Ctx.Warning(here, "loop repeat count below MIDI range; clamped to 0 (loop forever)",
 						"MIDI loop repeat counts clamped to 0 (below range)");
 
 					count = 0;
@@ -1709,12 +1709,12 @@ bool Cseq::Convert(uint32_t startOffset)
 			}
 			else if (i->second.Cmd == 0xD5)
 			{
-				emitCtrl(smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_EXPRESSION, clampCtrl(arg, here)), here);
+				emitCtrl(Ctx, smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_EXPRESSION, clampCtrl(Ctx, arg, here)), here);
 			}
 			else if (i->second.Cmd == 0xD6)
 			{
 				// A debug print of a sequence variable; nothing to render.
-				Common::Warning(here, "print var is a debug command with no MIDI equivalent; dropped",
+				Ctx.Warning(here, "print var is a debug command with no MIDI equivalent; dropped",
 					"print var dropped (no MIDI equivalent)");
 			}
 			else if (i->second.Cmd == 0xD7)
@@ -1724,7 +1724,7 @@ bool Cseq::Convert(uint32_t startOffset)
 				// "Surround" output mode (console-confirmed 2026-07-11); MIDI has
 				// no surround axis in any mode, so there is nothing to map it to.
 				// The future player must model it -- see the suite plan.
-				Common::Warning(here, "span (front/rear surround pan) has no MIDI equivalent; dropped",
+				Ctx.Warning(here, "span (front/rear surround pan) has no MIDI equivalent; dropped",
 					"span dropped (no MIDI surround axis)");
 			}
 			else if (i->second.Cmd == 0xD8)
@@ -1753,11 +1753,11 @@ bool Cseq::Convert(uint32_t startOffset)
 				// neutral 64 is a no-op that needs no notice.
 				if (cutoff != 64)
 				{
-					Common::Warning(here, "lpf cutoff approximated (CC74 cuts ~20% shallower than hardware)",
+					Ctx.Warning(here, "lpf cutoff approximated (CC74 cuts ~20% shallower than hardware)",
 						"lpf cutoff approximated (CC74 curve reads ~20% shallow)");
 				}
 
-				emitCtrl(smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_BRIGHTNESS, cutoff), here);
+				emitCtrl(Ctx, smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_BRIGHTNESS, cutoff), here);
 			}
 			else if (i->second.Cmd == 0xD9)
 			{
@@ -1774,7 +1774,7 @@ bool Cseq::Convert(uint32_t startOffset)
 			}
 			else if (i->second.Cmd == 0xDB)
 			{
-				Common::Warning(here, "main (dry) send not implemented; dropped",
+				Ctx.Warning(here, "main (dry) send not implemented; dropped",
 					"main send dropped (not implemented)");
 			}
 			else if (i->second.Cmd == 0xDC)
@@ -1792,13 +1792,13 @@ bool Cseq::Convert(uint32_t startOffset)
 				//
 				// The init pan is now always the resolved value (plain, Var read or
 				// Rnd midpoint), so it always latches and re-emits the combined pan.
-				trackInitPan = clampCtrl(arg, here);
+				trackInitPan = clampCtrl(Ctx, arg, here);
 
-				emitCtrl(smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_PANPOT, combinePan(trackPan, trackInitPan)), here);
+				emitCtrl(Ctx, smfInsertControl(smf, absTime, chan, track, SMF_CONTROL_PANPOT, combinePan(trackPan, trackInitPan)), here);
 			}
 			else if (i->second.Cmd == 0xDD)
 			{
-				Common::Warning(here, "track mute not implemented; notes keep sounding",
+				Ctx.Warning(here, "track mute not implemented; notes keep sounding",
 					"mute dropped (not implemented)");
 			}
 			else if (i->second.Cmd == 0xDE)
@@ -1807,7 +1807,7 @@ bool Cseq::Convert(uint32_t startOffset)
 				// occurrences) that used to fall off the end of this chain with no
 				// trace at all. Buses A/B map to CC91/93; GM has no third effects
 				// send, so C drops -- but now visibly.
-				Common::Warning(here, "fx send C (third aux bus) has no MIDI equivalent; dropped",
+				Ctx.Warning(here, "fx send C (third aux bus) has no MIDI equivalent; dropped",
 					"fx send C dropped (no MIDI equivalent)");
 			}
 			else if (i->second.Cmd == 0xDF)
@@ -1844,7 +1844,7 @@ bool Cseq::Convert(uint32_t startOffset)
 				// 1150 ms; delays past 1 s all flatten to 127, so surface the loss.
 				if (ms > 1000)
 				{
-					Common::Warning(here, "mod delay above 1000 ms saturates CC78 (flattened to 127)",
+					Ctx.Warning(here, "mod delay above 1000 ms saturates CC78 (flattened to 127)",
 						"mod delay saturated (CC78 caps at 1000 ms)");
 				}
 
@@ -1857,7 +1857,7 @@ bool Cseq::Convert(uint32_t startOffset)
 				}
 				else
 				{
-					Common::Warning(here, "mod delay while the track LFO targets volume/pan; CC78 suppressed",
+					Ctx.Warning(here, "mod delay while the track LFO targets volume/pan; CC78 suppressed",
 						"pitch-vibrato CCs suppressed (track LFO targets volume/pan)");
 				}
 			}
@@ -1868,7 +1868,7 @@ bool Cseq::Convert(uint32_t startOffset)
 				// infinite and the int cast of that is UB; guard caller-side to keep
 				// the vendored copy pristine. The drop still surfaces through
 				// emitCtrl's notice.
-				emitCtrl((arg > 0) && smfInsertTempoBPM(smf, absTime, track, arg), here);
+				emitCtrl(Ctx, (arg > 0) && smfInsertTempoBPM(smf, absTime, track, arg), here);
 			}
 			else if (i->second.Cmd == 0xE3)
 			{
@@ -1879,17 +1879,17 @@ bool Cseq::Convert(uint32_t startOffset)
 				// pitch-bend ramp, which is player/stage-2 territory. It was
 				// previously mis-emitted as CC78 "vibrato delay", where sweeps
 				// of two semitones or more also fell out of MIDI range.
-				Common::Warning(here, "sweep pitch (intra-note pitch ramp) has no MIDI equivalent; dropped",
+				Ctx.Warning(here, "sweep pitch (intra-note pitch ramp) has no MIDI equivalent; dropped",
 					"sweep pitch dropped (no MIDI equivalent)");
 			}
 			else if (i->second.Cmd == 0xE4)
 			{
-				Common::Warning(here, "mod period has no MIDI equivalent; dropped",
+				Ctx.Warning(here, "mod period has no MIDI equivalent; dropped",
 					"LFO period dropped (no MIDI equivalent)");
 			}
 			else if (i->second.Cmd == 0xFB)
 			{
-				Common::Warning(here, "envelope reset not implemented; dropped",
+				Ctx.Warning(here, "envelope reset not implemented; dropped",
 					"envelope reset dropped (not implemented)");
 			}
 			else if (i->second.Cmd == 0xFC)
@@ -1920,7 +1920,7 @@ bool Cseq::Convert(uint32_t startOffset)
 					// discard the whole in-progress MIDI, treat the stray Return
 					// as end-of-track, exactly like Fin: close this track and
 					// move to the next so the sequence still yields a file.
-					Common::Warning(Data + dataOffset + 8 + i->first, "Return with empty call stack; ending track");
+					Ctx.Warning(Data + dataOffset + 8 + i->first, "Return with empty call stack; ending track");
 
 					if (!advanceToNextTrack())
 					{
@@ -1950,7 +1950,7 @@ bool Cseq::Convert(uint32_t startOffset)
 				// surface it instead of silently perpetuating the gap.
 				char msg[64];
 				snprintf(msg, sizeof(msg), "unhandled sequence command 0x%02X; dropped", i->second.Cmd);
-				Common::Warning(here, msg, "unhandled sequence commands dropped");
+				Ctx.Warning(here, msg, "unhandled sequence commands dropped");
 			}
 		}
 		else
@@ -1975,7 +1975,7 @@ bool Cseq::Convert(uint32_t startOffset)
 
 				if ((idx < 0) || (idx >= 48))
 				{
-					Common::Warning(here, "variable index out of range; command dropped",
+					Ctx.Warning(here, "variable index out of range; command dropped",
 						"variable index out of range (command dropped)");
 				}
 				else
@@ -1997,7 +1997,7 @@ bool Cseq::Convert(uint32_t startOffset)
 								}
 								else
 								{
-									Common::Warning(here, "divvar by zero; variable left unchanged",
+									Ctx.Warning(here, "divvar by zero; variable left unchanged",
 										"variable divide/modulo by zero (skipped)");
 								}
 								break;
@@ -2027,7 +2027,7 @@ bool Cseq::Convert(uint32_t startOffset)
 								break;
 							}
 							case 0x86:                                         // randvar
-								Common::Warning(here, "randvar approximated by the operand midpoint (VM is PRNG-free)",
+								Ctx.Warning(here, "randvar approximated by the operand midpoint (VM is PRNG-free)",
 									"randvar approximated (operand midpoint)");
 								writeVar(idx, op / 2);
 								break;
@@ -2044,7 +2044,7 @@ bool Cseq::Convert(uint32_t startOffset)
 								}
 								else
 								{
-									Common::Warning(here, "modvar by zero; variable left unchanged",
+									Ctx.Warning(here, "modvar by zero; variable left unchanged",
 										"variable divide/modulo by zero (skipped)");
 								}
 								break;
@@ -2062,7 +2062,7 @@ bool Cseq::Convert(uint32_t startOffset)
 
 				if ((idx < 0) || (idx >= 48))
 				{
-					Common::Warning(here, "variable index out of range; command dropped",
+					Ctx.Warning(here, "variable index out of range; command dropped",
 						"variable index out of range (command dropped)");
 				}
 				else
@@ -2134,7 +2134,7 @@ bool Cseq::Convert(uint32_t startOffset)
 					// Parse vets extended bytes, so this is the same safety net as the
 					// plain chain's final else: parsed but never wired up.
 					snprintf(msg, sizeof(msg), "unhandled extended command 0x%02X; dropped", ext);
-					Common::Warning(here, msg, "unhandled sequence commands dropped");
+					Ctx.Warning(here, msg, "unhandled sequence commands dropped");
 				}
 				else
 				{
@@ -2143,7 +2143,7 @@ bool Cseq::Convert(uint32_t startOffset)
 						: "multi-LFO (mod2-4) commands dropped (not implemented)";
 
 					snprintf(msg, sizeof(msg), "%s not implemented; dropped", name->second);
-					Common::Warning(here, msg, category);
+					Ctx.Warning(here, msg, category);
 				}
 			}
 		}

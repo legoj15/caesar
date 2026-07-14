@@ -16,15 +16,15 @@
 using namespace std;
 using namespace filesystem;
 
-Csar::Csar(const char* fileName, const Options& opts) : FileName(fileName), Opts(opts)
+Csar::Csar(const char* fileName, const Options& opts, ParseContext& ctx) : Ctx(ctx), FileName(fileName), Opts(opts)
 {
 	ifstream ifs(FileName, ios::binary | ios::ate);
 
 	Length = ifs.tellg();
-	Common::RequireOpen(ifs.good(), Length, FileName);
+	Ctx.RequireOpen(ifs.good(), Length, FileName);
 	Data = new uint8_t[Length];
 
-	Common::Push(FileName, Data, Length);
+	Ctx.Push(FileName, Data, Length);
 
 	ifs.seekg(0, ios::beg);
 	ifs.read(reinterpret_cast<char*>(Data), Length);
@@ -38,7 +38,7 @@ Csar::~Csar()
 		delete cwar.second;
 	}
 
-	Common::Pop();
+	Ctx.Pop();
 
 	delete[] Data;
 }
@@ -68,33 +68,33 @@ bool Csar::Extract(const string& outputDir)
 
 	uint8_t* pos = Data;
 
-	if (!Common::Assert(pos, 0x43534152, ReadFixLen(pos, 4, false))) { return false; }
-	if (!Common::Assert(pos, 0xFEFF, ReadFixLen(pos, 2))) { return false; }
-	if (!Common::Assert(pos, 0x40, ReadFixLen(pos, 2))) { return false; }
+	if (!Ctx.Assert(pos, 0x43534152, Ctx.ReadFixLen(pos, 4, false))) { return false; }
+	if (!Ctx.Assert(pos, 0xFEFF, Ctx.ReadFixLen(pos, 2))) { return false; }
+	if (!Ctx.Assert(pos, 0x40, Ctx.ReadFixLen(pos, 2))) { return false; }
 
-	uint32_t csarVersion = ReadFixLen(pos, 4);
-	uint32_t length = ReadFixLen(pos, 4);
+	uint32_t csarVersion = Ctx.ReadFixLen(pos, 4);
+	uint32_t length = Ctx.ReadFixLen(pos, 4);
 
 	if (csarVersion != 0x02000000)
 	{
-		if (!Common::Assert<uint64_t>(pos, Length, length)) { return false; }
+		if (!Ctx.Assert<uint64_t>(pos, Length, length)) { return false; }
 	}
 
-	if (!Common::Assert(pos, 0x3, ReadFixLen(pos, 4))) { return false; }
-	if (!Common::Assert(pos, 0x2000, ReadFixLen(pos, 4))) { return false; }
+	if (!Ctx.Assert(pos, 0x3, Ctx.ReadFixLen(pos, 4))) { return false; }
+	if (!Ctx.Assert(pos, 0x2000, Ctx.ReadFixLen(pos, 4))) { return false; }
 
-	uint32_t strgOffset = ReadFixLen(pos, 4);
-	uint32_t strgLength = ReadFixLen(pos, 4);
+	uint32_t strgOffset = Ctx.ReadFixLen(pos, 4);
+	uint32_t strgLength = Ctx.ReadFixLen(pos, 4);
 
-	if (!Common::Assert(pos, 0x2001, ReadFixLen(pos, 4))) { return false; }
+	if (!Ctx.Assert(pos, 0x2001, Ctx.ReadFixLen(pos, 4))) { return false; }
 
-	uint32_t infoOffset = ReadFixLen(pos, 4);
-	uint32_t infoLength = ReadFixLen(pos, 4);
+	uint32_t infoOffset = Ctx.ReadFixLen(pos, 4);
+	uint32_t infoLength = Ctx.ReadFixLen(pos, 4);
 
-	if (!Common::Assert(pos, 0x2002, ReadFixLen(pos, 4))) { return false; }
+	if (!Ctx.Assert(pos, 0x2002, Ctx.ReadFixLen(pos, 4))) { return false; }
 
-	uint32_t fileOffset = ReadFixLen(pos, 4);
-	[[maybe_unused]] uint32_t fileLength = ReadFixLen(pos, 4);
+	uint32_t fileOffset = Ctx.ReadFixLen(pos, 4);
+	[[maybe_unused]] uint32_t fileLength = Ctx.ReadFixLen(pos, 4);
 
 	vector<CsarStrg> strgs;
 
@@ -102,31 +102,31 @@ bool Csar::Extract(const string& outputDir)
 	{
 		pos = Data + strgOffset;
 
-		if (!Common::Assert(pos, 0x53545247, ReadFixLen(pos, 4, false))) { return false; }
-		if (!Common::Assert<uint32_t>(pos, strgLength, ReadFixLen(pos, 4))) { return false; }
-		if (!Common::Assert(pos, 0x2400, ReadFixLen(pos, 4))) { return false; }
+		if (!Ctx.Assert(pos, 0x53545247, Ctx.ReadFixLen(pos, 4, false))) { return false; }
+		if (!Ctx.Assert<uint32_t>(pos, strgLength, Ctx.ReadFixLen(pos, 4))) { return false; }
+		if (!Ctx.Assert(pos, 0x2400, Ctx.ReadFixLen(pos, 4))) { return false; }
 
-		[[maybe_unused]] uint32_t strgStringsOffset = ReadFixLen(pos, 4);
+		[[maybe_unused]] uint32_t strgStringsOffset = Ctx.ReadFixLen(pos, 4);
 
-		if (!Common::Assert(pos, 0x2401, ReadFixLen(pos, 4))) { return false; }
+		if (!Ctx.Assert(pos, 0x2401, Ctx.ReadFixLen(pos, 4))) { return false; }
 
-		[[maybe_unused]] uint32_t strgUnknownOffset = ReadFixLen(pos, 4);
-		uint32_t strgCount = ReadFixLen(pos, 4);
+		[[maybe_unused]] uint32_t strgUnknownOffset = Ctx.ReadFixLen(pos, 4);
+		uint32_t strgCount = Ctx.ReadFixLen(pos, 4);
 
 		for (uint32_t i = 0; i < strgCount; ++i)
 		{
-			if (!Common::Assert(pos, 0x1F01, ReadFixLen(pos, 4))) { return false; }
+			if (!Ctx.Assert(pos, 0x1F01, Ctx.ReadFixLen(pos, 4))) { return false; }
 
 			CsarStrg strg;
-			strg.Offset = Data + strgOffset + 24 + ReadFixLen(pos, 4);
-			strg.Length = ReadFixLen(pos, 4);
+			strg.Offset = Data + strgOffset + 24 + Ctx.ReadFixLen(pos, 4);
+			strg.Length = Ctx.ReadFixLen(pos, 4);
 
 			strgs.push_back(strg);
 		}
 
 		for (uint32_t i = 0; i < strgCount; ++i)
 		{
-			Common::CheckBounds(pos, strgs[i].Length - 1);
+			Ctx.CheckBounds(pos, strgs[i].Length - 1);
 			strgs[i].String = string(reinterpret_cast<const char*>(pos), strgs[i].Length - 1);
 
 			pos = i != (strgCount - 1) ? strgs[i + 1].Offset : pos + strgs[i].Length;
@@ -135,8 +135,8 @@ bool Csar::Extract(const string& outputDir)
 
 	pos = Data + infoOffset;
 
-	if (!Common::Assert(pos, 0x494E464F, ReadFixLen(pos, 4, false))) { return false; }
-	if (!Common::Assert<uint32_t>(pos, infoLength, ReadFixLen(pos, 4))) { return false; }
+	if (!Ctx.Assert(pos, 0x494E464F, Ctx.ReadFixLen(pos, 4, false))) { return false; }
+	if (!Ctx.Assert<uint32_t>(pos, infoLength, Ctx.ReadFixLen(pos, 4))) { return false; }
 
 	uint32_t infoCseqOffset = 0;
 	uint32_t infoCbnkOffset = 0;
@@ -149,36 +149,36 @@ bool Csar::Extract(const string& outputDir)
 
 	for (uint8_t i = 0; i < 8; ++i)
 	{
-		uint32_t offsetId = ReadFixLen(pos, 4);
+		uint32_t offsetId = Ctx.ReadFixLen(pos, 4);
 
 		switch (offsetId)
 		{
 			case 0x2100:
-				infoCseqOffset = ReadFixLen(pos, 4); break;
+				infoCseqOffset = Ctx.ReadFixLen(pos, 4); break;
 
 			case 0x2101:
-				infoCbnkOffset = ReadFixLen(pos, 4); break;
+				infoCbnkOffset = Ctx.ReadFixLen(pos, 4); break;
 
 			case 0x2102:
-				infoPlayerOffset = ReadFixLen(pos, 4); break;
+				infoPlayerOffset = Ctx.ReadFixLen(pos, 4); break;
 
 			case 0x2103:
-				infoCwarOffset = ReadFixLen(pos, 4); break;
+				infoCwarOffset = Ctx.ReadFixLen(pos, 4); break;
 
 			case 0x2104:
-				infoSetOffset = ReadFixLen(pos, 4); break;
+				infoSetOffset = Ctx.ReadFixLen(pos, 4); break;
 
 			case 0x2105:
-				infoCgrpOffset = ReadFixLen(pos, 4); break;
+				infoCgrpOffset = Ctx.ReadFixLen(pos, 4); break;
 
 			case 0x2106:
-				infoFileOffset = ReadFixLen(pos, 4); break;
+				infoFileOffset = Ctx.ReadFixLen(pos, 4); break;
 
 			case 0x220B:
-				infoEndOffset = ReadFixLen(pos, 4); break;
+				infoEndOffset = Ctx.ReadFixLen(pos, 4); break;
 
 			default:
-				Common::Error(pos - 4, "A valid chunk type", offsetId);
+				Ctx.Error(pos - 4, "A valid chunk type", offsetId);
 
 				return false;
 		}
@@ -186,15 +186,15 @@ bool Csar::Extract(const string& outputDir)
 
 	pos = Data + infoOffset + 8 + infoFileOffset;
 
-	uint32_t fileCount = ReadFixLen(pos, 4);
+	uint32_t fileCount = Ctx.ReadFixLen(pos, 4);
 
 	vector<uint8_t*> fileOffsets;
 
 	for (uint32_t i = 0; i < fileCount; ++i)
 	{
-		if (!Common::Assert(pos, 0x220A, ReadFixLen(pos, 4))) { return false; }
+		if (!Ctx.Assert(pos, 0x220A, Ctx.ReadFixLen(pos, 4))) { return false; }
 
-		fileOffsets.push_back(Data + infoOffset + 8 + infoFileOffset + ReadFixLen(pos, 4));
+		fileOffsets.push_back(Data + infoOffset + 8 + infoFileOffset + Ctx.ReadFixLen(pos, 4));
 	}
 
 	vector<CsarFile> files;
@@ -204,7 +204,7 @@ bool Csar::Extract(const string& outputDir)
 		pos = fileOffsets[i];
 
 		CsarFile file;
-		uint32_t fileId = ReadFixLen(pos, 4);
+		uint32_t fileId = Ctx.ReadFixLen(pos, 4);
 
 		switch (fileId)
 		{
@@ -215,12 +215,12 @@ bool Csar::Extract(const string& outputDir)
 				// is a 32-bit reader, so a width-8 call would shift by up to 56
 				// bits (undefined behaviour) and fold the top four bytes back into
 				// the low word under MSVC.
-				if (!Common::Assert(pos, 0xC, ReadFixLen(pos, 4))) { return false; }
-				if (!Common::Assert(pos, 0x0, ReadFixLen(pos, 4))) { return false; }
-				Common::Analyse("0x220C 0x08", ReadFixLen(pos, 4));
+				if (!Ctx.Assert(pos, 0xC, Ctx.ReadFixLen(pos, 4))) { return false; }
+				if (!Ctx.Assert(pos, 0x0, Ctx.ReadFixLen(pos, 4))) { return false; }
+				Ctx.Analyse("0x220C 0x08", Ctx.ReadFixLen(pos, 4));
 
-				file.Offset = Data + fileOffset + 8 + ReadFixLen(pos, 4);
-				file.Length = ReadFixLen(pos, 4);
+				file.Offset = Data + fileOffset + 8 + Ctx.ReadFixLen(pos, 4);
+				file.Length = Ctx.ReadFixLen(pos, 4);
 
 				if ((file.Offset >= (Data + Length)) || (file.Length == 0xFFFFFFFF))
 				{
@@ -236,12 +236,12 @@ bool Csar::Extract(const string& outputDir)
 				// Same 8-byte little-endian field as 0x220C (see above): low word
 				// is the size (0xC), high word is reserved (0). Read as two 32-bit
 				// halves to avoid the undefined width-8 shift.
-				if (!Common::Assert(pos, 0xC, ReadFixLen(pos, 4))) { return false; }
-				if (!Common::Assert(pos, 0x0, ReadFixLen(pos, 4))) { return false; }
+				if (!Ctx.Assert(pos, 0xC, Ctx.ReadFixLen(pos, 4))) { return false; }
+				if (!Ctx.Assert(pos, 0x0, Ctx.ReadFixLen(pos, 4))) { return false; }
 
 				while (true)
 				{
-					Common::CheckBounds(pos, 1);
+					Ctx.CheckBounds(pos, 1);
 
 					if (*pos == 0x00)
 					{
@@ -261,7 +261,7 @@ bool Csar::Extract(const string& outputDir)
 				break;
 
 			default:
-				Common::Error(pos - 4, "A valid file type", fileId);
+				Ctx.Error(pos - 4, "A valid file type", fileId);
 
 				return false;
 		}
@@ -279,28 +279,28 @@ bool Csar::Extract(const string& outputDir)
 
 	pos = Data + infoOffset + 8 + infoCwarOffset;
 
-	uint32_t cwarCount = ReadFixLen(pos, 4);
+	uint32_t cwarCount = Ctx.ReadFixLen(pos, 4);
 
 	vector<uint8_t*> cwarOffsets;
 
 	for (uint32_t i = 0; i < cwarCount; ++i)
 	{
-		if (!Common::Assert(pos, 0x2207, ReadFixLen(pos, 4))) { return false; }
+		if (!Ctx.Assert(pos, 0x2207, Ctx.ReadFixLen(pos, 4))) { return false; }
 
-		cwarOffsets.push_back(Data + infoOffset + 8 + infoCwarOffset + ReadFixLen(pos, 4));
+		cwarOffsets.push_back(Data + infoOffset + 8 + infoCwarOffset + Ctx.ReadFixLen(pos, 4));
 	}
 
 	for (uint32_t i = 0; i < cwarCount; ++i)
 	{
 		pos = cwarOffsets[i];
 
-		uint32_t id = ReadFixLen(pos, 4);
+		uint32_t id = Ctx.ReadFixLen(pos, 4);
 
-		Common::Analyse("Cwar 0x04", ReadFixLen(pos, 4));
+		Ctx.Analyse("Cwar 0x04", Ctx.ReadFixLen(pos, 4));
 
-		uint32_t hasFileName = ReadFixLen(pos, 4);
+		uint32_t hasFileName = Ctx.ReadFixLen(pos, 4);
 
-		string fileName = Common::TypedName(hasFileName  && (strgOffset != 0xFFFFFFFF) ? strgs[ReadFixLen(pos, 4)].String : to_string(id), "WARC");
+		string fileName = TypedName(hasFileName  && (strgOffset != 0xFFFFFFFF) ? strgs[Ctx.ReadFixLen(pos, 4)].String : to_string(id), "WARC");
 
 		namesById[id] = fileName;
 
@@ -308,21 +308,21 @@ bool Csar::Extract(const string& outputDir)
 		{
 			pos = files[id].Offset + 12;
 
-			uint32_t cwarLength = ReadFixLen(pos, 4);
+			uint32_t cwarLength = Ctx.ReadFixLen(pos, 4);
 
 			pos -= 16;
 
 			path warcDir = archiveDir / fileName;
 			create_directories(warcDir);
 
-			Common::CheckBounds(pos, cwarLength);
+			Ctx.CheckBounds(pos, cwarLength);
 
 			string warcFile = (warcDir / (fileName + ".bcwar")).string();
 			ofstream ofs(warcFile, ofstream::binary);
 			ofs.write(reinterpret_cast<const char*>(pos), cwarLength);
 			ofs.close();
 
-			Cwars[id] = new Cwar(warcFile.c_str());
+			Cwars[id] = new Cwar(warcFile.c_str(), Ctx);
 
 			if (!Cwars[id]->Extract())
 			{
@@ -337,16 +337,16 @@ bool Csar::Extract(const string& outputDir)
 
 	pos = Data + infoOffset + 8 + infoCbnkOffset;
 
-	uint32_t cbnkCount = ReadFixLen(pos, 4);
+	uint32_t cbnkCount = Ctx.ReadFixLen(pos, 4);
 
 	vector<CsarCbnk> cbnks;
 
 	for (uint32_t i = 0; i < cbnkCount; ++i)
 	{
-		if (!Common::Assert(pos, 0x2206, ReadFixLen(pos, 4))) { return false; }
+		if (!Ctx.Assert(pos, 0x2206, Ctx.ReadFixLen(pos, 4))) { return false; }
 
 		CsarCbnk cbnk;
-		cbnk.Offset = Data + infoOffset + 8 + infoCbnkOffset + ReadFixLen(pos, 4);
+		cbnk.Offset = Data + infoOffset + 8 + infoCbnkOffset + Ctx.ReadFixLen(pos, 4);
 
 		cbnks.push_back(cbnk);
 	}
@@ -355,13 +355,13 @@ bool Csar::Extract(const string& outputDir)
 	{
 		pos = cbnks[i].Offset;
 
-		cbnks[i].Id = ReadFixLen(pos, 4);
+		cbnks[i].Id = Ctx.ReadFixLen(pos, 4);
 
-		Common::Analyse("Cbnk 0x04", ReadFixLen(pos, 4));
-		Common::Analyse("Cbnk 0x08", ReadFixLen(pos, 4));
-		Common::Analyse("Cbnk 0x0C", ReadFixLen(pos, 4));
+		Ctx.Analyse("Cbnk 0x04", Ctx.ReadFixLen(pos, 4));
+		Ctx.Analyse("Cbnk 0x08", Ctx.ReadFixLen(pos, 4));
+		Ctx.Analyse("Cbnk 0x0C", Ctx.ReadFixLen(pos, 4));
 
-		cbnks[i].FileName = Common::TypedName(strgOffset != 0xFFFFFFFF ? strgs[ReadFixLen(pos, 4)].String : to_string(cbnks[i].Id), "BANK");
+		cbnks[i].FileName = TypedName(strgOffset != 0xFFFFFFFF ? strgs[Ctx.ReadFixLen(pos, 4)].String : to_string(cbnks[i].Id), "BANK");
 
 		namesById[cbnks[i].Id] = cbnks[i].FileName;
 
@@ -374,18 +374,18 @@ bool Csar::Extract(const string& outputDir)
 		{
 			pos = files[cbnks[i].Id].Offset + 12;
 
-			uint32_t cbnkLength = ReadFixLen(pos, 4);
+			uint32_t cbnkLength = Ctx.ReadFixLen(pos, 4);
 
 			pos -= 16;
 
-			Common::CheckBounds(pos, cbnkLength);
+			Ctx.CheckBounds(pos, cbnkLength);
 
 			string bankFile = (bankDir / (cbnks[i].FileName + ".bcbnk")).string();
 			ofstream ofs(bankFile, ofstream::binary);
 			ofs.write(reinterpret_cast<const char*>(pos), cbnkLength);
 			ofs.close();
 
-			Cbnk cbnk(bankFile.c_str(), &Cwars, Opts);
+			Cbnk cbnk(bankFile.c_str(), &Cwars, Opts, Ctx);
 
 			if (!cbnk.Convert())
 			{
@@ -396,7 +396,7 @@ bool Csar::Extract(const string& outputDir)
 
 	pos = Data + infoOffset + 8 + infoCseqOffset;
 
-	uint32_t cseqCount = ReadFixLen(pos, 4);
+	uint32_t cseqCount = Ctx.ReadFixLen(pos, 4);
 
 	vector<CsarCseq> cseqs;
 	map<int, bool> cseqsFromCsar;
@@ -414,10 +414,10 @@ bool Csar::Extract(const string& outputDir)
 
 	for (uint32_t i = 0; i < cseqCount; ++i)
 	{
-		if (!Common::Assert(pos, 0x2200, ReadFixLen(pos, 4))) { return false; }
+		if (!Ctx.Assert(pos, 0x2200, Ctx.ReadFixLen(pos, 4))) { return false; }
 
 		CsarCseq cseq;
-		cseq.Offset = Data + infoOffset + 8 + infoCseqOffset + ReadFixLen(pos, 4);
+		cseq.Offset = Data + infoOffset + 8 + infoCseqOffset + Ctx.ReadFixLen(pos, 4);
 
 		cseqs.push_back(cseq);
 	}
@@ -426,17 +426,17 @@ bool Csar::Extract(const string& outputDir)
 	{
 		pos = cseqs[i].Offset;
 
-		uint32_t id = ReadFixLen(pos, 4);
+		uint32_t id = Ctx.ReadFixLen(pos, 4);
 
-		Common::Analyse("Cseq 0x04", ReadFixLen(pos, 4));
-		Common::Analyse("Cseq 0x08", ReadFixLen(pos, 4));
+		Ctx.Analyse("Cseq 0x04", Ctx.ReadFixLen(pos, 4));
+		Ctx.Analyse("Cseq 0x08", Ctx.ReadFixLen(pos, 4));
 
-		uint32_t type = ReadFixLen(pos, 4);
-		uint32_t cbnkOffset = ReadFixLen(pos, 4);
+		uint32_t type = Ctx.ReadFixLen(pos, 4);
+		uint32_t cbnkOffset = Ctx.ReadFixLen(pos, 4);
 
-		Common::Analyse("Cseq 0x14", ReadFixLen(pos, 4));
+		Ctx.Analyse("Cseq 0x14", Ctx.ReadFixLen(pos, 4));
 
-		cseqs[i].FileName = Common::TypedName(strgOffset != 0xFFFFFFFF ? strgs[ReadFixLen(pos, 4)].String : to_string(id), "SEQ");
+		cseqs[i].FileName = TypedName(strgOffset != 0xFFFFFFFF ? strgs[Ctx.ReadFixLen(pos, 4)].String : to_string(id), "SEQ");
 
 		namesById[id] = cseqs[i].FileName;
 
@@ -444,14 +444,14 @@ bool Csar::Extract(const string& outputDir)
 		{
 			case 0x2201:
 			{
-				Common::Warning(pos - 16, "Skipping external stream", "external streams skipped (audio stored in a separate file)");
+				Ctx.Warning(pos - 16, "Skipping external stream", "external streams skipped (audio stored in a separate file)");
 
 				break;
 			}
 
 			case 0x2202:
 			{
-				Common::Warning(pos - 16, "Skipping CWSD", "CWSD wave-sound blocks skipped (sound effects not extracted)");
+				Ctx.Warning(pos - 16, "Skipping CWSD", "CWSD wave-sound blocks skipped (sound effects not extracted)");
 
 				break;
 			}
@@ -473,15 +473,15 @@ bool Csar::Extract(const string& outputDir)
 					// one (cbnkOffset 0x50 -> field at +0x60). A fixed +0x54 would
 					// silently read the wrong word for the larger layout.
 					uint8_t* startPos = cseqs[i].Offset + cbnkOffset + 0x10;
-					uint32_t startOffset = ReadFixLen(startPos, 4);
+					uint32_t startOffset = Ctx.ReadFixLen(startPos, 4);
 
 					pos += cbnkOffset;
 
-					uint32_t cbnk = ReadFixLen(pos, 2);
+					uint32_t cbnk = Ctx.ReadFixLen(pos, 2);
 
 					pos = files[id].Offset + 12;
 
-					uint32_t cseqLength = ReadFixLen(pos, 4);
+					uint32_t cseqLength = Ctx.ReadFixLen(pos, 4);
 
 					pos -= 16;
 
@@ -489,7 +489,7 @@ bool Csar::Extract(const string& outputDir)
 					// references (created in the bank loop above).
 					path bankDir = archiveDir / cbnks[cbnk].FileName;
 
-					Common::CheckBounds(pos, cseqLength);
+					Ctx.CheckBounds(pos, cseqLength);
 
 					// The first entry to claim a path keeps the bare symbol name, so
 					// non-colliding entries (the vast majority) and each collision
@@ -535,7 +535,7 @@ bool Csar::Extract(const string& outputDir)
 					ofs.write(reinterpret_cast<const char*>(pos), cseqLength);
 					ofs.close();
 
-					Cseq cseq(seqFile.c_str());
+					Cseq cseq(seqFile.c_str(), Ctx);
 
 					if (!cseq.Convert(startOffset))
 					{
@@ -549,7 +549,7 @@ bool Csar::Extract(const string& outputDir)
 			}
 
 			default:
-				Common::Error(pos - 16, "A valid music type", type);
+				Ctx.Error(pos - 16, "A valid music type", type);
 
 				return false;
 		}
@@ -557,42 +557,42 @@ bool Csar::Extract(const string& outputDir)
 
 	pos = Data + infoOffset + 8 + infoPlayerOffset;
 
-	uint32_t playerCount = ReadFixLen(pos, 4);
+	uint32_t playerCount = Ctx.ReadFixLen(pos, 4);
 
 	vector<uint8_t*> playerOffsets;
 
 	for (uint32_t i = 0; i < playerCount; ++i)
 	{
-		if (!Common::Assert(pos, 0x2209, ReadFixLen(pos, 4))) { return false; }
+		if (!Ctx.Assert(pos, 0x2209, Ctx.ReadFixLen(pos, 4))) { return false; }
 
-		playerOffsets.push_back(Data + infoOffset + 8 + infoPlayerOffset + ReadFixLen(pos, 4));
+		playerOffsets.push_back(Data + infoOffset + 8 + infoPlayerOffset + Ctx.ReadFixLen(pos, 4));
 	}
 
 	pos = Data + infoOffset + 8 + infoSetOffset;
 
-	uint32_t setCount = ReadFixLen(pos, 4);
+	uint32_t setCount = Ctx.ReadFixLen(pos, 4);
 
 	vector<uint8_t*> setOffsets;
 
 	for (uint32_t i = 0; i < setCount; ++i)
 	{
-		if (!Common::Assert(pos, 0x2204, ReadFixLen(pos, 4))) { return false; }
+		if (!Ctx.Assert(pos, 0x2204, Ctx.ReadFixLen(pos, 4))) { return false; }
 
-		setOffsets.push_back(Data + infoOffset + 8 + infoSetOffset + ReadFixLen(pos, 4));
+		setOffsets.push_back(Data + infoOffset + 8 + infoSetOffset + Ctx.ReadFixLen(pos, 4));
 	}
 
 	pos = Data + infoOffset + 8 + infoCgrpOffset;
 
-	uint32_t cgrpCount = ReadFixLen(pos, 4);
+	uint32_t cgrpCount = Ctx.ReadFixLen(pos, 4);
 
 	vector<CsarCgrp> cgrps;
 
 	for (uint32_t i = 0; i < cgrpCount; ++i)
 	{
-		if (!Common::Assert(pos, 0x2208, ReadFixLen(pos, 4))) { return false; }
+		if (!Ctx.Assert(pos, 0x2208, Ctx.ReadFixLen(pos, 4))) { return false; }
 
 		CsarCgrp cgrp;
-		cgrp.Offset = Data + infoOffset + 8 + infoCgrpOffset + ReadFixLen(pos, 4);
+		cgrp.Offset = Data + infoOffset + 8 + infoCgrpOffset + Ctx.ReadFixLen(pos, 4);
 
 		cgrps.push_back(cgrp);
 	}
@@ -601,33 +601,33 @@ bool Csar::Extract(const string& outputDir)
 	{
 		pos = cgrps[i].Offset;
 
-		cgrps[i].Id = ReadFixLen(pos, 4);
+		cgrps[i].Id = Ctx.ReadFixLen(pos, 4);
 
 		if (cgrps[i].Id == 0xFFFFFFFF)
 		{
 			continue;
 		}
 
-		if (!Common::Assert(pos, 0x1, ReadFixLen(pos, 4))) { return false; }
+		if (!Ctx.Assert(pos, 0x1, Ctx.ReadFixLen(pos, 4))) { return false; }
 
-		cgrps[i].FileName = Common::TypedName(strgOffset != 0xFFFFFFFF ? strgs[ReadFixLen(pos, 4)].String : to_string(cgrps[i].Id), "GROUP");
+		cgrps[i].FileName = TypedName(strgOffset != 0xFFFFFFFF ? strgs[Ctx.ReadFixLen(pos, 4)].String : to_string(cgrps[i].Id), "GROUP");
 
 		if (files[cgrps[i].Id].Offset != nullptr)
 		{
 			pos = files[cgrps[i].Id].Offset + 12;
 
-			uint32_t cgrpLength = ReadFixLen(pos, 4);
+			uint32_t cgrpLength = Ctx.ReadFixLen(pos, 4);
 
 			pos -= 16;
 
-			Common::CheckBounds(pos, cgrpLength);
+			Ctx.CheckBounds(pos, cgrpLength);
 
 			string grpFile = (archiveDir / (cgrps[i].FileName + ".bcgrp")).string();
 			ofstream ofs(grpFile, ofstream::binary);
 			ofs.write(reinterpret_cast<const char*>(pos), cgrpLength);
 			ofs.close();
 
-			Cgrp cgrp(grpFile.c_str(), &Cwars, cseqsFromCsar, namesById, Opts);
+			Cgrp cgrp(grpFile.c_str(), &Cwars, cseqsFromCsar, namesById, Opts, Ctx);
 
 			if (!cgrp.Extract())
 			{
@@ -640,11 +640,11 @@ bool Csar::Extract(const string& outputDir)
 			// external sibling .bcgrp that caesar does not load yet, so the banks,
 			// wave archives and sequences it references stay absent (their named
 			// directories are left empty). Surface it instead of dropping silently.
-			Common::Warning(cgrps[i].Offset, "group " + cgrps[i].FileName + " lives in an external .bcgrp (not loaded)", "external group files not loaded (their banks/sequences are absent)");
+			Ctx.Warning(cgrps[i].Offset, "group " + cgrps[i].FileName + " lives in an external .bcgrp (not loaded)", "external group files not loaded (their banks/sequences are absent)");
 		}
 	}
 
-	Common::Dump((archiveDir / (stem.string() + ".log")).string());
+	Ctx.Dump((archiveDir / (stem.string() + ".log")).string());
 
 	return true;
 }

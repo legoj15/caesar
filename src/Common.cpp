@@ -13,20 +13,6 @@
 
 using namespace std;
 
-// The one process-lifetime parse context. Defined before the reference bindings
-// below so it is fully constructed when they bind (single-TU static init runs in
-// definition order). The `Common::` statics are references into it, so every
-// existing `Common::X` call site reads and writes this instance unchanged; the
-// stage-0 fold will later thread this object by reference and retire the globals.
-ParseContext gParseContext;
-
-bool& Common::ShowWarnings = gParseContext.ShowWarnings;
-stack<string>& Common::FileNames = gParseContext.FileNames;
-stack<uint8_t*>& Common::Offsets = gParseContext.Offsets;
-vector<Range>& Common::Buffers = gParseContext.Buffers;
-vector<string>& Common::Log = gParseContext.Log;
-map<string, size_t>& Common::Notices = gParseContext.Notices;
-
 // Verify that a read of `bytes` bytes starting at `pos` stays inside one of the
 // currently-loaded file buffers. Offsets in these archives are read from the
 // file itself, so a corrupt or truncated file can point anywhere; without this
@@ -239,70 +225,4 @@ void ParseContext::Dump(string fileName)
 	}
 
 	ofs.close();
-}
-
-// --- Transitional forwarders -------------------------------------------------
-// The free read functions and the `Common::` facade methods delegate to the one
-// gParseContext instance, so existing call sites are byte-identical while the
-// fold threads a context through the readers. All of this is deleted once every
-// call site passes a ParseContext by reference.
-
-int32_t ReadFixLen(uint8_t*& pos, size_t bytes, bool littleEndian, bool isSigned)
-{
-	return gParseContext.ReadFixLen(pos, bytes, littleEndian, isSigned);
-}
-
-int32_t ReadVarLen(uint8_t*& pos)
-{
-	return gParseContext.ReadVarLen(pos);
-}
-
-void Common::CheckBounds(uint8_t* pos, size_t bytes)
-{
-	gParseContext.CheckBounds(pos, bytes);
-}
-
-void Common::Warning(uint8_t* pos, string msg, const string& noticeCategory)
-{
-	gParseContext.Warning(pos, msg, noticeCategory);
-}
-
-void Common::FlushNotices(const string& inputName)
-{
-	gParseContext.FlushNotices(inputName);
-}
-
-void Common::Push(string fileName, uint8_t* data, streamoff length)
-{
-	gParseContext.Push(fileName, data, length);
-}
-
-void Common::Pop()
-{
-	gParseContext.Pop();
-}
-
-void Common::Reset()
-{
-	gParseContext.Reset();
-}
-
-void Common::RequireOpen(bool streamOk, streamoff length, const string& fileName)
-{
-	gParseContext.RequireOpen(streamOk, length, fileName);
-}
-
-string Common::TypedName(const string& name, const string& type)
-{
-	return ::TypedName(name, type);
-}
-
-void Common::Analyse(string tag, uint32_t val)
-{
-	gParseContext.Analyse(tag, val);
-}
-
-void Common::Dump(string fileName)
-{
-	gParseContext.Dump(fileName);
 }

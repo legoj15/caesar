@@ -147,15 +147,15 @@ double ConvertTune(float tune)
 	return 1200 * ChangeLogBase(tune, 2);
 }
 
-Cbnk::Cbnk(const char* fileName, map<int, Cwar*>* cwars, const Options& opts) : FileName(fileName), Cwars(cwars), Opts(opts)
+Cbnk::Cbnk(const char* fileName, map<int, Cwar*>* cwars, const Options& opts, ParseContext& ctx) : Ctx(ctx), FileName(fileName), Cwars(cwars), Opts(opts)
 {
 	ifstream ifs(FileName, ios::binary | ios::ate);
 
 	Length = ifs.tellg();
-	Common::RequireOpen(ifs.good(), Length, FileName);
+	Ctx.RequireOpen(ifs.good(), Length, FileName);
 	Data = new uint8_t[Length];
 
-	Common::Push(filesystem::path(FileName).filename().string(), Data, Length);
+	Ctx.Push(filesystem::path(FileName).filename().string(), Data, Length);
 
 	ifs.seekg(0, ios::beg);
 	ifs.read(reinterpret_cast<char*>(Data), Length);
@@ -164,7 +164,7 @@ Cbnk::Cbnk(const char* fileName, map<int, Cwar*>* cwars, const Options& opts) : 
 
 Cbnk::~Cbnk()
 {
-	Common::Pop();
+	Ctx.Pop();
 
 	delete[] Data;
 }
@@ -173,32 +173,32 @@ bool Cbnk::Convert()
 {
 	uint8_t* pos = Data;
 
-	if (!Common::Assert(pos, 0x43424E4B, ReadFixLen(pos, 4, false))) { return false; }
-	if (!Common::Assert(pos, 0xFEFF, ReadFixLen(pos, 2))) { return false; }
-	if (!Common::Assert(pos, 0x20, ReadFixLen(pos, 2))) { return false; }
+	if (!Ctx.Assert(pos, 0x43424E4B, Ctx.ReadFixLen(pos, 4, false))) { return false; }
+	if (!Ctx.Assert(pos, 0xFEFF, Ctx.ReadFixLen(pos, 2))) { return false; }
+	if (!Ctx.Assert(pos, 0x20, Ctx.ReadFixLen(pos, 2))) { return false; }
 
-	[[maybe_unused]] uint32_t cbnkVersion = ReadFixLen(pos, 4);
+	[[maybe_unused]] uint32_t cbnkVersion = Ctx.ReadFixLen(pos, 4);
 
-	if (!Common::Assert<uint64_t>(pos, Length, ReadFixLen(pos, 4))) { return false; }
-	if (!Common::Assert(pos, 0x1, ReadFixLen(pos, 4))) { return false; }
-	if (!Common::Assert(pos, 0x5800, ReadFixLen(pos, 4))) { return false; }
+	if (!Ctx.Assert<uint64_t>(pos, Length, Ctx.ReadFixLen(pos, 4))) { return false; }
+	if (!Ctx.Assert(pos, 0x1, Ctx.ReadFixLen(pos, 4))) { return false; }
+	if (!Ctx.Assert(pos, 0x5800, Ctx.ReadFixLen(pos, 4))) { return false; }
 
-	uint32_t infoOffset = ReadFixLen(pos, 4);
-	uint32_t infoLength = ReadFixLen(pos, 4);
+	uint32_t infoOffset = Ctx.ReadFixLen(pos, 4);
+	uint32_t infoLength = Ctx.ReadFixLen(pos, 4);
 
-	if (!Common::Assert(pos, 0x494E464F, ReadFixLen(pos, 4, false))) { return false; }
-	if (!Common::Assert<uint32_t>(pos, infoLength, ReadFixLen(pos, 4))) { return false; }
-	if (!Common::Assert(pos, 0x100, ReadFixLen(pos, 4))) { return false; }
+	if (!Ctx.Assert(pos, 0x494E464F, Ctx.ReadFixLen(pos, 4, false))) { return false; }
+	if (!Ctx.Assert<uint32_t>(pos, infoLength, Ctx.ReadFixLen(pos, 4))) { return false; }
+	if (!Ctx.Assert(pos, 0x100, Ctx.ReadFixLen(pos, 4))) { return false; }
 
-	uint32_t cwavOffset = ReadFixLen(pos, 4);
+	uint32_t cwavOffset = Ctx.ReadFixLen(pos, 4);
 
-	if (!Common::Assert(pos, 0x101, ReadFixLen(pos, 4))) { return false; }
+	if (!Ctx.Assert(pos, 0x101, Ctx.ReadFixLen(pos, 4))) { return false; }
 
-	uint32_t instOffset = ReadFixLen(pos, 4);
+	uint32_t instOffset = Ctx.ReadFixLen(pos, 4);
 
 	pos = Data + infoOffset + 8 + cwavOffset;
 
-	uint32_t cwavCount = ReadFixLen(pos, 4);
+	uint32_t cwavCount = Ctx.ReadFixLen(pos, 4);
 
 	vector<CbnkCwav> cwavs;
 
@@ -211,8 +211,8 @@ bool Cbnk::Convert()
 		// its shdr byOriginalKey). Without this, an unreferenced sample wrote an
 		// uninitialized byte, making SF2 output non-deterministic.
 		CbnkCwav cwav{};
-		cwav.Cwar = ReadFixLen(pos, 4) - 0x5000000;
-		cwav.Id = ReadFixLen(pos, 4);
+		cwav.Cwar = Ctx.ReadFixLen(pos, 4) - 0x5000000;
+		cwav.Id = Ctx.ReadFixLen(pos, 4);
 
 		size_t j = 0;
 		auto it = Cwars->begin();
@@ -242,7 +242,7 @@ bool Cbnk::Convert()
 			Cwav* src = it->second->Cwavs[cwav.Id];
 
 			// Keep the per-sample stdout echo (empty range: no reads happen here now).
-			Common::Push(to_string(cwav.Id) + ".wav", nullptr, 0);
+			Ctx.Push(to_string(cwav.Id) + ".wav", nullptr, 0);
 
 			cwav.ChanCount = src->ChanCount;
 			cwav.SampleRate = src->SampleRate;
@@ -285,7 +285,7 @@ bool Cbnk::Convert()
 				cwav.LoopEnd = static_cast<uint32_t>(cwav.LeftSamples.size());
 			}
 
-			Common::Pop();
+			Ctx.Pop();
 		}
 
 		cwavs.push_back(cwav);
@@ -293,7 +293,7 @@ bool Cbnk::Convert()
 
 	pos = Data + infoOffset + 8 + instOffset;
 
-	uint32_t instCount = ReadFixLen(pos, 4);
+	uint32_t instCount = Ctx.ReadFixLen(pos, 4);
 
 	vector<CbnkInst> insts;
 
@@ -301,12 +301,12 @@ bool Cbnk::Convert()
 	{
 		CbnkInst inst{};
 
-		if (ReadFixLen(pos, 4) != 0x5900)
+		if (Ctx.ReadFixLen(pos, 4) != 0x5900)
 		{
 			inst.Exists = false;
 		}
 
-		inst.Offset = Data + infoOffset + 24 + ReadFixLen(pos, 4);
+		inst.Offset = Data + infoOffset + 24 + Ctx.ReadFixLen(pos, 4);
 
 		insts.push_back(inst);
 	}
@@ -320,9 +320,9 @@ bool Cbnk::Convert()
 
 		pos = insts[i].Offset;
 
-		uint32_t instType = ReadFixLen(pos, 4);
+		uint32_t instType = Ctx.ReadFixLen(pos, 4);
 
-		if (!Common::Assert(pos, 0x8, ReadFixLen(pos, 4))) { return false; }
+		if (!Ctx.Assert(pos, 0x8, Ctx.ReadFixLen(pos, 4))) { return false; }
 
 		switch (instType)
 		{
@@ -341,13 +341,13 @@ bool Cbnk::Convert()
 
 			case 0x6001:
 			{
-				insts[i].NoteCount = ReadFixLen(pos, 4);
+				insts[i].NoteCount = Ctx.ReadFixLen(pos, 4);
 
 				for (uint32_t j = 0; j < insts[i].NoteCount; ++j)
 				{
 					CbnkNote note{};
 					note.StartNote = j == 0 ? 0 : insts[i].Notes[j - 1].EndNote + 1;
-					note.EndNote = ReadFixLen(pos, 1);
+					note.EndNote = Ctx.ReadFixLen(pos, 1);
 
 					insts[i].Notes.push_back(note);
 				}
@@ -356,7 +356,7 @@ bool Cbnk::Convert()
 
 				if (padding)
 				{
-					if (!Common::Assert(pos, 0x0, ReadFixLen(pos, 4 - padding))) { return false; }
+					if (!Ctx.Assert(pos, 0x0, Ctx.ReadFixLen(pos, 4 - padding))) { return false; }
 				}
 
 				break;
@@ -364,7 +364,7 @@ bool Cbnk::Convert()
 
 			case 0x6002:
 			{
-				insts[i].NoteCount = ReadFixLen(pos, 2, false) + 1;
+				insts[i].NoteCount = Ctx.ReadFixLen(pos, 2, false) + 1;
 
 				for (uint32_t j = 0; j < insts[i].NoteCount; ++j)
 				{
@@ -375,7 +375,7 @@ bool Cbnk::Convert()
 					insts[i].Notes.push_back(note);
 				}
 
-				if (!Common::Assert(pos, 0x0, ReadFixLen(pos, 2))) { return false; }
+				if (!Ctx.Assert(pos, 0x0, Ctx.ReadFixLen(pos, 2))) { return false; }
 
 				insts[i].IsDrumKit = true;
 
@@ -384,7 +384,7 @@ bool Cbnk::Convert()
 
 			default:
 			{
-				Common::Error(pos - 8, "A valid instrument type", instType);
+				Ctx.Error(pos - 8, "A valid instrument type", instType);
 
 				return false;
 			}
@@ -392,12 +392,12 @@ bool Cbnk::Convert()
 
 		for (uint32_t j = 0; j < insts[i].NoteCount; ++j)
 		{
-			if (ReadFixLen(pos, 4) != 0x5901)
+			if (Ctx.ReadFixLen(pos, 4) != 0x5901)
 			{
 				insts[i].Notes[j].Exists = false;
 			}
 
-			insts[i].Notes[j].Offset = insts[i].Offset + 8 + ReadFixLen(pos, 4);
+			insts[i].Notes[j].Offset = insts[i].Offset + 8 + Ctx.ReadFixLen(pos, 4);
 		}
 
 		for (uint32_t j = 0; j < insts[i].NoteCount; ++j)
@@ -409,21 +409,21 @@ bool Cbnk::Convert()
 
 			pos = insts[i].Notes[j].Offset;
 
-			uint32_t id = ReadFixLen(pos, 4);
+			uint32_t id = Ctx.ReadFixLen(pos, 4);
 
-			if (!Common::Assert(pos, 0x8, ReadFixLen(pos, 4))) { return false; }
-			Common::Analyse("Note 0x08", ReadFixLen(pos, 4));
-			Common::Analyse("Note 0x0C", ReadFixLen(pos, 4));
+			if (!Ctx.Assert(pos, 0x8, Ctx.ReadFixLen(pos, 4))) { return false; }
+			Ctx.Analyse("Note 0x08", Ctx.ReadFixLen(pos, 4));
+			Ctx.Analyse("Note 0x0C", Ctx.ReadFixLen(pos, 4));
 
 			if (id == 0x6001)
 			{
-				Common::Analyse("Note 0x6001 0x10", ReadFixLen(pos, 4));
-				Common::Analyse("Note 0x6001 0x14", ReadFixLen(pos, 4));
-				Common::Analyse("Note 0x6001 0x18", ReadFixLen(pos, 4));
-				Common::Analyse("Note 0x6001 0x1C", ReadFixLen(pos, 4));
+				Ctx.Analyse("Note 0x6001 0x10", Ctx.ReadFixLen(pos, 4));
+				Ctx.Analyse("Note 0x6001 0x14", Ctx.ReadFixLen(pos, 4));
+				Ctx.Analyse("Note 0x6001 0x18", Ctx.ReadFixLen(pos, 4));
+				Ctx.Analyse("Note 0x6001 0x1C", Ctx.ReadFixLen(pos, 4));
 			}
 
-			uint32_t cwav = ReadFixLen(pos, 4);
+			uint32_t cwav = Ctx.ReadFixLen(pos, 4);
 
 			if (cwav < cwavs.size())
 			{
@@ -431,7 +431,7 @@ bool Cbnk::Convert()
 			}
 			else if (!cwavs.empty())
 			{
-				Common::Warning(pos - 4, "CWAV " + to_string(cwav) + " does not exist", "instrument notes referencing a missing sample (substituted the first sample)");
+				Ctx.Warning(pos - 4, "CWAV " + to_string(cwav) + " does not exist", "instrument notes referencing a missing sample (substituted the first sample)");
 
 				insts[i].Notes[j].Cwav = &cwavs[0];
 			}
@@ -440,13 +440,13 @@ bool Cbnk::Convert()
 				// The bank has no samples at all, so there is nothing to substitute
 				// and every following field dereferences Cwav. Fail this bank cleanly
 				// (the per-input handler isolates it) rather than deref an empty vector.
-				Common::Error(pos - 4, "a bank containing at least one sample", cwav);
+				Ctx.Error(pos - 4, "a bank containing at least one sample", cwav);
 
 				return false;
 			}
 
-			uint32_t noteFlags = ReadFixLen(pos, 4);
-			Common::Analyse("Note 0x14", noteFlags);
+			uint32_t noteFlags = Ctx.ReadFixLen(pos, 4);
+			Ctx.Analyse("Note 0x14", noteFlags);
 
 			// For ordinary (non-0x6001) notes this word is the note's flags, which
 			// is 0x21F across every observed bank; the field layout parsed below is
@@ -457,40 +457,40 @@ bool Cbnk::Convert()
 				ostringstream flagsMsg;
 				flagsMsg << "note flags 0x" << hex << uppercase << noteFlags << " (expected 0x21F)";
 
-				Common::Warning(pos - 4, flagsMsg.str(), "bank notes with an unrecognized flags word (envelope/pitch/pan may be misparsed)");
+				Ctx.Warning(pos - 4, flagsMsg.str(), "bank notes with an unrecognized flags word (envelope/pitch/pan may be misparsed)");
 			}
 
-			insts[i].Notes[j].RootKey = ReadFixLen(pos, 4);
+			insts[i].Notes[j].RootKey = Ctx.ReadFixLen(pos, 4);
 			insts[i].Notes[j].Cwav->Key = insts[i].Notes[j].RootKey;
-			insts[i].Notes[j].Volume = ReadFixLen(pos, 4);
-			insts[i].Notes[j].Pan = ReadFixLen(pos, 4);
+			insts[i].Notes[j].Volume = Ctx.ReadFixLen(pos, 4);
+			insts[i].Notes[j].Pan = Ctx.ReadFixLen(pos, 4);
 
 			// Note 0x24 is an f32 pitch ratio (frequency multiplier on top of the
 			// root key), stored as raw little-endian bits. Reinterpret those bits
 			// as a float and keep it; emitted as SF2 tune generators below.
-			uint32_t tuneBits = ReadFixLen(pos, 4);
-			Common::Analyse("Note 0x24", tuneBits);
+			uint32_t tuneBits = Ctx.ReadFixLen(pos, 4);
+			Ctx.Analyse("Note 0x24", tuneBits);
 
 			float tune;
 			memcpy(&tune, &tuneBits, sizeof(tune));
 			insts[i].Notes[j].Tune = tune;
 
-			Common::Analyse("Note 0x28", ReadFixLen(pos, 2));
+			Ctx.Analyse("Note 0x28", Ctx.ReadFixLen(pos, 2));
 
-			insts[i].Notes[j].Interpolation = ReadFixLen(pos, 1);
+			insts[i].Notes[j].Interpolation = Ctx.ReadFixLen(pos, 1);
 
-			if (!Common::Assert(pos, 0x0, ReadFixLen(pos, 1))) { return false; }
-			Common::Analyse("Note 0x2C", ReadFixLen(pos, 4));
-			Common::Analyse("Note 0x30", ReadFixLen(pos, 4));
-			Common::Analyse("Note 0x34", ReadFixLen(pos, 4));
+			if (!Ctx.Assert(pos, 0x0, Ctx.ReadFixLen(pos, 1))) { return false; }
+			Ctx.Analyse("Note 0x2C", Ctx.ReadFixLen(pos, 4));
+			Ctx.Analyse("Note 0x30", Ctx.ReadFixLen(pos, 4));
+			Ctx.Analyse("Note 0x34", Ctx.ReadFixLen(pos, 4));
 
-			insts[i].Notes[j].Attack = ReadFixLen(pos, 1);
-			insts[i].Notes[j].Decay = ReadFixLen(pos, 1);
-			insts[i].Notes[j].Sustain = ReadFixLen(pos, 1);
-			insts[i].Notes[j].Hold = ReadFixLen(pos, 1);
-			insts[i].Notes[j].Release = ReadFixLen(pos, 1);
+			insts[i].Notes[j].Attack = Ctx.ReadFixLen(pos, 1);
+			insts[i].Notes[j].Decay = Ctx.ReadFixLen(pos, 1);
+			insts[i].Notes[j].Sustain = Ctx.ReadFixLen(pos, 1);
+			insts[i].Notes[j].Hold = Ctx.ReadFixLen(pos, 1);
+			insts[i].Notes[j].Release = Ctx.ReadFixLen(pos, 1);
 
-			if (!Common::Assert(pos, 0x0, ReadFixLen(pos, 3))) { return false; }
+			if (!Ctx.Assert(pos, 0x0, Ctx.ReadFixLen(pos, 3))) { return false; }
 		}
 	}
 
@@ -566,7 +566,7 @@ bool Cbnk::Convert()
 					// reverb-capable player), and under --pad-sustain it is faked.
 					if (insts[i].Notes[j].Release == 127)
 					{
-						Common::Warning(insts[i].Notes[j].Offset, "instrument " + to_string(i) + " note " + to_string(j) + " has release 127",
+						Ctx.Warning(insts[i].Notes[j].Offset, "instrument " + to_string(i) + " note " + to_string(j) + " has release 127",
 							Opts.PadSustainSeconds > 0
 								? "instrument tails faked with a held release (--pad-sustain; not hardware behaviour)"
 								: "instrument tails that are console DSP reverb, not release (play the MIDI's CC91 send through a reverb-capable player, or approximate it with --pad-sustain)");

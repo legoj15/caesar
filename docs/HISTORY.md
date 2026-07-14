@@ -2301,3 +2301,64 @@ guard's own binary-hash test.) Warning-clean MSVC build (CI is warnings-as-
 errors). This clears the stage-1 round-trip's Cseq blocker; the survey's
 secondary stage-1 prerequisite — VM diagnostics rebuilding raw source pointers
 rather than storing offsets — remains open.
+
+## Suite stage 0 — the ParseContext fold (2026-07-13)
+
+The stage-0 sub-step the kickoff survey flagged as the *riskiest*, not the
+safest: its ~550-site diff (271 `Common::` references + 280 `ReadFixLen`/
+`ReadVarLen` calls) lands almost entirely on surfaces the default corpus A/B
+never exercises — `-w` text, `Assert`/`Error` and exception text, multi-input
+runs. Executed behind the diagnostics-goldens guard built for exactly this diff
+(session 2), in three verified commits, each passing the full gate (warning-clean
+MSVC build + 17-surface goldens byte-identical + 82-archive / 257,125-file corpus
+A/B byte-identical with identical stdout/stderr, exit 0). The whole fold is
+output-identical by construction; the goldens and the A/B confirmed it at every
+boundary.
+
+- **Commit 1 (`62582a9`) — the reference facade.** Introduced `struct
+  ParseContext` holding the six mutable members of the parse state
+  (`ShowWarnings`, `FileNames`, `Offsets`, `Buffers`, `Log`, `Notices`) and one
+  process-lifetime instance `gParseContext`; turned `Common`'s six statics into
+  references bound to that instance (instance defined before the bindings in the
+  same TU, so single-TU static-init order guarantees construction-before-bind).
+  Zero call sites touched — byte-identical by construction.
+- **Commit 2 (`55674ab`) — helpers onto the context.** Moved the real bodies of
+  the parse helpers (the `Assert`/`Error` templates, `Warning`, `FlushNotices`,
+  `Push`/`Pop`/`Reset`, `RequireOpen`, `CheckBounds`, `Analyse`, `Dump`,
+  `ReadFixLen`/`ReadVarLen`) onto `ParseContext`; `TypedName`, being
+  context-free, became a plain free function. The `Common::` facade methods and
+  the free read functions kept their signatures and forwarded to
+  `gParseContext`, so all ~550 call sites stayed byte-identical. This isolated
+  the one genuine byte-risk in the fold — relocating the diagnostic emission
+  code — behind a zero-call-site change, verified in isolation, so the next
+  commit's large call-site swap was a pure rename over a proven-identical base.
+- **Commit 3 (this commit) — thread and delete.** Gave each format class a
+  `ParseContext& Ctx` member (first member, initialised first, so no `-Wreorder`
+  under warnings-as-errors) and a constructor parameter mirroring the existing
+  `Options` injection; swapped every `Common::X` → `Ctx.X` and `ReadFixLen`/
+  `ReadVarLen` → `Ctx.ReadFixLen`/`Ctx.ReadVarLen`. `Cseq`'s four file-static
+  helpers (`emitCtrl`, `emitProgram`, `clampCtrl`, `ReadArgs`) took a
+  `ParseContext&` first parameter threaded from `Cseq::Convert`; `combinePan` and
+  `collectEntryTracks` are context-free and were left alone. `main` now creates
+  one `ParseContext` and threads it (`Csar` → `Cgrp` → `Cbnk`/`Cwar`/`Cwav`/
+  `Cseq`), with `-w`, `Reset` and `FlushNotices` moving onto it. The `Common`
+  struct, the free `ReadFixLen`/`ReadVarLen`, `gParseContext` and every forwarder
+  were deleted; the compiler's clean rebuild proves no call site was missed. The
+  context's lifetime still spans the whole run, so cross-input behaviour — the
+  pinned byte surface the survey enumerated (the multi-input `.log` bleed, the
+  top-of-stack attribution on the Csar/Cgrp paths, the leaked `cerr` format
+  flags) — is reproduced exactly, not cleaned up. Per-input scoping, which fixes
+  the `.log` bleed and *changes* output, is the deliberate next commit and is now
+  a localized change rather than a global one.
+
+Execution notes for the record: each commit was gated by the goldens after every
+rebuild and the corpus A/B before committing (dirty tree, baseline the parent
+commit). Commit 3's class-by-class threading was done in the working tree with a
+build + goldens checkpoint after each class (the `Common::` facade kept everything
+compiling until the final delete step), then committed as one unit with a single
+A/B — every intermediate working-tree state was byte-identical by construction
+(one shared context object), so the risk was compile-correctness, which the fast
+build loop caught, not output bytes. No latent behaviour was changed; two
+pre-existing hazards the survey already filed under Known bugs (the multi-input
+`.log` bleed and the group-path `-w` position nondeterminism) are untouched and
+now cheaper to fix.

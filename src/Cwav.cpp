@@ -13,15 +13,15 @@ using namespace std;
 
 const int8_t nibbles[] = { 0, 1, 2, 3, 4, 5, 6, 7, -8, -7, -6, -5, -4, -3, -2, -1 };
 
-Cwav::Cwav(const char* fileName) : FileName(fileName)
+Cwav::Cwav(const char* fileName, ParseContext& ctx) : Ctx(ctx), FileName(fileName)
 {
 	ifstream ifs(FileName, ios::binary | ios::ate);
 
 	Length = ifs.tellg();
-	Common::RequireOpen(ifs.good(), Length, FileName);
+	Ctx.RequireOpen(ifs.good(), Length, FileName);
 	Data = new uint8_t[Length];
 
-	Common::Push(filesystem::path(FileName).filename().string(), Data, Length);
+	Ctx.Push(filesystem::path(FileName).filename().string(), Data, Length);
 
 	ifs.seekg(0, ios::beg);
 	ifs.read(reinterpret_cast<char*>(Data), Length);
@@ -30,7 +30,7 @@ Cwav::Cwav(const char* fileName) : FileName(fileName)
 
 Cwav::~Cwav()
 {
-	Common::Pop();
+	Ctx.Pop();
 
 	delete[] Data;
 }
@@ -39,47 +39,47 @@ bool Cwav::Convert()
 {
 	uint8_t* pos = Data;
 
-	if (!Common::Assert(pos, 0x43574156, ReadFixLen(pos, 4, false))) { return false; }
-	if (!Common::Assert(pos, 0xFEFF, ReadFixLen(pos, 2))) { return false; }
-	if (!Common::Assert(pos, 0x40, ReadFixLen(pos, 2))) { return false; }
+	if (!Ctx.Assert(pos, 0x43574156, Ctx.ReadFixLen(pos, 4, false))) { return false; }
+	if (!Ctx.Assert(pos, 0xFEFF, Ctx.ReadFixLen(pos, 2))) { return false; }
+	if (!Ctx.Assert(pos, 0x40, Ctx.ReadFixLen(pos, 2))) { return false; }
 
-	[[maybe_unused]] uint32_t cwavVersion = ReadFixLen(pos, 4);
+	[[maybe_unused]] uint32_t cwavVersion = Ctx.ReadFixLen(pos, 4);
 
-	if (!Common::Assert<uint64_t>(pos, Length, ReadFixLen(pos, 4))) { return false; }
-	if (!Common::Assert(pos, 0x2, ReadFixLen(pos, 4))) { return false; }
-	if (!Common::Assert(pos, 0x7000, ReadFixLen(pos, 4))) { return false; }
+	if (!Ctx.Assert<uint64_t>(pos, Length, Ctx.ReadFixLen(pos, 4))) { return false; }
+	if (!Ctx.Assert(pos, 0x2, Ctx.ReadFixLen(pos, 4))) { return false; }
+	if (!Ctx.Assert(pos, 0x7000, Ctx.ReadFixLen(pos, 4))) { return false; }
 
-	uint32_t infoOffset = ReadFixLen(pos, 4);
-	uint32_t infoLength = ReadFixLen(pos, 4);
+	uint32_t infoOffset = Ctx.ReadFixLen(pos, 4);
+	uint32_t infoLength = Ctx.ReadFixLen(pos, 4);
 
-	if (!Common::Assert(pos, 0x7001, ReadFixLen(pos, 4))) { return false; }
+	if (!Ctx.Assert(pos, 0x7001, Ctx.ReadFixLen(pos, 4))) { return false; }
 
-	uint32_t dataOffset = ReadFixLen(pos, 4);
-	[[maybe_unused]] uint32_t dataLength = ReadFixLen(pos, 4);
+	uint32_t dataOffset = Ctx.ReadFixLen(pos, 4);
+	[[maybe_unused]] uint32_t dataLength = Ctx.ReadFixLen(pos, 4);
 
 	pos = Data + infoOffset;
 
-	if (!Common::Assert(pos, 0x494E464F, ReadFixLen(pos, 4, false))) { return false; }
-	if (!Common::Assert<uint32_t>(pos, infoLength, ReadFixLen(pos, 4))) { return false; }
+	if (!Ctx.Assert(pos, 0x494E464F, Ctx.ReadFixLen(pos, 4, false))) { return false; }
+	if (!Ctx.Assert<uint32_t>(pos, infoLength, Ctx.ReadFixLen(pos, 4))) { return false; }
 
-	uint8_t codec = ReadFixLen(pos, 1);
-	SampleMode = ReadFixLen(pos, 1);
+	uint8_t codec = Ctx.ReadFixLen(pos, 1);
+	SampleMode = Ctx.ReadFixLen(pos, 1);
 
-	if (!Common::Assert(pos, 0x0, ReadFixLen(pos, 2))) { return false; }
+	if (!Ctx.Assert(pos, 0x0, Ctx.ReadFixLen(pos, 2))) { return false; }
 
-	uint32_t sampleRate = ReadFixLen(pos, 4);
-	uint32_t loopStart = ReadFixLen(pos, 4);
-	uint32_t loopEnd = ReadFixLen(pos, 4);
-	[[maybe_unused]] uint32_t unalignedLoopStart = ReadFixLen(pos, 4);
-	uint16_t chanCount = ReadFixLen(pos, 2);
+	uint32_t sampleRate = Ctx.ReadFixLen(pos, 4);
+	uint32_t loopStart = Ctx.ReadFixLen(pos, 4);
+	uint32_t loopEnd = Ctx.ReadFixLen(pos, 4);
+	[[maybe_unused]] uint32_t unalignedLoopStart = Ctx.ReadFixLen(pos, 4);
+	uint16_t chanCount = Ctx.ReadFixLen(pos, 2);
 
-	if (!Common::Assert(pos, 0x0, ReadFixLen(pos, 2))) { return false; }
+	if (!Ctx.Assert(pos, 0x0, Ctx.ReadFixLen(pos, 2))) { return false; }
 
 	// A malformed wave with zero channels would later index chans[0] on an empty
 	// vector; reject it cleanly instead of over-reading.
 	if (chanCount == 0)
 	{
-		Common::Error(Data + infoOffset + 8, "at least one channel", chanCount);
+		Ctx.Error(Data + infoOffset + 8, "at least one channel", chanCount);
 
 		return false;
 	}
@@ -88,10 +88,10 @@ bool Cwav::Convert()
 
 	for (uint16_t i = 0; i < chanCount; ++i)
 	{
-		if (!Common::Assert(pos, 0x7100, ReadFixLen(pos, 4))) { return false; }
+		if (!Ctx.Assert(pos, 0x7100, Ctx.ReadFixLen(pos, 4))) { return false; }
 
 		CwavChan chan{};
-		chan.Offset = Data + infoOffset + 28 + ReadFixLen(pos, 4);
+		chan.Offset = Data + infoOffset + 28 + Ctx.ReadFixLen(pos, 4);
 
 		chans.push_back(chan);
 	}
@@ -100,11 +100,11 @@ bool Cwav::Convert()
 	{
 		pos = chans[i].Offset;
 
-		if (!Common::Assert(pos, 0x1F00, ReadFixLen(pos, 4))) { return false; }
+		if (!Ctx.Assert(pos, 0x1F00, Ctx.ReadFixLen(pos, 4))) { return false; }
 
-		chans[i].SampOffset = Data + dataOffset + 8 + ReadFixLen(pos, 4);
-		chans[i].AdpcmType = ReadFixLen(pos, 4);
-		uint32_t adpcmOffset = ReadFixLen(pos, 4);
+		chans[i].SampOffset = Data + dataOffset + 8 + Ctx.ReadFixLen(pos, 4);
+		chans[i].AdpcmType = Ctx.ReadFixLen(pos, 4);
+		uint32_t adpcmOffset = Ctx.ReadFixLen(pos, 4);
 
 		switch (codec)
 		{
@@ -114,7 +114,7 @@ bool Cwav::Convert()
 
 				for (uint32_t j = 0; j < loopEnd; ++j)
 				{
-					chans[i].PcmSamples.push_back(ReadFixLen(pos, 1) << 8);
+					chans[i].PcmSamples.push_back(Ctx.ReadFixLen(pos, 1) << 8);
 				}
 
 				break;
@@ -126,7 +126,7 @@ bool Cwav::Convert()
 
 				for (uint32_t j = 0; j < loopEnd; ++j)
 				{
-					chans[i].PcmSamples.push_back(ReadFixLen(pos, 2, true, true));
+					chans[i].PcmSamples.push_back(Ctx.ReadFixLen(pos, 2, true, true));
 				}
 
 				break;
@@ -140,24 +140,24 @@ bool Cwav::Convert()
 
 				for (uint8_t j = 0; j < 16; ++j)
 				{
-					chans[i].DspCoeffs[j] = ReadFixLen(pos, 2, true, true);
+					chans[i].DspCoeffs[j] = Ctx.ReadFixLen(pos, 2, true, true);
 				}
 
 				DspContext dspCntx{};
-				dspCntx.PredScal = ReadFixLen(pos, 1);
+				dspCntx.PredScal = Ctx.ReadFixLen(pos, 1);
 
-				if (!Common::Assert(pos, 0x0, ReadFixLen(pos, 1))) { return false; }
+				if (!Ctx.Assert(pos, 0x0, Ctx.ReadFixLen(pos, 1))) { return false; }
 
-				dspCntx.SampHist1 = ReadFixLen(pos, 2, true, true);
-				dspCntx.SampHist2 = ReadFixLen(pos, 2, true, true);
+				dspCntx.SampHist1 = Ctx.ReadFixLen(pos, 2, true, true);
+				dspCntx.SampHist2 = Ctx.ReadFixLen(pos, 2, true, true);
 
 				DspContext dspLoopCntx{};
-				dspLoopCntx.PredScal = ReadFixLen(pos, 1);
+				dspLoopCntx.PredScal = Ctx.ReadFixLen(pos, 1);
 
-				if (!Common::Assert(pos, 0x0, ReadFixLen(pos, 1))) { return false; }
+				if (!Ctx.Assert(pos, 0x0, Ctx.ReadFixLen(pos, 1))) { return false; }
 
-				dspLoopCntx.SampHist1 = ReadFixLen(pos, 2, true, true);
-				dspLoopCntx.SampHist2 = ReadFixLen(pos, 2, true, true);
+				dspLoopCntx.SampHist1 = Ctx.ReadFixLen(pos, 2, true, true);
+				dspLoopCntx.SampHist2 = Ctx.ReadFixLen(pos, 2, true, true);
 
 				chans[i].DspCntx = dspCntx;
 				chans[i].DspLoopCntx = dspLoopCntx;
@@ -170,7 +170,7 @@ bool Cwav::Convert()
 
 				for (uint32_t j = 0; j < ceil(loopEnd / 14.0f); ++j)
 				{
-					predScal = ReadFixLen(pos, 1);
+					predScal = Ctx.ReadFixLen(pos, 1);
 					// The predictor selects one of 8 coefficient pairs, so mask to 3
 					// bits: valid data is already 0-7 (identical result), while a
 					// corrupt high nibble of 8-15 would otherwise index DspCoeffs
@@ -184,7 +184,7 @@ bool Cwav::Convert()
 
 					for (uint32_t k = 0; k < samplesToRead; ++k)
 					{
-						int32_t adpcm = k % 2 == 0 ? nibbles[*pos >> 4] : nibbles[ReadFixLen(pos, 1) & 0xF];
+						int32_t adpcm = k % 2 == 0 ? nibbles[*pos >> 4] : nibbles[Ctx.ReadFixLen(pos, 1) & 0xF];
 						int32_t distance = (scal * adpcm) << 11;
 						int32_t predicted = (coef1 * hist1) + (coef2 * hist2);
 						int32_t corrected = predicted + distance;
@@ -213,14 +213,14 @@ bool Cwav::Convert()
 
 			case 3:
 			{
-				Common::Warning(Data + infoOffset + 8, "IMA ADPCM decoding not implemented", "waves left silent (IMA-ADPCM codec not implemented)");
+				Ctx.Warning(Data + infoOffset + 8, "IMA ADPCM decoding not implemented", "waves left silent (IMA-ADPCM codec not implemented)");
 
 				break;
 			}
 
 			default:
 			{
-				Common::Error(Data + infoOffset + 8, "A valid codec identifier", codec);
+				Ctx.Error(Data + infoOffset + 8, "A valid codec identifier", codec);
 
 				return false;
 			}
