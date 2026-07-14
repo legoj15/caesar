@@ -178,16 +178,22 @@ per stage. Status:
       A/B exit 0, and the goldens' sole change is the multi-input `.log`). The
       `-w` position nondeterminism turned out to be a heap-layout bug, not a
       lifetime one, so it was *not* fixed here — it stays open under Known bugs.
-      The per-file parser/exporter split then began 2026-07-13, retiring the
-      child write-then-reopen disk round-trip one class at a time (the parent
-      hands the child a span into its own already-loaded buffer; the `.bcwar`/
-      `.bcwav`/`.wav` writes stay as user output): **`Cwar` and `Cwav` done**
-      (borrow where the parent provably outlives the child, an owned copy for the
-      group-resident `Cwar` that outlives the stack-local `Cgrp` buffer;
-      output-identical, full gate green — write-up in HISTORY), remaining order
-      `Cgrp → Cbnk → Csar → Cseq`.
-      **Next up: continue the per-file split, then the `caesar_core` library
-      split.**
+      The per-file parser/exporter split then retired the child
+      write-then-reopen disk round-trip one class at a time (the parent hands
+      the child a span into its own already-loaded buffer; the `.bcwar`/
+      `.bcwav`/`.wav`/`.bcbnk`/`.bcseq`/`.bcgrp` writes stay as user output):
+      **all five embedded children done** — `Cwar`/`Cwav` (tranche 1) and
+      `Cbnk`/`Cseq`/`Cgrp` (tranche 2, 2026-07-13). Every child borrows its
+      parent's span except the group-resident `Cwar`, which owns a copy because
+      it outlives the stack-local `Cgrp` buffer; the group itself borrows a
+      window into `Csar`'s buffer, and its `Cbnk`/`Cseq` children borrow into
+      that window. The root `Csar` deliberately stays a file reader — it opens
+      the actual CLI input, not a child it re-reads — so the "children no longer
+      re-read the file they were just written from" line item is now complete
+      (output-identical, full gate green each commit — write-up in HISTORY).
+      **Next up: the per-class model/exporter split (promote the parse structs
+      to a lossless model, separating the reader from the SF2/MIDI/WAV
+      emitters), then the `caesar_core` library split.**
 - [ ] **Stage 1 — byte-identical round-trip** of BCSEQ/BCBNK/BCSAR from a
       raw-backed model (**the next milestone** — the cheapest complete proof
       the format is understood, and the serializer everything else sits on).
@@ -299,14 +305,15 @@ list is the known defect tail.
   remaining track is skipped with no notice (the start-offset and jump-target
   fallbacks are noticed; this path is not). Malformed-input edge only.
 - **A borrowed span-child's out-of-bounds read can fall through to the parent
-  range.** Since the Cwar/Cwav span construction (2026-07-13), a borrowed
-  child's `CheckBounds` range is a sub-range of the parent's still-registered
-  range; a read landing entirely past the child's declared length — reachable
-  only on a malformed/truncated embedded file — used to throw "points outside
-  the loaded data" and now silently succeeds if it stays inside the parent's
-  buffer. Corpus-invisible (a well-formed child never addresses past its own
-  length; the A/B would have caught any flip). Fix, if it ever matters: give
-  `CheckBounds` per-child range scoping, or copy that path.
+  range.** Since the embedded-child span construction (Cwar/Cwav, then
+  Cbnk/Cseq/Cgrp — all borrows; 2026-07-13), a borrowed child's `CheckBounds`
+  range is a sub-range of the parent's still-registered range; a read landing
+  entirely past the child's declared length — reachable only on a
+  malformed/truncated embedded file — used to throw "points outside the loaded
+  data" and now silently succeeds if it stays inside the parent's buffer.
+  Corpus-invisible (a well-formed child never addresses past its own length; the
+  A/B would have caught any flip). Fix, if it ever matters: give `CheckBounds`
+  per-child range scoping, or copy that path.
 - **Bank note fields are read at hardcoded offsets** (`Cbnk.cpp`, the
   note-parse loop). The format actually locates the ADSHR envelope through a
   `DataRef` chain (`note+0x10 + *(note+0x2C)`, then `+8`), and which optional

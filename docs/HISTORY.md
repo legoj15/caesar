@@ -2540,3 +2540,139 @@ constructed there too, which is why their migrations are entangled with `Cgrp`'s
 The pre-existing `Cgrp` map-insert-by-assignment WARC-id leak (Known bugs) is
 untouched and now also copies on the group path, but the leak is the overwrite,
 not the copy.
+
+## Suite stage 0 — the per-file split, tranche 2: Cbnk + Cseq + Cgrp span construction (2026-07-13)
+
+The second and final tranche of the embedded-child per-file split (step 3),
+finishing what tranche 1 (`Cwar`/`Cwav`) began: the three remaining classes the
+parent writes to disk and then re-opened through a file-path constructor —
+`Cbnk`, `Cseq`, and the group `Cgrp` — now take a **span** (full output name +
+pointer + length into the parent's already-loaded buffer) instead of re-reading
+the file they were just written from. The disk **write** stays untouched (the
+extracted `.bcbnk`/`.bcseq`/`.bcgrp` are user output); only the re-read goes.
+With this tranche the "children no longer re-read the file they were just
+written from" line item is **complete** — every embedded child (`Cwar`, `Cwav`,
+`Cbnk`, `Cseq`, `Cgrp`) is span-constructed; the only file reader left is the
+root `Csar`, which opens the actual CLI input, not a child it wrote (so it is
+correctly *not* migrated, despite an earlier note listing it in the order).
+`FileName` stays the full output path in all three classes (it composes the
+`.sf2`/`.mid` output name and, for the group, the archive extract directory),
+and the `Push` echo keeps deriving the bare filename from it, so the stdout name
+stream is untouched.
+
+**Every site in this tranche borrows — no owned copy is needed anywhere.** The
+one owned copy in the entire split remains the group-resident `Cwar` from
+tranche 1 (it enters the archive-lifetime shared `Cwars` map yet is built from
+the stack-local `Cgrp` buffer). None of this tranche's children escape into a
+longer-lived container, so each is provably outlived by its parent's buffer:
+
+- **`Cbnk` @ `Csar` (`Csar.cpp`, stack-local `cbnk`) — borrow.** Constructed
+  from `[pos, pos + cbnkLength)` into `Csar::Data`, converted immediately, and
+  destroyed at the end of the loop body while `Csar::Data` is alive.
+- **`Cbnk` @ `Cgrp` (`Cgrp::Cbnks`, heap) — borrow.** This is the site the
+  tranche-1 handoff flagged as the hazard to re-check: `Cgrp` *defers* its bank
+  conversions (it pushes `new Cbnk` objects into `Cgrp::Cbnks` during the file
+  loop and calls `Convert` on them all later in the same `Cgrp::Extract`). The
+  borrow is nonetheless safe because a `Cbnk` never leaves `Cgrp::Cbnks`, and
+  `~Cgrp` deletes every `Cbnk` (and `Cseq`) *before* releasing its own `Data`,
+  so `Cgrp::Data` outlives each child for its whole lifetime — deferred
+  conversion included. (Unlike the group `Cwar`, which *does* outlive the buffer
+  by entering the shared map; that is why the `Cwar` copies and the `Cbnk` does
+  not.)
+- **`Cseq` @ `Csar` (`Csar.cpp`, stack-local `cseq`) — borrow.** From
+  `[pos, pos + cseqLength)` into `Csar::Data`; `Convert(startOffset)` runs
+  immediately, then the object is destroyed while `Csar::Data` lives.
+  `startOffset` addresses *inside* the child's own span (it is relative to the
+  sequence's `DATA+8`), so it is entirely unaffected by whether the bytes came
+  from a fresh read or a borrowed window.
+- **`Cseq` @ `Cgrp` (`Cgrp::Cseqs`, heap) — borrow.** Same deferred-conversion
+  structure as the group `Cbnk`; `~Cgrp` frees `Cseqs` before `Data`, so the
+  borrow outlives the deferral.
+- **`Cgrp` @ `Csar` (`Csar.cpp`, stack-local `cgrp`) — borrow.** From
+  `[pos, pos + cgrpLength)` into `Csar::Data`; `Extract()` runs immediately and
+  the group is destroyed at the end of the loop body while `Csar::Data` is
+  alive. Because `Cgrp::Data` is now itself a window into `Csar::Data`, the
+  group's own borrowing children (`Cbnk`/`Cseq`) transitively borrow into
+  `Csar::Data` — a two-link borrow chain that holds because destruction is
+  child-before-parent at every link (`~Cgrp` frees the children, then the
+  stack-local group unwinds, all before `~Csar` frees `Csar::Data`). Migrating
+  `Cgrp` last made this whole chain provable inside one commit.
+
+**Construction-site census (what actually exists).** Exactly five sites, all
+found and migrated: `Cbnk` ×2 (`Csar.cpp` direct, `Cgrp.cpp` group), `Cseq` ×2
+(same two parents), `Cgrp` ×1 (`Csar.cpp` only). **No nested-group path
+exists** — `Cgrp::Extract`'s file loop handles only `CWAR`/`CBNK`/`CSEQ`/`CWSD`
+records; there is no `CGRP`-inside-`CGRP` case and no other `Cgrp` constructor
+call anywhere, so the earlier "check for nested groups" is settled as "none."
+The order chosen was `Cbnk → Cseq → Cgrp` (a deliberate reorder of the handoff's
+`Cbnk → Cseq → Cgrp` suggestion kept, and of the older `Cgrp`-first note
+dropped): doing the two leaf children first means the final `Cgrp` commit could
+state the complete `Csar::Data → Cgrp window → child span` borrow chain in one
+place, rather than leaving a transient commit where a migrated group borrows
+into `Csar::Data` while still handing file-reading children their bytes.
+
+**Error path.** Each span constructor reproduces the old file-path
+constructor's zero-length rejection with an explicit
+`Ctx.RequireOpen(true, Length, FileName)` (stream-ok `true`, so only the
+`length <= 0` branch can fire), reusing the identical error text and full output
+path, placed **before** the `Push` echo exactly as the old order was — so a
+degenerate empty embedded child throws before echoing its name and the stdout
+stream stays byte-identical. Not observed on the corpus.
+
+**File-path constructors removed; one dead include dropped.** After migration no
+caller uses the old `(const char*, …)` constructors — the only sites were the
+five migrated here — so all three were deleted (the clean build confirms none
+was missed). `Cseq.cpp`'s `<fstream>` include went with it (the removed
+`ifstream` was its only user; `Cseq` writes MIDI through libsmfc's `FILE*`, not
+`fstream`). `Cbnk.cpp` and `Cgrp.cpp` keep `<fstream>` — they still write SF2 /
+the embedded `.bcbnk`/`.bcseq`/`.bcgrp` output respectively.
+
+**Bounds net.** The disclosed tranche-1 edge (a borrowed child's `CheckBounds`
+sub-range can let a read past the child's declared length fall through to the
+parent range on malformed input) now also covers `Cbnk`/`Cseq`/`Cgrp`, which are
+all borrows. The Known-bugs entry's class list was extended accordingly; the
+mechanism is identical and corpus-invisible (the A/B would flip old-throw to
+new-succeed on any real file that hit it — it did not), so no new filing.
+
+**Per-commit verification (each commit passed all three gates).**
+
+- **Commit 1 — `Cbnk` (`e05ce0f`).** Signature `Cbnk(const std::string&,
+  uint8_t* data, std::streamoff length, std::map<int, Cwar*>*, const Options&,
+  ParseContext&)` (borrow-only); both sites (`Csar.cpp`, `Cgrp.cpp`) migrated.
+  Warning-clean MSVC Release build; diag-goldens **17/17 byte-identical**
+  (exit 0); corpus A/B (dirty tree, baseline `HEAD` = `df89578`) **82 archives /
+  257,125 files byte-identical, stdout/stderr identical, exit 0** (baseline
+  extract 85 s, new 69 s).
+- **Commit 2 — `Cseq` (`1e4e910`).** Signature `Cseq(const std::string&,
+  uint8_t* data, std::streamoff length, ParseContext&)` (borrow-only); both
+  sites migrated; dead `<fstream>` dropped. Warning-clean build; diag-goldens
+  **17/17 byte-identical** (exit 0); corpus A/B (baseline `HEAD` = `e05ce0f`)
+  **82 archives / 257,125 files byte-identical, stdout/stderr identical,
+  exit 0** (new 69 s).
+- **Commit 3 — `Cgrp` (this commit).** Signature `Cgrp(const std::string&,
+  uint8_t* data, std::streamoff length, std::map<int, Cwar*>*, const std::map<int,
+  bool>&, const std::map<int, std::string>&, const Options&, ParseContext&)`
+  (borrow-only); the sole site (`Csar.cpp`) migrated; tranche docs. Warning-clean
+  build; diag-goldens **17/17 byte-identical** (exit 0); corpus A/B (baseline
+  `HEAD` = `1e4e910`) **82 archives / 257,125 files byte-identical,
+  stdout/stderr identical, exit 0** (new 70 s) — this A/B exercises the group
+  path (embedded-group archives such as `ctr_dash`), so the full two-link borrow
+  chain is corpus-verified.
+
+**For the model/exporter-split executor (the next step).** The whole embedded
+re-read family is gone; every child parser is handed its bytes as a borrowed (or,
+for the one group `Cwar`, owned) `Data` span, and `FileName` is now purely an
+*output* path (the child-write directory / `.sf2`/`.mid`/`.wav` name), never an
+input handle. Things that bear on promoting the parse structs to a lossless
+model: (1) each class's `Data` pointer is the read cursor's backing store —
+splitting the reader from the emitter must keep the parsed model's lifetime
+inside the parent buffer's lifetime, or copy at the model boundary (the same
+borrow-vs-own analysis, one level up). (2) `Cgrp` defers `Cbnk`/`Cseq`
+conversion within `Extract`; a reader/emitter split should preserve that a
+group's children are fully *parsed* before any is *emitted* if it relies on the
+deferral (today it does not depend on cross-child state, but the shared `Cwars`
+map is populated across the file loop, so bank emission already assumes all wave
+archives are present). (3) The stale top-of-stack `-w AT POSITION` attribution on
+group paths (Known bugs, heap-layout nondeterministic) is untouched and still
+rides the shared `Offsets` stack — a per-model offset base is the real fix and
+overlaps the stage-1 drop-the-buffer work.

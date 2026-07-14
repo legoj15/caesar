@@ -73,6 +73,21 @@ House rules:
   257,125-file corpus A/B byte-identical with identical stdout/stderr, exit 0;
   17-surface diagnostics goldens byte-identical; extraction is modestly faster
   from dropping the per-child re-read.)
+- **Embedded banks, sequences and group files are likewise parsed from the
+  parent's buffer — the disk round-trip for embedded children is now fully
+  gone** (stage-0 per-file split, second tranche: `Cbnk`, `Cseq`, `Cgrp`). With
+  `Cwar`/`Cwav` already migrated, every embedded child now receives its bytes as
+  a pointer + length into the parent's already-loaded buffer instead of
+  re-opening the file it was just written to; only the root `Csar` still reads
+  from disk, because it opens the actual CLI input rather than a child it wrote.
+  `Csar`/`Cgrp` still write each extracted `.bcbnk`/`.bcseq`/`.bcgrp` as user
+  output. All five new sites borrow the parent span (each parent provably
+  outlives its child — a `Cbnk`/`Cseq` never enters the archive-lifetime shared
+  map, and a group borrows a window into `Csar`'s buffer that outlives it), so
+  the only owned copy in the whole split stays the group-resident `Cwar`. The
+  old file-path constructors are removed. (`output-identical` — 82-archive /
+  257,125-file corpus A/B byte-identical with identical stdout/stderr, exit 0
+  each commit; 17-surface diagnostics goldens byte-identical.)
 - **The global mutable parser state is now a `ParseContext` passed by
   reference** (stage-0 library-core fold). The six process-globals behind the
   old `Common::` facade (`ShowWarnings`, `FileNames`, `Offsets`, `Buffers`,

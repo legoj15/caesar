@@ -14,19 +14,21 @@
 using namespace std;
 using namespace filesystem;
 
-Cgrp::Cgrp(const char* fileName, map<int, Cwar*>* cwars, const map<int, bool>& cseqsFromCsar, const map<int, string>& namesFromCsar, const Options& opts, ParseContext& ctx) : Ctx(ctx), FileName(fileName), Cwars(cwars), CseqsFromCsar(cseqsFromCsar), NamesFromCsar(namesFromCsar), Opts(opts)
+Cgrp::Cgrp(const string& fileName, uint8_t* data, streamoff length, map<int, Cwar*>* cwars, const map<int, bool>& cseqsFromCsar, const map<int, string>& namesFromCsar, const Options& opts, ParseContext& ctx) : Ctx(ctx), FileName(fileName), Cwars(cwars), CseqsFromCsar(cseqsFromCsar), NamesFromCsar(namesFromCsar), Opts(opts)
 {
-	ifstream ifs(FileName, ios::binary | ios::ate);
+	Length = length;
 
-	Length = ifs.tellg();
-	Ctx.RequireOpen(ifs.good(), Length, FileName);
-	Data = new uint8_t[Length];
+	// Csar already holds these bytes -- the span its just-written .bcgrp was
+	// serialised from -- so borrow them directly instead of re-opening the file
+	// we just wrote. A zero-length span is the same degenerate condition the old
+	// file-path constructor rejected on an empty re-read (RequireOpen on
+	// length <= 0); preserve that error identically, and fire it before the Push
+	// echo so the stdout stream stays byte-for-byte unchanged.
+	Ctx.RequireOpen(true, Length, FileName);
+
+	Data = data;
 
 	Ctx.Push(filesystem::path(FileName).filename().string(), Data, Length);
-
-	ifs.seekg(0, ios::beg);
-	ifs.read(reinterpret_cast<char*>(Data), Length);
-	ifs.close();
 }
 
 Cgrp::~Cgrp()
@@ -43,7 +45,8 @@ Cgrp::~Cgrp()
 
 	Ctx.Pop();
 
-	delete[] Data;
+	// Data is borrowed from Csar's buffer (freed by Csar, after this stack-local
+	// group and every child above); do not delete it here.
 }
 
 bool Cgrp::Extract()

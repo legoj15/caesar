@@ -641,7 +641,12 @@ bool Csar::Extract(const string& outputDir)
 			ofs.write(reinterpret_cast<const char*>(pos), cgrpLength);
 			ofs.close();
 
-			Cgrp cgrp(grpFile.c_str(), &Cwars, cseqsFromCsar, namesById, Opts, Ctx);
+			// The .bcgrp was just written from [pos, pos + cgrpLength) into Csar's
+			// own buffer; hand that span to the child instead of re-reading the
+			// file. This Cgrp is a stack local, extracted and destroyed here while
+			// Csar::Data is alive, so borrowing is safe -- and the spans it hands
+			// its own Cbnk/Cseq children are windows into this same Csar::Data.
+			Cgrp cgrp(grpFile, pos, cgrpLength, &Cwars, cseqsFromCsar, namesById, Opts, Ctx);
 
 			if (!cgrp.Extract())
 			{
