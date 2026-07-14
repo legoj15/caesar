@@ -187,6 +187,18 @@ per stage. Status:
       phases; first audible `.wav` at C3; `caesar_play` lib + `caesar-play`
       offline-render exe; golden-render net from the first `.wav`): full plan in
       [HISTORY.md](HISTORY.md#suite-stage-2--the-dry-player-blueprint-2026-07-14-survey).
+      **Phase I done (C1–C3, 2026-07-14): first audible `.wav` achieved.** The
+      `caesar_play`/`caesar-play` scaffold, the in-memory loader (no Export), the
+      single-voice DSP + native mix bus + windowed-sinc final resample, and the
+      concurrent-track sequencer (notes/rests/program/tempo/timebase/control-flow/
+      `[If]`-VM, noteWait default on) all landed; a real BGM (`BGM_DEN_RESULT`)
+      renders to an audible, note-shaped WAV whose length matches its tick-length
+      at tempo, and the `tools/play-goldens` Net-A golden hash net is live.
+      **Next: Phase II — C4 the NW4R `EnvGenerator` (the load-bearing envelope,
+      replacing C3's trivial declick gate), C5 the 24-voice priority allocator +
+      mono, C6 native pan/vol/pitch/Tune.** Write-up in the HISTORY 2026-07-14
+      Phase I entry, including the per-command handoff (what each safe-skipped
+      opcode needs, and the deferred re-roll/tie/loop refinements).
       **Console-capture dependency for the final tolerance proof (Phase IV):
       the old music captures are gone — fresh New 3DS captures needed
       (`BGM_MAIN_Mii_Only_One`, per-instrument isolated notes, the MeetSound

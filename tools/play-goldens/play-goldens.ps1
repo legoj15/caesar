@@ -171,6 +171,13 @@ $Invocations = @(
     # C2 — the single-voice DSP proof (one hard-coded note at its root key).
     @{ Name = 'note-caravel'; Mode = '--render-note'; Source = 'caravel'; Seq = 'SE_CTR_COMMON_OK'; Rate = 48000; ExpectExit = 0 }
 
+    # C3 — the first audible sequence render. BGM_DEN_RESULT ends naturally (a
+    # whole-song loop-back ends the track after one body), sets a real tempo
+    # (140 BPM) and runs 10 concurrent tracks, so its ~29 s render is finite and
+    # deterministic. SE_SQUARE_CONGRATULATION is a tiny 2-note SE whose duration
+    # matches its FluidSynth render in caesar_AB_MiiPlaza (the structural check).
+    @{ Name = 'bgm-den-result'; Mode = '--render'; Source = 'meetsound'; Seq = 'BGM_DEN_RESULT';           Rate = 48000; MaxSeconds = 120; ExpectExit = 0 }
+    @{ Name = 'se-square';      Mode = '--render'; Source = 'meetsound'; Seq = 'SE_SQUARE_CONGRATULATION'; Rate = 48000; MaxSeconds = 30;  ExpectExit = 0 }
 )
 
 # ---------------------------------------------------------------------------

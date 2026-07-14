@@ -24,6 +24,25 @@ House rules:
 
 ### Added
 
+- **`caesar-play` — the suite stage-2 offline dry player (Phase I: first audible
+  `.wav`).** A new `caesar_play` static library and `caesar-play` CLI, built
+  alongside the converter but entirely separate from it: they re-interpret
+  `Cseq`'s emit walk as a concurrent real-time sequencer feeding an in-memory
+  voice DSP that mixes at the DSP's native 32,728 Hz and resamples once
+  (Blackman-Harris windowed-sinc) to the output rate. `caesar-play --list` names
+  an archive's renderable sequences; `--render <archive> --seq <name-or-index>
+  --out <file.wav> [--rate <hz>] [--max-seconds <n>]` renders a chosen sequence to
+  a 16-bit stereo WAV with no audio device; `--render-note` is the single-voice
+  DSP proof. Loads read-only via `Csar::Parse` and an in-memory construct+parse of
+  the wave archives, banks and sequence (no extraction, no `.wav`/`.sf2`/`.mid`
+  written). A render golden net (`tools/play-goldens`) byte-pins the rendered WAV
+  hashes with a determinism guard and self-test. Commands wired: notes, rests,
+  program change, tempo (0xE1), timebase (0xB0), note-wait (0xC7), OpenTrack/
+  Jump/Call/Return/Fin, and the `[If]`/variable/comparison VM; volume/pan/pitch/
+  LFO/fx-send commands are safe-skipped (no timing desync) pending later commits.
+  **`output-identical` for the converter** — `caesar` is a byte-for-byte unchanged
+  parallel target (ab-verify + diag-goldens both exit 0); this adds a new build
+  artifact only.
 - **BCSAR container round-trip serialization (`Csar::Serialize()` in `caesar_core`)
   — the stage-1 milestone reached: byte-identical BCSAR + BCSEQ + BCBNK round-trip,
   proven corpus-wide.** The inverse of `Csar::Parse`, reading only model state

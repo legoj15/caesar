@@ -135,4 +135,32 @@ namespace play
 	// and render that one note at its root key into `bus` (1 s gate + 1 s tail,
 	// velocity 100). Deterministic. Returns false if the bank has no playable note.
 	bool renderSingleNote(const LoadedArchive& arch, StereoBus& bus);
+
+	// --- The sequencer spine (C3) -------------------------------------------
+
+	// Summary of one sequence render, for the CLI/report and audibility checks.
+	struct RenderStats
+	{
+		uint32_t notesFired = 0;      // note events scheduled
+		uint32_t notesDropped = 0;    // notes with no resolvable instrument/zone/sample
+		uint32_t tracksOpened = 0;    // distinct tracks that ran
+		uint64_t tickLength = 0;      // total sequence ticks stepped
+		uint64_t nativeSamples = 0;   // rendered length on the 32,728 Hz bus
+		double tempoBpm = 120.0;      // last tempo in force
+		uint32_t timebase = 48;       // last timebase in force
+		bool loopDetected = false;    // a whole-song loop-back ended a track (rendered once)
+		bool cappedByMaxSeconds = false;
+
+		// Opcodes the walk safe-skipped (never desyncing time): plain command byte,
+		// or 0x100 | ext for an extended (0xF0-prefixed) op. For the handoff report.
+		std::vector<uint32_t> skippedOps;
+	};
+
+	// Render a resolved sequence (arch.seq bound to arch.bank) to the native-rate
+	// bus. Runs the concurrent per-tick VM (notes/rests/program/tempo/timebase/
+	// control-flow, noteWait default on) against the 160-sample frame clock,
+	// producing note events that drive voices through resolveVoice/renderVoice.
+	// `maxSeconds` caps a forever-looping sequence. Returns false only on a hard
+	// setup error; an empty/instant sequence still returns true with 0 notes.
+	bool renderSequence(const LoadedArchive& arch, StereoBus& bus, uint32_t maxSeconds, RenderStats& stats);
 }

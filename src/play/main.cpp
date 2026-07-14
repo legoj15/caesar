@@ -2,13 +2,13 @@
 // sequence from a .bcsar to a .wav with no audio device. A development/suite
 // tool, NOT part of the converter release.
 //
-//   caesar-play --list   <archive.bcsar>
-//   caesar-play --render <archive.bcsar> --seq <name-or-index> --out <file.wav>
-//                        [--rate <hz>] [--max-seconds <n>]
+//   caesar-play --list        <archive.bcsar>
+//   caesar-play --render      <archive.bcsar> --seq <name-or-index> --out <file.wav>
+//   caesar-play --render-note <archive.bcsar> --seq <name-or-index> --out <file.wav>
 //
-// C1 (this commit): the loader + --list + a silent --render of deterministic
-// length that proves the seq -> bank -> wave-archive -> sample resolution chain.
-// The voice DSP (C2) and the sequencer (C3) fill in the actual audio.
+// --render runs the concurrent sequencer (C3) -> voices -> native mix bus ->
+// one final resample -> WAV; --render-note is the C2 single-voice DSP proof;
+// --list names an archive's renderable sequences.
 
 #include "CaesarPlay.hpp"
 
@@ -16,6 +16,7 @@
 #include "Wav.hpp"
 
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <iostream>
 #include <string>
@@ -25,10 +26,6 @@ using namespace std;
 
 namespace
 {
-	// C1 renders a fixed span of silence; C3 replaces this with the sequence's
-	// own length. Kept deterministic so the eventual golden set is stable.
-	constexpr double kC1SilentSeconds = 2.0;
-
 	constexpr uint32_t kDefaultRate = 48000;
 	constexpr uint32_t kDefaultMaxSeconds = 300;
 
@@ -104,11 +101,26 @@ namespace
 		return 0;
 	}
 
+	// Name a safe-skipped opcode for the render summary.
+	string opName(uint32_t op)
+	{
+		char buf[32];
+
+		if (op & 0x100u)
+		{
+			snprintf(buf, sizeof(buf), "0xF0/0x%02X", op & 0xFF);
+		}
+		else
+		{
+			snprintf(buf, sizeof(buf), "0x%02X", op & 0xFF);
+		}
+
+		return buf;
+	}
+
 	int doRender(const string& archivePath, const string& choice, const string& outPath,
 		uint32_t rate, uint32_t maxSeconds)
 	{
-		(void)maxSeconds;  // used from C3, when the sequencer bounds the render
-
 		auto arch = play::loadArchive(archivePath);
 
 		if (!arch)
@@ -137,19 +149,53 @@ namespace
 			return 1;
 		}
 
-		// C1: a deterministic span of silence. The chain above already proved the
-		// bank + samples + sequence all resolved; the audio comes online in C2/C3.
-		size_t frames = static_cast<size_t>(kC1SilentSeconds * rate);
-		vector<int16_t> interleaved(frames * 2, 0);
+		play::StereoBus bus;
+		play::RenderStats stats;
 
-		if (!play::writeWavPcm(outPath, interleaved, 2, rate))
+		if (!play::renderSequence(*arch, bus, maxSeconds, stats))
+		{
+			cerr << "caesar-play: failed to render '" << chosen->name << "'\n";
+			return 1;
+		}
+
+		vector<int16_t> pcm = play::finalizeToPcm(bus, rate);
+
+		if (!play::writeWavPcm(outPath, pcm, 2, rate))
 		{
 			cerr << "caesar-play: failed to write " << outPath << "\n";
 			return 1;
 		}
 
-		cout << "rendered '" << chosen->name << "' -> " << outPath
-			<< " (" << frames << " frames @ " << rate << " Hz)\n";
+		double seconds = (bus.frames() > 0) ? static_cast<double>(bus.frames()) / play::kNativeRate : 0.0;
+
+		cout << "rendered '" << chosen->name << "' -> " << outPath << "\n"
+			<< "  " << (pcm.size() / 2) << " frames @ " << rate << " Hz (" << seconds << " s)\n"
+			<< "  notes: " << stats.notesFired << " fired, " << stats.notesDropped << " dropped"
+			<< "; tracks: " << stats.tracksOpened
+			<< "; tempo " << stats.tempoBpm << " BPM, timebase " << stats.timebase
+			<< "; " << stats.tickLength << " ticks\n";
+
+		if (stats.loopDetected)
+		{
+			cout << "  whole-song loop detected: body rendered once (a track's backward jump ended it)\n";
+		}
+
+		if (stats.cappedByMaxSeconds)
+		{
+			cout << "  render hit the --max-seconds " << maxSeconds << " cap (sequence still running)\n";
+		}
+
+		if (!stats.skippedOps.empty())
+		{
+			cout << "  safe-skipped (no audio yet): ";
+
+			for (size_t i = 0; i < stats.skippedOps.size(); ++i)
+			{
+				cout << (i ? ", " : "") << opName(stats.skippedOps[i]);
+			}
+
+			cout << "\n";
+		}
 
 		return 0;
 	}

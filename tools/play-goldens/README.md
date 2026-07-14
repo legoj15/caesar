@@ -51,8 +51,8 @@ renders one WAV and pins its `sha256` + the process exit code. Current set:
 | name             | mode            | source     | sequence                   | what it proves |
 |------------------|-----------------|------------|----------------------------|----------------|
 | `note-caravel`   | `--render-note` | caravel    | (bank of SE_CTR_COMMON_OK) | C2 single-voice DSP: one note at its root key |
-
-(C3 adds the first real-sequence renders here.)
+| `bgm-den-result` | `--render`      | meetsound  | BGM_DEN_RESULT             | C3 first audible sequence — 10 tracks, real 140 BPM tempo, ends naturally (loop-once), ~29 s |
+| `se-square`      | `--render`      | meetsound  | SE_SQUARE_CONGRATULATION   | C3 small SE whose duration matches its FluidSynth render in `caesar_AB_MiiPlaza` |
 
 ## What is NOT committed
 

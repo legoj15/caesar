@@ -3855,3 +3855,197 @@ shares), C8 tie/sweep/portamento, C9 LFO, C10 bank switch + velocity range +
 mute + LPF. Phase IV — C11 the console tolerance net (needs the new captures).
 Explicitly deferred: reverb/delay/surround (stage 3), real LCG + mod curves
 (stage 4), real-time device output, IMA-ADPCM/CWSD coverage.
+
+## Suite stage 2 Phase I — the dry player's first audible .wav (2026-07-14)
+
+Executed C1–C3 of the dry-player blueprint: the `caesar_play` engine and
+`caesar-play` CLI now render a real BCSAR sequence to an audible `.wav`. Three
+commits, each warning-clean on all targets with `caesar` itself byte-identical
+(ab-verify baseline exit 0, diag-goldens exit 0 at every commit).
+
+**Commits:** C1 `784d2ed` (scaffold + loader), C2 `9c32155` (single-voice DSP +
+mix bus + WAV + Net-A goldens), C3 (this) — the sequencer spine.
+
+### Architecture as built
+
+A `caesar_play` STATIC library links `caesar_core` PUBLIC and lives *outside*
+it, so the converter's byte-identical A/B and round-trip guards keep watching
+`caesar_core` unchanged — the player is a parallel consumer of the same parsed
+models, never a modifier of any export path. Five translation units:
+
+- `Loader.cpp` — read-only archive load + seq→bank→wave-archive→sample resolution.
+- `Dsp.cpp` — `resolveVoice` (note→sample), `renderVoice` (loop-aware fetch +
+  linear interpolation + trivial gate → native bus), `finalizeToPcm` (final
+  resample + 16-bit quantize), `renderSingleNote` (the C2 proof).
+- `SeqRuntime.cpp` — the concurrent per-tick VM producing note events.
+- `Wav.cpp` — the RIFF/WAVE writer (Cwav::ExportWav's shape, explicit LE).
+- `main.cpp` — the CLI.
+
+The rate pipeline follows SUITE-DESIGN: every voice resamples to a float stereo
+bus at **32,728 Hz** (linear per-voice interpolation for now — Azahar routes the
+console's polyphase to linear behind a TODO, and the blueprint says ship linear,
+recover the truth later via the teakra oracle), and **one** final resample takes
+the bus to `--rate` (default 48 kHz).
+
+### The loader without Export
+
+`Csar::Export` is the only place children get constructed, and it writes files
+as it goes. The player needed the construction+Parse *without* the writes, so
+`loadArchive` replicates just that skeleton against the live archive buffer:
+
+- `Csar::Parse` builds the record tree (no I/O, no child construction).
+- For each `CsarCwar`: locate the blob (`Files[id].Offset + 12` holds the length
+  word; the data span starts 16 bytes before it — exactly Export's arithmetic),
+  bounds-check, `new Cwar(borrowed span)`, `Cwar::Parse`, then **manually** loop
+  its `CwavRecords` constructing borrowed `Cwav`s and `Cwav::Parse`ing them (which
+  decodes PCM into `Channels` and sets `Converted`) — never `ExportWav`. Absent
+  (external) wave archives are still recorded as **null slots** in `Csar::Cwars`,
+  because a bank resolves a sample's wave archive by *advancing `Cwars.begin()` by
+  the stored index* and that positional count must include the nulls.
+- `resolveSequence` builds the chosen sequence's `Cbnk` (samples resolve live
+  against the decoded `Cwars`, no `.wav` re-read) and its own `Cseq`.
+
+`ParseContext` frames stay balanced by RAII: `LoadedArchive` declares
+`ctx → csar → bank → seq`, so reverse destruction pops seq/bank first, then
+`~Csar` frees the wave archives it built, then the context outlives them all.
+`cout` (which the constructors echo filenames to) is silenced during the load
+with a restoring `ostringstream` guard; `cerr` errors still surface. Loader
+diagnostics are accepted collateral of a new surface — they are not pinned.
+
+`resolveVoice` mirrors `Cbnk::Export`'s SF2 resolution exactly: the instrument's
+key-split zone whose `[StartNote, EndNote]` contains the key (uniform over the
+0x6000/0x6001/0x6002 instrument types), then the live `Cwav` via the *same*
+positional `Cwars` index. Pitch = `2^((key − rootKey)/12) × Tune` folded into the
+sample-rate ratio; gain = `velocity/127 × zoneVolume/127`; loop = `SampleMode`
+odd with valid `[LoopStart, LoopEnd)`, else one-shot.
+
+### The resample choice
+
+A Blackman-Harris-windowed sinc, HALF = 16 (32 taps), evaluated through a
+2048-phase precomputed kernel table, cutoff `min(1, outRate/32728)`. Rationale:
+the mix bus is band-limited to the native Nyquist (16.364 kHz) *by construction*,
+so for the common upsample (48/96 kHz) the interpolation is provably transparent;
+Blackman-Harris gives ~ −92 dB sidelobes (no Bessel needed, unlike Kaiser); the
+phase table keeps it fast and fully deterministic (no per-sample transcendentals
+on the hot path). It sits far below the real accuracy ceiling (the per-voice
+linear interpolation and the not-yet-native envelope), so it is not the limiter.
+16-bit quantize is clamp-to-[−1,1] then `lround(x·32767)`.
+
+### The sequencer spine (C3)
+
+The one structural change from `Cseq::Export`'s sequential stand-in walk:
+**concurrent tracks against a shared 160-sample frame clock.** Each frame
+(4.889 ms) a fractional-tick accumulator advances by `tempoBPM/60 × timebase ×
+160/32728` ticks; on each whole tick every open track is stepped until it blocks
+on a note/rest. Note-ons are stamped at the frame-quantized sample position
+(this *is* the console model — the sequence runtime updates once per DSP frame),
+and gate length = `noteLength × samplesPerTick`. Phase A runs the whole VM to
+produce note events; Phase B renders each event's voice into the bus in event
+order (deterministic accumulation). Defaults: tempo 120 BPM, timebase 48 (the
+converter's own fallbacks); noteWait **on**; per-track program 0; cmpFlag true.
+
+The 48-slot variable file keeps the converter's scoping — slots 0–31 shared
+across the single player, 32–47 per track — and here the concurrency makes global
+writes naturally visible (Export's sequential walk was the stand-in for exactly
+this). The `[If]` gate, the 12 arithmetic and 6 comparison ops, Var/Rnd argument
+resolution (Rnd → range midpoint, PRNG-free), and the counted/spin-loop bounding
+(vmVersion + per-jump-site retake budget) are ported near-verbatim from
+`Cseq::Export`. An **unconditional** backward jump to already-played code is the
+whole-song loop: the track renders its body once and ends (the max-seconds cap
+catches everything else). Call/Return keep a per-track stack; a stray Return ends
+the track, exactly as Export does.
+
+**Commands executed:** notes 0x00–0x7F, 0x80 rest, 0x81 program, 0x88 OpenTrack,
+0x89/0x8A/0xFD/0xFF jump/call/return/fin, 0xB0 timebase, 0xE1 tempo, 0xC7
+note-wait, 0xFE alloc-mask (consumed), and the extended 0xF0 VM (0x80–0x8B,
+0x90–0x95).
+
+**Commands safe-skipped (and why — none bear time, so the cursor never
+desyncs):** every parameter/effect command is instant, so skipping it only omits
+audio, never mis-times the stream. In `BGM_DEN_RESULT`/`BGM_MAIN_Mii_Only_One`
+the live skips were **0xC0 pan, 0xC1 track volume, 0xD5 expression, 0xD9 reverb
+send**. Their homes: pan/vol/expression → **C6** (native pan/vol/pitch/Tune);
+reverb send (0xD9/0xDA/0xDE) and 0xC2 master vol + 0xD7 span → **stage 3** (fx
+buses/reverb/surround); 0xC3/0xC4/0xC5 bend/RPN and 0xE3 sweep + 0xC9/0xCE/0xCF
+portamento → **C6/C8**; 0xCA–0xE0 LFO family → **C9**; 0xB6 mid-sequence bank +
+0xB3 velocity range + 0xDD mute + 0xB4/0xB5/0xD8 biquad/LPF → **C10**;
+0xB1/0xD0–0xD3/0xFB envelope stage overrides → **C4**; 0xC6 priority + 0xB2 mono/
+poly → **C5**; the extended mod2–4/userproc family → **stage 4**. The CLI prints
+the skipped set per render; `RenderStats::skippedOps` carries it for the report.
+
+### C3 render evidence
+
+`BGM_DEN_RESULT` (MeetSound.bcsar, MiiPlaza) is the pinned audible proof — chosen
+because it **ends naturally** (a track's unconditional backward jump closes the
+whole-song loop, so the body renders exactly once), sets a **real tempo**
+(140 BPM, not the 120 default), and runs 10 concurrent tracks:
+
+- 419 notes fired, **0 dropped**; 10 tracks; timebase 96; 6437 ticks.
+- Rendered 29.20 s. Expected tick-length duration = `6437 / (140/60 × 96)` =
+  **28.74 s**; the 0.46 s remainder is the final notes' gate/tail — **duration
+  matches tick-length at tempo.**
+- Audibility (programmatic): overall RMS **0.30**, per-second RMS swings 0.15–0.58
+  (dynamic musical structure, not a drone), ~29 energy-onset transients. Peak
+  clips at full-scale — expected for the dry polyphonic sum without C6 track/
+  master volume or a stage-3 limiter; documented, does not affect determinism.
+
+FluidSynth structural comparison: `SE_SQUARE_CONGRATULATION` rendered by
+`caesar-play` is **2.61 s**, byte-for-byte the same *duration* as its FluidSynth
+render in `caesar_AB_MiiPlaza/…__FULLFIX.wav` (2.61 s), with correlated early
+onsets (caesar-play 0.06/0.16/0.26/0.36 s vs FluidSynth 0.06/0.22/0.34/0.42 s).
+The sequence timing lines up; the onset-count difference is the missing native
+envelope (C4) and the clipping, not a timing error.
+
+`BGM_MAIN_Mii_Only_One` (the blueprint's Net-B discriminator) also renders
+cleanly (591 notes, 6 tracks) but loops forever, so it hits the `--max-seconds`
+cap rather than ending — kept out of the golden set in favour of the
+finite-length `BGM_DEN_RESULT`.
+
+### Golden inventory (Net A — `tools/play-goldens`, local under %LOCALAPPDATA%)
+
+- `note-caravel` — `--render-note` on caravel (F-Zero): the C2 single-voice DSP,
+  one note at its root key. sha stable through C3 (the DSP is untouched by the
+  sequencer), which the harness confirms.
+- `bgm-den-result` — `--render BGM_DEN_RESULT --max-seconds 120`: the C3 audible
+  proof (finite ~29 s render).
+- `se-square` — `--render SE_SQUARE_CONGRATULATION`: the small FluidSynth-
+  comparison SE.
+
+The harness runs each render **twice** and requires byte-identical output (the
+determinism guard), verifies exit codes, and its `-SelfTest` plants a golden flip
+and confirms detection. Nothing corpus-derived is committed — only the script +
+README are in the repo, exactly like ab-verify/diag-goldens.
+
+### Whole-song-loop / cap policy
+
+Sequences loop forever by design. Policy: an **unconditional** backward jump to
+already-played code ends that track (render the loop body once); when all tracks
+end, the render stops with a short voice tail. A sequence with no such natural
+end (or a loop longer than the cap) stops at `--max-seconds` (default 300) and
+says so. This gives finite, deterministic renders for the common case and a hard
+safety bound for the rest.
+
+### Handoff for Phase II
+
+- **C4 — NW4R `EnvGenerator`** is the load-bearing next step. `renderVoice` today
+  applies only a ~2 ms linear declick at both gate edges (explicitly *not* an
+  envelope). Port `EnvGenerator`/`CalcRelease` directly (127 → 65535/ms instant;
+  the DecibelSquareTable/attackTable pair is byte-confirmed in the MiiPlaza
+  binary) and **ignore** `Cbnk`'s Attack/Hold/Decay/ConvertTime — those are SF2
+  timecent approximations, not engine truth (see the blueprint). The note record
+  already carries raw Attack/Decay/Sustain/Hold/Release bytes; `resolveVoice`
+  should hand them to the voice. This also fixes the current hard-gate one-shots.
+- **C5 — the 24-voice priority allocator.** C3 allocates voices freely (one per
+  note event, unbounded). Add the pool (24, confirmed), the priority-sorted active
+  list, and the refuse-if-front-outranks steal rule (verbatim from the disasm).
+  0xC6 priority and 0xB2 mono/poly feed this and are safe-skipped today.
+- **C6 — native pan/vol/pitch/Tune.** Wire 0xC0/0xC1/0xC2/0xD5/0xDC and the
+  combinePan logic into per-voice gain/pan; this also resolves the current dry-sum
+  clipping (track/master volume attenuate the mix).
+- **Deferred within Phase I scope (noted, not blocking a BGM render):** the
+  re-roll/gatedExits loop-escape (matters only for a few Pokémon SE files, not
+  BGM); tie (0xC8) single-voice legato → C8; mid-note tempo changes affecting an
+  already-scheduled gate length (gate is computed at note-on); sub-frame note
+  timing (frame-quantized by design). A lazy per-bank wave-archive decode (the
+  loader decodes *all* internal wave archives up front, like Export) would cut
+  load time on large archives — a clean optimization when it matters.
