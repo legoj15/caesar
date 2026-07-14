@@ -61,7 +61,14 @@ struct Cseq
 	std::streamoff Length;
 	uint8_t* Data = nullptr;
 
-	Cseq(const char* fileName, ParseContext& ctx);
+	// The parent hands over the span its just-written .bcseq was serialised from
+	// (a pointer + length into the parent's already-loaded buffer), so the child
+	// no longer re-reads the file it was just written from. FileName stays the
+	// full output path (the .mid is written beside it). Data is borrowed, never
+	// owned: every construction site's parent (Csar's own buffer for a direct
+	// sequence, the stack-local Cgrp's buffer for a group-resident one) provably
+	// outlives this Cseq, so the destructor never frees it.
+	Cseq(const std::string& fileName, uint8_t* data, std::streamoff length, ParseContext& ctx);
 	~Cseq();
 
 	// startOffset is the entry's start position within the sequence data,

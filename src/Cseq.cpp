@@ -8,7 +8,6 @@
 #include <cstdint>
 #include <cstdio>
 #include <filesystem>
-#include <fstream>
 #include <iterator>
 #include <map>
 #include <set>
@@ -183,26 +182,29 @@ vector<int32_t> ReadArgs(ParseContext& Ctx, uint8_t*& pos, ArgType argType, pair
 	return { };
 }
 
-Cseq::Cseq(const char* fileName, ParseContext& ctx) : Ctx(ctx), FileName(fileName)
+Cseq::Cseq(const string& fileName, uint8_t* data, streamoff length, ParseContext& ctx) : Ctx(ctx), FileName(fileName)
 {
-	ifstream ifs(FileName, ios::binary | ios::ate);
+	Length = length;
 
-	Length = ifs.tellg();
-	Ctx.RequireOpen(ifs.good(), Length, FileName);
-	Data = new uint8_t[Length];
+	// The parent already holds these bytes -- the span its just-written .bcseq
+	// was serialised from -- so borrow them directly instead of re-opening the
+	// file we just wrote. A zero-length span is the same degenerate condition
+	// the old file-path constructor rejected on an empty re-read (RequireOpen on
+	// length <= 0); preserve that error identically, and fire it before the Push
+	// echo so the stdout stream stays byte-for-byte unchanged.
+	Ctx.RequireOpen(true, Length, FileName);
+
+	Data = data;
 
 	Ctx.Push(filesystem::path(FileName).filename().string(), Data, Length);
-
-	ifs.seekg(0, ios::beg);
-	ifs.read(reinterpret_cast<char*>(Data), Length);
-	ifs.close();
 }
 
 Cseq::~Cseq()
 {
 	Ctx.Pop();
 
-	delete[] Data;
+	// Data is borrowed from the parent's buffer (freed by the parent, after this
+	// child); do not delete it here.
 }
 
 // The set of track indices this entry uses, marked into trackUsed[16]. These

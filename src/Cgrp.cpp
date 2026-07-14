@@ -266,7 +266,12 @@ bool Cgrp::Extract()
 				ofs.write(reinterpret_cast<const char*>(pos), cseqLength);
 				ofs.close();
 
-				Cseqs.push_back(new Cseq(seqFile.c_str(), Ctx));
+				// The .bcseq was just written from [pos, pos + cseqLength) into this
+				// Cgrp's buffer; hand that span to the child instead of re-reading
+				// the file. This Cseq lives only in Cgrp::Cseqs and is freed in
+				// ~Cgrp before Cgrp::Data, so the borrow is safe even though its
+				// conversion is deferred to later in this same Extract call.
+				Cseqs.push_back(new Cseq(seqFile, pos, cseqLength, Ctx));
 
 				break;
 			}

@@ -543,7 +543,13 @@ bool Csar::Extract(const string& outputDir)
 					ofs.write(reinterpret_cast<const char*>(pos), cseqLength);
 					ofs.close();
 
-					Cseq cseq(seqFile.c_str(), Ctx);
+					// The .bcseq was just written from [pos, pos + cseqLength) into
+					// Csar's own buffer; hand that span to the child instead of
+					// re-reading the file. This Cseq is a stack local, converted and
+					// destroyed here while Csar::Data is alive, so borrowing is safe.
+					// (startOffset addresses inside the child's own span, so it is
+					// unaffected by where the bytes came from.)
+					Cseq cseq(seqFile, pos, cseqLength, Ctx);
 
 					if (!cseq.Convert(startOffset))
 					{
