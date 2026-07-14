@@ -166,6 +166,16 @@ per stage. Status:
 - [ ] **Stage 1 — byte-identical round-trip** of BCSEQ/BCBNK/BCSAR from a
       raw-backed model (**the next milestone** — the cheapest complete proof
       the format is understood, and the serializer everything else sits on).
+      Surveyed and blueprinted 2026-07-14: `Serialize()` member per class,
+      additive; a `caesar-roundtrip` dev exe (caesar_core's first consumer) +
+      tools/ fan-out wrapper; six commits — scans/scaffold → BCSEQ → the Cbnk
+      retained-model split (the survey found Cbnk's model is still
+      function-local behind a one-pass `Convert()`, contrary to the stage-0
+      completion wording — it is the one class without the Parse/Export split,
+      folded in here) → BCBNK → BCSAR (the proof criterion) → optional deep
+      re-embed. VarLen canonicality is the one open risk (corpus scan first).
+      Full blueprint in
+      [HISTORY.md](HISTORY.md#suite-stage-1--the-round-trip-serializer-blueprint-2026-07-14-survey).
 - [ ] **Stage 2 — dry player**: native-rate voices, console interpolation,
       solved envelopes, priority voice stealing (RE'd and confirmed), tempo
       clock, single final upsample.

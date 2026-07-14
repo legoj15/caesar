@@ -144,10 +144,14 @@ everything that isn't** (unimplemented opcodes, CWSD, INFX, the `0x6001` mystery
 IMA-ADPCM payloads). Serialize by walking the tree and **recomputing every offset and size table
 from scratch**, never copying them.
 
-_Status (2026-07-14): **stage 0 is complete (all four steps).** Step 3 done — all six classes now
-parse into a retained model and export from it (`Cwav`/`Cwar`/`Cbnk`/`Cseq`, then `Csar`/`Cgrp`).
-Every record carries **span-relative offsets**, not raw pointers, so the tree survives a stage-1
-buffer drop. Step 4 done — a **`caesar_core` static library** now holds the six classes plus their
+_Status (2026-07-14): **stage 0 is complete (all four steps), with one honest asterisk.** Step 3
+done for five classes — `Cwav`/`Cwar`/`Cseq`/`Csar`/`Cgrp` parse into a retained model and export
+from it, every record carrying **span-relative offsets**, not raw pointers, so the tree survives
+a stage-1 buffer drop. The asterisk: the stage-1 kickoff survey found `Cbnk`'s split is partial —
+its parser was decoupled from live `Cwav` objects and its structs gained the lossless fields, but
+the struct instances are still function-local behind a one-pass `Convert()` (the last raw-pointer
+model fields in the codebase). The retained-model promotion is folded into stage 1 as its own
+output-identical commit. Step 4 done — a **`caesar_core` static library** now holds the six classes plus their
 shared `Common`/`ParseContext` and the header-only `Options` (PUBLIC-linking the vendored
 `sf2cute` + `libsmfc`); the `caesar` executable is just `src/caesar.cpp` linking it, and the
 suite's player/tracker/editor will link the same library directly. Build-only, output-identical

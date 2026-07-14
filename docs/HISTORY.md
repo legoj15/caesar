@@ -3274,3 +3274,67 @@ the headers, give `caesar_core` its own explicit
 libsmfc side effect. Nothing about the split constrains the writer; the stage-1
 gaps recorded in commit 5's handoff (player/set section lengths, alignment
 padding, the `0x220C` corrupt-input edge) are unchanged.
+
+## Suite stage 1 — the round-trip serializer blueprint (2026-07-14 survey)
+
+Read-only survey run immediately after stage-0 completion, settling the design
+for the stage-1 milestone (parse → drop buffer → re-serialize → sha256 matches,
+corpus-wide, for BCSEQ/BCBNK/BCSAR). Full anchor-indexed report in the survey
+record; the decisions:
+
+**The correction: Cbnk is not where the stage-0 docs said it is.** The
+model/exporter split is real for five classes; `Cbnk` still has a single
+one-pass `Convert()`, its `insts`/`cwavs` model is *function-local* (the
+lossless fields commit 3 added die when Convert returns), and
+`CbnkInst::Offset`/`CbnkNote::Offset` are the codebase's last raw-pointer model
+fields. The retained-model promotion + Parse/Export split is therefore stage-1
+work (commit 2 below), budgeted as its own output-identical refactor with the
+full stage-0 gate.
+
+**Writer architecture:** a `Serialize()` member per class, symmetric to
+`Parse()`, additive (nothing on the default export path calls it — ab-verify
+stays a clean no-regression net every commit). Composition: BCSEQ and BCBNK
+prove **standalone deep**; BCSAR proves **container-deep, children
+shallow-opaque** (recompute every STRG/INFO/FILE table and section offset; copy
+child blobs through as spans — CWAV can never re-encode its DSP-ADPCM, which is
+why BCWAV/BCWAR stay opaque); the optional capstone re-embeds deep-serialized
+CBNK/CSEQ children so the container provably consumes *computed* child lengths
+(the edit-safe property). The load-bearing rule: every child blob's offset AND
+length are derived from the laid-out blob, never reused from the parse.
+
+**Driver:** a new dev executable (`caesar-roundtrip`) linking `caesar_core` —
+the library's first real consumer (which also forces the explicit
+`target_include_directories(caesar_core PUBLIC src)` the stage-0 handoff
+scheduled) — plus a `tools/` corpus fan-out wrapper mirroring ab-verify's
+discipline and exit contract (0 all-match / 1 mismatch / 2 harness-error,
+never-a-false-pass guards, self-test that mutates one byte and must see it).
+The shipped `caesar` exe is untouched; public CI builds the new target but
+never runs the corpus.
+
+**The three sized gaps:** (a) player/set table bounds — recoverable from the
+archive's own layout: sort all seven INFO sub-section offsets plus
+`InfoEndOffset`, each section spans to the next; store the resolved spans at
+parse. (b) Alignment padding — the two CBNK sites are parser-proven zero
+(reproduce-by-rule); the CSAR/CGRP inter-blob and section gaps are unread and
+unproven (capture as opaque gap-spans first; a later corpus scan may prove
+zero-fill). (c) CSEQ canonicality — suffix/prefix order is canonical **by
+construction** (any other order is a parse failure, so the model can never
+hold a non-canonical order), but **VarLen is a genuine hazard**: ReadVarLen
+accepts padded encodings and the model stores only the decoded value, in
+exactly three slots (note gate time, 0x80 wait, 0x81 program). A corpus scan
+decides: canonical-only proven → emit canonical; else retain the raw byte
+length per slot. The scan is stage-1 commit 0.
+
+**Field-level retention still missing (all Cbnk except one):** `cbnkVersion`
+(the only discarded version word), the instrument-type discriminator
+(0x6000 vs 1-note 0x6001 is not recoverable from NoteCount), the note-level
+`id` gating the 0x6001 quartet, and the raw cwav index (the model holds a
+resolved pointer; the substitution path loses the original index; Parse also
+subtracts 0x5000000 from the war id, which Serialize must re-add). Csar's one
+corrupt-only edge (out-of-range 0x220C raw words) is noted, not blocking.
+
+**Execution order:** 0 — scans + harness scaffold (+ the include-dir fix);
+1 — BCSEQ Serialize (harness proves N/N sha over every embedded .bcseq);
+2 — Cbnk retained-model split (full stage-0 gate, output-identical);
+3 — BCBNK Serialize; 4 — BCSAR container Serialize (**the stage-1 proof
+criterion**); 5 — optional deep-re-embed capstone.
