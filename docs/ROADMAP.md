@@ -235,6 +235,30 @@ per stage. Status:
       update cadence / amplitude `/40`-vs-`/20`; absolute output level; the pool
       sorted-insert tie order; and the console **interpolation filter** (the capture
       shows HF energy the band-limited render lacks; recover via the teakra oracle).
+      **Render defects from the first listening pass (diagnosed 2026-07-14, full
+      investigation in HISTORY):**
+    - [ ] **Voice-cut declick.** A stolen/force-stopped voice ends dead at
+      `stopAt` with no fade — confirmed as EMPTY_LANDSCAPE's 8.06 s click (steal
+      log matches the waveform step to one sample: two still-audible releasing
+      pads stolen at native 263,840, a frame boundary). Same missing-final-ramp
+      family: `voiceEndSample` breaks on `done()` before the final ramp frame
+      (so release-127 note-offs and mono re-triggers cut hard), and the
+      `--max-seconds`/renderCap cut. One fix covers all three: render one extra
+      frame past stopAt/env-Done with gain ramped to 0 (~4.9 ms — hardware
+      interpolates voice gain across each 160-sample frame, so console steals
+      fade). Latent same-area polish: instant (non-`_t`) volume/expression/pan
+      sets step per-voice gain once per frame with no intra-frame ramp.
+    - [ ] **Missing per-sound volume stage → clamp clipping.** The CSAR INFO
+      sound entry's volume byte (low byte of retained `Word08`, `Csar.cpp:401`)
+      never reaches the player, so the bus runs hot and `finalizeToPcm`'s clamp
+      flat-tops loud passages — the eShop bass distortion (SEQ_TIGER_TOP_EF,
+      byte 101 = −2.0 dB: 2,367 rail samples, pre-clamp peak +3.4 dB). Fix:
+      typed field → `SequenceInfo` → apply as linear `vol/127` per voice (bytes
+      >127 exist in the wild, so not via the 128-entry dB table). May not clear
+      all overshoot (residual = runtime SoundPlayer/DSP master, Net-B);
+      calibration: `BGM_MAIN_Mii_Only_One`'s byte is 64 (−5.95 dB) and its
+      console capture exists — the tolerance-net level offset should move ~6 dB
+      when this lands.
 - [ ] **Stage 3 — reverb + delay**: offline `teakra` impulse capture →
       comb/allpass fit → New 3DS hardware validation. The long pole.
       **Recon done (2026-07-14, write-up in HISTORY):** teakra builds and runs

@@ -4515,3 +4515,84 @@ the teakra feasibility question past research to a working build. Findings:
 Artifacts (scratchpad, session-local): the recon report, the extraction
 script, five verified firmware images, the built teakra tree, and the
 MiiPlaza DSP disassembly. First stage-3 code commit scoped on the roadmap.
+
+## Suite stage 2 — first-listen artifact diagnosis: the steal-cut click and the missing per-sound volume stage (2026-07-14)
+
+The first human listening pass over dry-player renders surfaced two artifacts:
+a click ~8 s into `BGM_DEN_EMPTY_LANDSCAPE` (MeetSound) and bass distortion in
+the eShop menu music (TigerSound `SEQ_TIGER_TOP_EF` — identified by exact
+duration match, then confirmed SHA-identical to a fresh default render). The
+question was whether they shared a root cause. A five-lane investigation
+(waveform forensics on both files, an instrumented diagnostic render logging
+steal timestamps + the pre-clamp native bus, a gain-stage audit, and a
+click-source audit) answered it conclusively: **two independent defects.**
+
+**The click = a voice-steal hard cut, proven to one sample.** The
+discontinuity sits at output t=8.0616 s = native sample 263,840 — *exactly*
+1649 × 160, a DSP frame boundary. A center-panned contribution of ~0.104 FS
+vanishes in one native sample (sign flips across the step, so it is a voice
+*removal*, not a gain change; the band split shows the low end dropping ~9×).
+The instrumented render's steal log has the matching event: at t=263,840 the
+24/24-full pool stole two of track 3's long pads (note-on at 0.010 s, note-off
+at 7.822 s, only 0.24 s into their release and still clearly audible) to serve
+new note-ons. A second, ~7× smaller instance of the same signature sits at
+16.372 s — also exactly on a frame boundary (3349 × 160). The render never
+exceeds |0.776| pre-clamp (zero clipped samples), so clipping is excluded on
+this file. Mechanism: `allocateVoicePool` sets `victim.stopAt = t` and
+`renderVoice` simply stops accumulating at that sample with the envelope gain
+still nonzero — the in-source claim "no declick needed" is true only for
+envelope-terminated voices. The audit found the same missing-final-ramp family
+in two more paths: `voiceEndSample` breaks on `done()` *before* counting the
+frame that performs the final ramp (so a release-127 instant-release note-off
+drops its entire sustain→0 ramp and cuts hard — this also makes the mono
+re-trigger click for release-127 instruments, though releases ≤126 ramp
+cleanly), and the `--max-seconds`/renderCap cut ends the same way. One fix
+covers all three: render one extra frame past stopAt/env-Done with the gain
+ramped to zero — which is also the hardware behaviour (the DSP interpolates
+per-voice gain across each 160-sample frame, so even a stolen voice gets a
+~4.9 ms fade on console). Steal *frequency* is not the bug: both renders
+saturate the confirmed 24-voice pool (EL: 62 steals/87 notes; eShop: 357/655,
+all victims already releasing, none refused) — hardware steals just as much,
+it just fades what it kills.
+
+**The distortion = clamp clipping from a missing gain stage.** eshop.wav has
+2,367 samples pinned at the rails (0.036%, 93 runs, longest flat-top 4.3 ms at
+18.454 s), clustered exactly in the loud bass-dominated seconds 8–41 (sec 18:
+98.3% of energy below 250 Hz). The instrumented bus scan measured pre-clamp
+peaks to 1.479 (+3.4 dB over full scale, 1,618 native samples over |1.0|).
+Loop-point buzz and every other mechanism were ruled out (no periodic
+first-difference trains anywhere; loud-but-unclipped seconds are spectrally
+clean; the loop-end convention audit found the Cwav→renderer→SF2 chain
+self-consistently end-exclusive). The missing stage: **the CSAR INFO sound
+entry's per-sound volume byte** (low byte of the retained `Word08`,
+`Csar.cpp:401`) is parsed for round-trip but never reaches the player —
+`SEQ_TIGER_TOP_EF` ships at 101 (−2.0 dB), `BGM_DEN_EMPTY_LANDSCAPE` at 120
+(−0.5 dB), and retail archives almost never use 127 (TigerSound: 1 of 81
+sequences; bytes range 0..150 corpus-side, and values >127 exist, so the
+engine law is linear vol/127 with boost, not the 128-entry dB table). The
+BCSAR PLAYER entries carry no volume field (dumped both archives' player
+tables), so no further attenuation is statically recoverable; the runtime
+`SoundPlayer::SetVolume` and the DSP master remain unknowable Net-B items.
+The pan law was cleared as a headroom suspect: NW4C's own vsqrt pan calc is
+the sqrt family with the same ~0.707 center as the render's cos/sin, max
+divergence +0.56 dB at intermediate pans. Honesty note: −2.0 dB may not clear
+*all* the observed overshoot (worst +3.4 dB measured; flat-top geometry
+suggests +2.5..+5 dB) — and the console itself hard-clips with no soft-clip
+(established in the Phase II entry), so exact parity is defined by the
+console capture, not by zero rails. Calibration gift:
+`BGM_MAIN_Mii_Only_One`'s volume byte is 64 (−5.95 dB) and its console
+capture already exists, so the tolerance net's level-normalization offset
+should move ~6 dB when the stage lands — directly confirming or refuting the
+linear law and measuring the residual player/DSP gain in one shot.
+
+Verification hygiene: the diagnostic build changed only stderr/stdout — both
+diagnostic WAVs were `fc /b`-identical to the user's renders, and after
+`git restore` + rebuild the pristine binary's fresh render was again
+byte-identical. Analysis trap recorded for future clip censuses on caesar
+output: `finalizeToPcm` maps −1.0 → `lround(−32767)`, so the negative rail is
+**−32767, never −32768** — a census keyed to −32768 undercounts ~40%.
+Secondary latent finding, filed not fixed: instant (non-`_t`)
+volume/expression/pan sets step `mgL`/`mgR` once per 160-sample frame with no
+intra-frame ramp — a full-scale step is possible in one sample (644 and 697
+instant sets executed in these renders; none audible here, and the 8.06 s
+event's sign-flip excludes gain-stepping as its cause).
