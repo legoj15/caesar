@@ -59,6 +59,10 @@ House rules:
 
 ### Fixed
 
+- **macOS build fixed** — the in-memory sample handoff used an unqualified
+  `move(...)` call, which Apple Clang rejects under `-Werror`
+  (`-Wunqualified-std-cast-call`); now qualified as `std::move`. Windows/Linux
+  builds were unaffected. (output-identical — build only)
 - **A failed or truncated `.wav` write is now reported instead of silently
   succeeding** — `Cwav::Convert` never checked its output stream, so a full disk
   or I/O error left a short/empty `.wav` behind while the run reported success.

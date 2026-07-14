@@ -315,7 +315,7 @@ bool Cwav::Convert()
 
 	for (uint16_t i = 0; i < chanCount; ++i)
 	{
-		Channels.push_back(move(chans[i].PcmSamples));
+		Channels.push_back(std::move(chans[i].PcmSamples));
 	}
 
 	Converted = true;
