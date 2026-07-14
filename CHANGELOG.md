@@ -363,6 +363,19 @@ House rules:
 
 ### Fixed
 
+- **`caesar-play`: a force-stopped voice now declicks over one DSP frame instead
+  of stopping dead.** A voice cut by a pool steal, a mono re-trigger or the
+  render cap ended at its instantaneous amplitude with no ramp — an audible
+  click landing exactly on a 160-sample frame boundary (the diagnosed
+  `BGM_DEN_EMPTY_LANDSCAPE` 8.06 s click: two still-audible releasing pads
+  stolen at native sample 263,840). The same off-by-one-frame truncation in
+  `voiceEndSample` dropped the envelope's final sustain→0 ramp frame, cutting
+  every release-127 (instant-release) note-off dead at sustain gain. Both paths
+  now render that one final frame linearly faded to zero (~4.9 ms), matching
+  the hardware DSP's per-frame gain interpolation. **Changes `caesar-play`
+  rendered audio only** (every render: +160 native samples of final-ramp tail;
+  the converter is untouched — no A/B surface changes).
+
 - **Sequence `-w` warning positions now derive from a stored offset instead of a
   pointer subtraction against the shared stack top** — the Cseq slice of the
   heap-layout `-w` nondeterminism Known bug. A new

@@ -353,13 +353,17 @@ namespace play
 			}
 
 			env.advance(kMsPerFrame);
+			s += kFrameSamples;
 
 			if (env.done())
 			{
+				// The frame whose advance reached Done IS the final declick ramp
+				// (renderVoice ramps gPrev -> gNext=0 across it), so it counts as part
+				// of the voice's life. Excluding it dropped the whole sustain->0 ramp
+				// for release byte 127 (instant), cutting every such note-off dead at
+				// sustain gain (the 2026-07-14 first-listen diagnosis).
 				break;
 			}
-
-			s += kFrameSamples;
 		}
 
 		uint32_t envEnd = (s < budget) ? s : budget;
@@ -597,6 +601,21 @@ namespace play
 			return;
 		}
 
+		// A force-stop (steal / mono re-trigger / render cap) lands while the
+		// envelope is still audible. Hardware interpolates per-voice gain across the
+		// next DSP frame, so a stopped voice fades over ~4.9 ms instead of stopping
+		// dead -- the 8.06 s EMPTY_LANDSCAPE click (2026-07-14 diagnosis). Render
+		// ONE declick frame past the cut, linearly ramped to zero. An envelope-
+		// completed voice needs none (its own final frame already ramps to silence),
+		// and a one-shot's PCM exhaustion steps exactly as hardware does.
+		uint32_t declickStart = UINT32_MAX;
+
+		if (cap != UINT32_MAX && endSample == cap)
+		{
+			declickStart = endSample;
+			endSample += kFrameSamples;
+		}
+
 		uint32_t length = endSample - startSample;
 
 		bus.ensure(static_cast<size_t>(endSample));
@@ -604,8 +623,9 @@ namespace play
 		// Re-run the envelope in lockstep with the sample fetch (deterministic, so it
 		// tracks voiceEndSample exactly). The envelope updates once per frame; its
 		// gain is linearly ramped across the 160 samples of each frame to avoid a
-		// zipper. It starts at 0 (silence) and releases back to 0, so there is no
-		// hard gate and no declick needed.
+		// zipper. It starts at 0 (silence) and releases back to 0, so an envelope-
+		// terminated voice needs no hard gate; the force-stop declick frame above
+		// covers the one case that ends at audible gain.
 		EnvGen env(v.envAttack, v.envHold, v.envDecay, v.envSustain, v.envRelease);
 
 		// The per-frame modulated gain / step (constant across a frame, matching the
@@ -743,9 +763,16 @@ namespace play
 				rx2 = rx1; rx1 = sR; ry2 = ry1; ry1 = yr; sR = static_cast<float>(yr);
 			}
 
+			float g = gCur;
+
+			if (startSample + s >= declickStart)
+			{
+				g *= static_cast<float>(endSample - (startSample + s)) / static_cast<float>(kFrameSamples);
+			}
+
 			size_t idx = static_cast<size_t>(startSample) + s;
-			bus.l[idx] += sL * mgL * gCur;
-			bus.r[idx] += sR * mgR * gCur;
+			bus.l[idx] += sL * mgL * g;
+			bus.r[idx] += sR * mgR * g;
 
 			gCur += gStep;
 			pos += effStep;

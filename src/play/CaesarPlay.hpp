@@ -344,7 +344,9 @@ namespace play
 	// `startSample`. The voice renders past `gateSamples` for its release tail until
 	// the envelope is silent. `stopSample` (absolute, on the bus) force-stops the
 	// voice early -- a C5 steal / mono re-trigger / the render cap; UINT32_MAX = no
-	// early stop. Deterministic; the caller drives the accumulation order by the
+	// early stop. A force-stopped voice renders ONE extra frame past the stop,
+	// linearly faded to zero (~4.9 ms) -- the hardware per-frame gain interpolation,
+	// so a steal never steps the bus. Deterministic; the caller drives the accumulation order by the
 	// order it renders voices. `mod` (optional) makes the voice follow its track's
 	// live volume/pan/pitch/LFO/LPF each frame plus its per-note sweep/portamento
 	// (C7-C10); null renders the static voice (the C2 single-note proof path).
