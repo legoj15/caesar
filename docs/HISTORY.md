@@ -3798,3 +3798,60 @@ which re-lays-out children and consumes *computed* lengths — for which `Cbnk` 
 reconstruction) would need a relocation path. Neither is required for the byte-identical
 round-trip that is the stage-1 proof; both are the natural next parses when a consumer needs to
 change bytes rather than reproduce them.
+
+## Suite stage 2 — the dry-player blueprint (2026-07-14 survey)
+
+Read-only survey producing the stage-2 execution plan. The player is a
+real-time reinterpretation of `Cseq::Export`'s emit walk consuming the stage-1
+models; the seq → bank → wave-archive → sample resolution chain already exists
+(`CsarCseq` → `CbnkRecords` → `Cwars`).
+
+**Architecture:** a new `caesar_play` static library (linking `caesar_core`;
+the engine stays out of the core so ab-verify/roundtrip-verify keep guarding it
+unchanged) + a `caesar-play` offline-render exe. Components: SeqRuntime (the
+play-time VM — variable/comparison/[If]/control-flow semantics reused verbatim
+from the convert-time VM; the ONE structural change is concurrent tracks
+against a shared frame clock instead of the sequential stand-in walk),
+VoiceAlloc (24-voice priority pool, refuse-if-front-outranks, verbatim from
+the disasm), the per-voice DSP chain (loop-aware fetch → interpolation →
+NW4R EnvGenerator → gain/pan → 32,728 Hz float bus), the 160-sample frame
+clock (4.889 ms), and one final sinc resample → WAV. Offline render first;
+no audio device until the offline path is golden-pinned.
+
+**The load-bearing envelope correction:** the player ports NW4R
+`EnvGenerator`/`CalcRelease` directly (127→65535/ms instant; the
+DecibelSquareTable/attackTable pair byte-confirmed in the MiiPlaza binary) and
+must IGNORE Cbnk's Attack/Hold/DecayTable + ConvertTime — those are SF2
+timecent approximations for sf2cute, not engine truth.
+
+**Fidelity inventory** (full table in the survey): exact-already = the whole
+VM command space; needs-native = envelopes, the ~462k-event `_t` ramp mass,
+tie single-voice, sweep pitch, LFO (one persistent retargetable LfoParam,
+pitch depth = depth×range cents), additive pan, bend, portamento, mono/poly,
+biquad LPF, fx sends (buses stubbed until stage 3), velocity range, mute,
+damper, priority, mid-sequence bank switch, program/Tune. Genuinely unknown:
+the console interpolation filter (per-note Interpolation byte + 3dbrew
+"polyphase select"; Azahar routes it to linear behind a TODO — ship linear,
+capture the truth later via the teakra oracle), the mod2/3/4 curves (stage 4),
+the 3DS UpdateTick frame period (160/32728 physically forced, unconfirmed),
+player/set table params (default: priority 64, 24 voices).
+
+**Verification:** Net A — deterministic golden-hash renders (seeded, fixed
+accumulation order, goldens in %LOCALAPPDATA%, diag-goldens discipline incl.
+byte-flip self-test) from the first .wav. Net B — console-capture tolerance
+(surround-probe Welch-PSD + envelope-fit precedent), EXCEPT the reverb tail.
+**Capture inventory verdict: the old music captures are gone** (scratchpad
+casualties; only the surround-probe run.wav survives, and it isn't music).
+Net B needs fresh New 3DS captures: BGM_MAIN_Mii_Only_One (the discriminating
+1.6 s-gap track), per-instrument isolated notes (also closes the queued
+decay-table console spot-check), and the MeetSound SE set.
+
+**Commit order:** Phase I — C1 scaffold targets, C2 single-voice DSP + mix bus
++ WAV out + the golden harness, C3 sequencer spine (notes/rests/tempo/
+control-flow/noteWait, concurrent tracks) = **first audible .wav**. Phase II —
+C4 EnvGenerator, C5 voice allocator + priority + mono, C6 native pan/vol/
+pitch/Tune. Phase III — C7 ramp synthesis (the reusable flattener stage 5
+shares), C8 tie/sweep/portamento, C9 LFO, C10 bank switch + velocity range +
+mute + LPF. Phase IV — C11 the console tolerance net (needs the new captures).
+Explicitly deferred: reverb/delay/surround (stage 3), real LCG + mod curves
+(stage 4), real-time device output, IMA-ADPCM/CWSD coverage.

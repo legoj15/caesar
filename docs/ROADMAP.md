@@ -183,7 +183,16 @@ per stage. Status:
       spans in the container and SKIPPED (informational) in the verifier.
 - [ ] **Stage 2 — dry player**: native-rate voices, console interpolation,
       solved envelopes, priority voice stealing (RE'd and confirmed), tempo
-      clock, single final upsample.
+      clock, single final upsample. Blueprinted 2026-07-14 (11 commits in four
+      phases; first audible `.wav` at C3; `caesar_play` lib + `caesar-play`
+      offline-render exe; golden-render net from the first `.wav`): full plan in
+      [HISTORY.md](HISTORY.md#suite-stage-2--the-dry-player-blueprint-2026-07-14-survey).
+      **Console-capture dependency for the final tolerance proof (Phase IV):
+      the old music captures are gone — fresh New 3DS captures needed
+      (`BGM_MAIN_Mii_Only_One`, per-instrument isolated notes, the MeetSound
+      SEs); ask the user when Phase III nears completion.** The one flagged
+      unknown: the console interpolation filter (ship linear; recover the
+      truth via the offline teakra oracle later).
 - [ ] **Stage 3 — reverb + delay**: offline `teakra` impulse capture →
       comb/allpass fit → New 3DS hardware validation. The long pole.
       Same oracle method now also covers the **Surround-mode virtualization**
