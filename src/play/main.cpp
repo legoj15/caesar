@@ -38,11 +38,14 @@ namespace
 			"caesar-play — offline dry renderer for BCSAR sequences (suite stage 2)\n"
 			"\n"
 			"usage:\n"
-			"  caesar-play --list   <archive.bcsar>\n"
-			"  caesar-play --render <archive.bcsar> --seq <name-or-index> --out <file.wav>\n"
+			"  caesar-play --list        <archive.bcsar>\n"
+			"  caesar-play --render      <archive.bcsar> --seq <name-or-index> --out <file.wav>\n"
 			"              [--rate <hz>] [--max-seconds <n>]\n"
+			"  caesar-play --render-note <archive.bcsar> --seq <name-or-index> --out <file.wav>\n"
+			"              [--rate <hz>]\n"
 			"\n"
 			"options:\n"
+			"  --render-note       DSP proof: render the resolved bank's first note (C2)\n"
 			"  --rate <hz>         output sample rate (default 48000)\n"
 			"  --max-seconds <n>   safety cap on render length (default 300)\n"
 			"  --version           print version and exit\n";
@@ -150,6 +153,58 @@ namespace
 
 		return 0;
 	}
+
+	int doRenderNote(const string& archivePath, const string& choice, const string& outPath, uint32_t rate)
+	{
+		auto arch = play::loadArchive(archivePath);
+
+		if (!arch)
+		{
+			return 1;
+		}
+
+		vector<play::SequenceInfo> seqs = play::listSequences(*arch->csar);
+
+		if (seqs.empty())
+		{
+			cerr << "caesar-play: archive has no renderable sequences (needed to bind a bank)\n";
+			return 1;
+		}
+
+		const play::SequenceInfo* chosen = resolveChoice(seqs, choice);
+
+		if (!chosen)
+		{
+			cerr << "caesar-play: no sequence named or indexed '" << choice << "' (try --list)\n";
+			return 1;
+		}
+
+		if (!play::resolveSequence(*arch, *chosen))
+		{
+			return 1;
+		}
+
+		play::StereoBus bus;
+
+		if (!play::renderSingleNote(*arch, bus))
+		{
+			cerr << "caesar-play: bank bound to '" << chosen->name << "' has no playable note\n";
+			return 1;
+		}
+
+		vector<int16_t> pcm = play::finalizeToPcm(bus, rate);
+
+		if (!play::writeWavPcm(outPath, pcm, 2, rate))
+		{
+			cerr << "caesar-play: failed to write " << outPath << "\n";
+			return 1;
+		}
+
+		cout << "rendered one note from '" << chosen->name << "'s bank -> " << outPath
+			<< " (" << (pcm.size() / 2) << " frames @ " << rate << " Hz)\n";
+
+		return 0;
+	}
 }
 
 int main(int argc, char** argv)
@@ -161,6 +216,7 @@ int main(int argc, char** argv)
 	uint32_t maxSeconds = kDefaultMaxSeconds;
 	bool list = false;
 	bool render = false;
+	bool renderNote = false;
 
 	for (int a = 1; a < argc; ++a)
 	{
@@ -187,6 +243,15 @@ int main(int argc, char** argv)
 		else if (arg == "--render")
 		{
 			render = true;
+
+			if (a + 1 < argc && argv[a + 1][0] != '-')
+			{
+				archivePath = argv[++a];
+			}
+		}
+		else if (arg == "--render-note")
+		{
+			renderNote = true;
 
 			if (a + 1 < argc && argv[a + 1][0] != '-')
 			{
@@ -247,6 +312,14 @@ int main(int argc, char** argv)
 		if (choice.empty()) { cerr << "caesar-play: --render needs --seq <name-or-index>\n"; return 1; }
 		if (outPath.empty()) { cerr << "caesar-play: --render needs --out <file.wav>\n"; return 1; }
 		return doRender(archivePath, choice, outPath, rate, maxSeconds);
+	}
+
+	if (renderNote)
+	{
+		if (archivePath.empty()) { cerr << "caesar-play: --render-note needs an archive\n"; return 1; }
+		if (choice.empty()) { cerr << "caesar-play: --render-note needs --seq <name-or-index>\n"; return 1; }
+		if (outPath.empty()) { cerr << "caesar-play: --render-note needs --out <file.wav>\n"; return 1; }
+		return doRenderNote(archivePath, choice, outPath, rate);
 	}
 
 	printUsage();

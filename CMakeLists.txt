@@ -183,6 +183,7 @@ endif()
 # ---------------------------------------------------------------------------
 add_library(caesar_play STATIC
     src/play/Loader.cpp
+    src/play/Dsp.cpp
     src/play/Wav.cpp)
 
 target_include_directories(caesar_play PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src/play")
