@@ -198,17 +198,26 @@ per stage. Status:
       dry-sum clipping). Full write-up in the HISTORY 2026-07-14 Phase II entry
       (envelope constant provenance, the gain/pan model with evidence per choice,
       the golden diff inventory, and the flagged Net-B unknowns).
-      **Next: Phase III — C7 ramp synthesis (the reusable `_t` flattener stage 5
-      shares), C8 tie/sweep/portamento, C9 LFO, C10 bank switch + velocity range +
-      mute + LPF.** The safe-skipped set is now just the LFO family (`0xCA`–`0xCD`,
-      `0xE0` → C9), reverb send (`0xD9` → stage 3), and the mid-seq bank/velocity-
-      range/biquad group (→ C10).
-      **Console-capture dependency for the final tolerance proof (Phase IV):
-      the old music captures are gone — fresh New 3DS captures needed
-      (`BGM_MAIN_Mii_Only_One`, per-instrument isolated notes, the MeetSound
-      SEs); ask the user when Phase III nears completion.** The one flagged
-      unknown: the console interpolation filter (ship linear; recover the
-      truth via the offline teakra oracle later).
+      **Phase III done (C7–C10, 2026-07-14): the fidelity mass.** C7 makes the
+      per-track volume/pan/pitch/expression LIVE (a reusable timeline-flattener +
+      per-frame `_t` ramps); C8 adds tie (one continuous voice, no re-attack),
+      sweep and portamento; C9 the persistent retargetable LFO (vibrato/tremolo/
+      auto-pan); C10 the mid-sequence bank switch (`0xB6`, loader builds target
+      banks on demand), velocity range, mute, damper, and an RBJ LPF biquad. Every
+      audible sequence command a `BGM`/`SE` render touches is now native. Full
+      write-up (per-feature evidence class, the ramp-domain finding, the golden
+      inventory) in the HISTORY 2026-07-14 Phase III entry.
+      **Next: Phase IV — C11 the console-tolerance net (BLOCKED on fresh New 3DS
+      captures; the old music captures are gone).** Needs
+      `BGM_MAIN_Mii_Only_One`, per-instrument isolated notes, and the MeetSound
+      SEs; ask the user for the captures. The **flagged unknowns** the captures
+      recalibrate (all chosen-and-documented, none structurally blocking): the LFO
+      rate→Hz constant + sine resolution; the portamento time→duration mapping; the
+      LPF/biquad topology (RBJ) + Q; the velocity `(vel/127)²` law; the pan
+      sqrt-polynomial vs equal-power; the envelope floor / attack-done threshold /
+      update cadence / amplitude `/40`-vs-`/20`; absolute output level; the pool
+      sorted-insert tie order; and the console **interpolation filter** (ship
+      linear; recover via the offline teakra oracle).
 - [ ] **Stage 3 — reverb + delay**: offline `teakra` impulse capture →
       comb/allpass fit → New 3DS hardware validation. The long pole.
       Same oracle method now also covers the **Surround-mode virtualization**

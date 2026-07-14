@@ -60,6 +60,26 @@ House rules:
   peak-clip 0.64 % of samples → 11 samples, RMS 0.29 → 0.12, with a real stereo
   field). **`output-identical` for the converter** — `caesar` stays byte-for-byte
   unchanged (ab-verify + diag-goldens exit 0); only `caesar-play`'s audio changes.
+- **`caesar-play` Phase III — the fidelity mass (C7–C10): live `_t` ramps, tie,
+  sweep, portamento, the LFO, and the remaining track features.** Per-track
+  volume/pan/pitch/expression stop latching at note-on: a reusable
+  timeline-flattener makes them **live curves** a sounding voice follows every
+  frame, and a `_t`-suffixed command glides the parameter to its target over the
+  trailing duration (the ~462k-event ramp mass). Tie (`0xC8`) plays **one
+  continuous voice** across its notes, retuning it with no re-attack (the tied
+  WarpstarUp sweeps go from 249 stolen voices to 3 continuous ones); sweep
+  (`0xE3`) and portamento (`0xC9`/`0xCE`/`0xCF`) add independent intra-note pitch
+  glides. The persistent, retargetable track **LFO** (`0xCA`–`0xCD` + `0xE0`)
+  renders vibrato / tremolo / auto-pan (pitch cents = depth × range; rate linear in
+  the commanded value). Mid-sequence **bank switch** (`0xB6`) re-points a track's
+  instrument lookup to another in-archive bank (resolving notes that otherwise
+  drop); velocity range (`0xB3`), track mute (`0xDD`), damper (`0xDF`), and an RBJ
+  low-pass biquad for the LPF cutoff (`0xD8`/`0xB4`/`0xB5`) round it out. Four new
+  render goldens pin the repros (a ramp fade, a tie sweep, a vibrato tune, a
+  bank-switcher). LFO rate/sine, portamento timing and the biquad topology are not
+  in the disasm and are flagged for the Phase IV console capture. **`output-
+  identical` for the converter** — `caesar` stays byte-for-byte unchanged (ab-verify
+  257,125 files + diag-goldens 18/18 exit 0); only `caesar-play`'s audio changes.
 - **BCSAR container round-trip serialization (`Csar::Serialize()` in `caesar_core`)
   — the stage-1 milestone reached: byte-identical BCSAR + BCSEQ + BCBNK round-trip,
   proven corpus-wide.** The inverse of `Csar::Parse`, reading only model state

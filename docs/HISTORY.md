@@ -4189,3 +4189,152 @@ determinism guard), and `caesar` stays byte-for-byte unchanged throughout.
   sqrt-polynomial vs equal-power; absolute output level; the pool sorted-insert
   tie order. All are calibration questions the console captures (Phase IV) settle;
   none blocks a structurally-correct render.
+
+## Suite stage 2 Phase III — the fidelity mass: `_t` ramps, tie/sweep/portamento, LFO, track features (2026-07-14)
+
+Executed C7–C10 of the dry-player blueprint. The per-track parameters became
+**live**, tie/sweep/portamento/LFO render, and the remaining track features
+(bank switch, velocity range, mute, LPF, damper) are native. Four commits, each
+warning-clean on all targets with `caesar` itself byte-identical (ab-verify
+257,125 files + diag-goldens 18/18 at every commit). play-goldens recaptured per
+commit; the golden set grew from 3 to 7 with a repro pinned per feature.
+
+**Commits:** C7 `be68c98` (ramp synthesis + live modulation), C8 `4f71097`
+(tie/sweep/portamento), C9 `bb45c56` (LFO), C10 `19aa58d` (bank/velrange/mute/
+LPF/damper).
+
+### The one structural change: live per-frame modulation (C7)
+
+Phase II latched volume/pan/pitch into each `NoteEvent` at note-on. C7 replaces
+that with a **reusable timeline-flattener** (`play::ParamCurve`, the struct the
+blueprint says stage 5's `.it` export shares): each track parameter is a
+piecewise-linear function of absolute bus-sample position. A plain command is a
+zero-duration step; a `_t`-suffixed command (`Suffix2` Time/TimeRnd/TimeVar, whose
+trailing s16 is the duration in **ticks**, converted to samples at the current
+tempo) glides from the curve's current value to the target. `renderVoice` now
+samples the voice's `TrackTimeline` (+ the sequence-wide master-volume curve)
+**every frame** through a new `VoiceMod`, so a mid-note parameter change follows
+the note — the engine model — instead of being frozen at onset. The single-note
+DSP proof (`VoiceMod` null) is byte-for-byte unchanged, so `note-caravel` stays
+identical across all four commits; the sequence renders move only where a track
+actually modulates a sounding voice.
+
+**The ramp-domain finding (C7).** NW4R ramps the stored **control value** (the
+0..127 byte) linearly and converts it through the console-read `DecibelSquareTable`
+each frame — so a `_t` glide is linear in the byte domain, not in dB. Verified
+numerically against the exact table (the same bytes read from the MiiPlaza binary
+at C4): a linear-byte volume fade is amplitude-linear to **<1 %** across the range,
+because the table is calibrated so `10^(table[b]/400) ≈ b/127` — *except at the
+floor*, where byte 0 lands at **−36 dBFS** (the table minimum, `10^(−723/400)`),
+not digital silence. So a volume fade to 0 is not silence; the envelope release is
+what reaches silence. Evidence class: **NW4R precedent** (the MoveValue linear-in-
+control-value smoothing) + a numeric check against the **binary-read** table; the
+ramp routine itself was not byte-read (the disasm doc stopped at the variable VM),
+so the *domain choice* is documented and flagged. Corpus `_t` ramps are sparse
+per-track (the 462k are spread thin; the heaviest sampled track has ~13); the
+render witness is `SE_BossVo_KaenAttack` — a single ~10 s (1000-tick) `0xC1` fade
+that now glides smoothly to silence where at C6 the volume was frozen at note-on.
+
+### Tie, sweep, portamento (C8) — evidence per feature
+
+- **Tie (`0xC8`)** — one continuous voice across tied notes: the first tied note
+  opens a region, each later one retunes the LIVE voice to its key (a stepped
+  semitone offset on a per-region pitch curve) with **no re-attack**; both edges of
+  `0xC8`, a Fin, and the track end close it (the v0.5.1-settled both-edges-release).
+  Evidence: **document** (the converter's tie machinery, `Cseq.cpp:910-924,
+  1384-1403`, and the NW4R `SeqTrack::NoteOn`/`UpdateChannelLength` semantics it
+  cites). Measured on `SE_Map_WarpstarUp2`: 246 tied notes that at C7 each
+  re-attacked and stole a voice (peak 24/24, 222 steals) collapse into **3
+  continuous voices, 243 no-attack retunes, ZERO steals** — the continuous glide,
+  at the voice level.
+- **Sweep (`0xE3`)** — a signed 1/64-semitone intra-note ramp gliding to nominal
+  over the note's gate; **portamento (`0xC9`/`0xCE`/`0xCF`)** — a glide from the
+  origin key (0xC9's, else the previous note's) to the note's key. Independent and
+  additive (the 2026-07-11 research). Evidence: **precedent, flagged** — the disasm
+  doc records no sweep/portamento address, so the portamento time→duration mapping
+  is a tick-count glide chosen against NW4R precedent and flagged for the capture;
+  a 40-archive sample found **no clean 0xE3 sweep repro** (it is genuinely rare),
+  so sweep is verified against the 1/64-semitone spec + the glide math, not a
+  corpus render.
+
+### The LFO (C9) — controlled proof
+
+ONE `LfoParam` per track (depth `0xCA` / rate `0xCB` / range `0xCD` / delay `0xE0`
+in 5 ms units / target `0xCC` = pitch|volume|pan), stored as live curves that
+**persist across a retarget** — a value commanded on any target survives the switch
+(the converter needed a wire/shadow model for this; the player just keeps the
+values). Applied per frame by a **four-quadrant sine** (the high-resolution limit
+of NW4R's 32-step quarter table). Evidence: **precedent, flagged** — the disasm doc
+records no LFO/sine/rate address, so the rate→Hz constant and the sine resolution
+are NW4R-precedent. The proof is a **controlled test** (a synthetic sine driven
+through the REAL `renderVoice` with a known LFO): the vibrato rate is exactly linear
+in the commanded rate — 64→5.01, 32→2.51, 96→7.52 Hz (5/64 Hz per unit) — the peak
+pitch deviation is **depth × range cents** (10×5→±49, 20×5→±96, 10×10→±96), and the
+targets route correctly (0 → 386-cent pitch FM; 1 → 20 % amplitude swing, no pan;
+2 → 0.68 L/R balance swing). `depth × range` is clamped to ±1 octave defensively.
+
+### The remaining track features (C10)
+
+- **Bank switch (`0xB6`)** — the headline. The loader now builds + caches any
+  `CbnkRecords` bank on demand (`getBank`); each track carries a current bank index;
+  Phase B resolves every note against the track's live bank. Evidence:
+  **binary-behaviour** — the 0xB6 arg is a **global `CbnkRecords` index**, confirmed
+  empirically: `SEQ_M_ZUKAN_TEST_NG1` goes from 12/12 notes DROPPED (the switch
+  target's instruments unreachable in the default bank) to **0 dropped** once the
+  switch loads the right bank; `SEQ_M_BLACKBOARD1` resolves all 122 notes across 5
+  switches, `SEQ_M_TONIGHT1` 276 across 3. A switch to an **external** (not-in-
+  archive) bank honestly drops those notes rather than sound the wrong patch (so a
+  few sequences drop MORE than at C9 — correct, not a regression).
+- **Velocity range (`0xB3`)** scales note-on velocities (127 = identity);
+  **mute (`0xDD`)** suppresses a track's notes while time still advances;
+  **damper (`0xDF`, threshold ≥64)** defers a note's release until the pedal lifts
+  (a gate extension). Evidence: **document** (the task spec + the converter's
+  threshold note); simple, correct by construction.
+- **LPF cutoff (`0xD8`) + biquad (`0xB4`/`0xB5`)** — a standard **RBJ low-pass
+  biquad** (187.5 cents/unit, cutoff clamped to [0,1] of Nyquist per the converter,
+  64 = open). Evidence: **chosen, flagged** — the disasm doc has no filter topology,
+  so the RBJ topology + Butterworth Q are flagged; `0xB4`/`0xB5` (biquad type/value)
+  fold into the same LPF path since the type mapping is unknown. Controlled proof:
+  the high/low band-energy ratio falls **0.11 → 0.023 → 0.0022** as the cutoff drops
+  64 → 48 → 32. `0xFB` envelope reset was already wired at C4.
+
+### Golden inventory (Net A — `tools/play-goldens`, 7 renders, 4 source archives)
+
+- `note-caravel` — the C2 single-voice DSP proof; **unchanged through C7–C10** (the
+  `VoiceMod`-null path is untouched), which the harness confirms every commit.
+- `bgm-den-result` — moved at C7 (live modulation of sustaining notes) and C9 (it
+  drives the LFO); a finite ~35 s MeetSound render.
+- `se-square` — a small MeetSound SE carrying 6 `_t` ramps; moved at C7.
+- `ramp-kaen` (`SE_BossVo_KaenAttack`, Torte) — the C7 ramp witness (a ~10 s fade);
+  also ties, so it moved again at C8, and drives the LFO, so again at C9.
+- `tie-warpstar` (`SE_Map_WarpstarUp2`, Torte) — the C8 tie witness.
+- `vibrato-zelda` (`SEQ_M_ZELDA1`, SoundData1) — the C9 LFO witness.
+- `bank-blackboard` (`SEQ_M_BLACKBOARD1`, SoundData1) — the C10 bank-switch witness
+  (122 notes, 5 switches, 0 dropped).
+
+Every render is byte-identical run-to-run (the double-render determinism guard) and
+the `-SelfTest` plant-a-flip check passes at each commit; nothing corpus-derived is
+committed (only the script + README).
+
+### Handoff for Phase IV
+
+- **C11 — the console-tolerance net** is BLOCKED on fresh New 3DS captures (the old
+  music captures are gone). Ask the user for: `BGM_MAIN_Mii_Only_One` (the
+  discriminating 1.6 s-gap track), per-instrument isolated notes (also closes the
+  queued decay-table spot-check), and the MeetSound SE set. Method precedent:
+  Welch-PSD + envelope-fit against the capture, EXCEPT the reverb tail (stage 3).
+- **Flagged unknowns the captures recalibrate** (all chosen-and-documented, single
+  constants where possible, none structurally blocking a correct render): the LFO
+  **rate→Hz** constant (`kLfoRateHz = 5/64`) and the sine resolution (continuous vs
+  NW4R's 32-step table); the **portamento** time→duration mapping; the **LPF/biquad
+  topology** (RBJ) + Q; the **velocity** `(vel/127)^2` law; the **pan** sqrt-
+  polynomial vs equal-power; the envelope **floor / attack-done / update cadence /
+  amplitude `/40`-vs-`/20`**; **absolute output level**; the pool **sorted-insert tie
+  order**; and the console **interpolation filter** (ship linear; recover via the
+  teakra oracle).
+- **Known small approximations** (noted, not blocking): a re-opened track's timeline
+  resets, so notes from its first opening see the reset curves (extremely rare);
+  velocity retune inside a tie region is not modelled (pitch retune is); mute
+  suppresses only NEW notes (a sounding voice is not retroactively silenced); a
+  mid-ramp tempo change slightly mis-sizes a `_t` duration (converted once at the
+  command tick). All are single-line fixes if a capture ever shows them.
