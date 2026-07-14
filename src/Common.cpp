@@ -32,11 +32,11 @@ map<string, size_t>& Common::Notices = gParseContext.Notices;
 // file itself, so a corrupt or truncated file can point anywhere; without this
 // the readers would walk off the end of the buffer and crash. Throwing here
 // turns that into a clean error caught by main.
-void Common::CheckBounds(uint8_t* pos, size_t bytes)
+void ParseContext::CheckBounds(uint8_t* pos, size_t bytes)
 {
-	for (size_t i = Common::Buffers.size(); i-- > 0; )
+	for (size_t i = Buffers.size(); i-- > 0; )
 	{
-		const Range& r = Common::Buffers[i];
+		const Range& r = Buffers[i];
 
 		if (pos >= r.base && pos < r.end)
 		{
@@ -56,9 +56,9 @@ void Common::CheckBounds(uint8_t* pos, size_t bytes)
 	throw runtime_error("archive damaged: a file offset points outside the loaded data");
 }
 
-int32_t ReadFixLen(uint8_t*& pos, size_t bytes, bool littleEndian, bool isSigned)
+int32_t ParseContext::ReadFixLen(uint8_t*& pos, size_t bytes, bool littleEndian, bool isSigned)
 {
-	Common::CheckBounds(pos, bytes);
+	CheckBounds(pos, bytes);
 
 	int32_t result = 0;
 
@@ -75,13 +75,13 @@ int32_t ReadFixLen(uint8_t*& pos, size_t bytes, bool littleEndian, bool isSigned
 	return result;
 }
 
-int32_t ReadVarLen(uint8_t*& pos)
+int32_t ParseContext::ReadVarLen(uint8_t*& pos)
 {
 	int32_t result = 0;
 
 	while (true)
 	{
-		Common::CheckBounds(pos, 1);
+		CheckBounds(pos, 1);
 
 		uint8_t b = *pos++;
 		result = (result << 7) | (b & 0x7F);
@@ -101,7 +101,7 @@ int32_t ReadVarLen(uint8_t*& pos)
 // content: it is tallied under that category and surfaced by default in the
 // per-input FlushNotices summary, so a normal run tells the user what it left
 // out even without -w. The verbose positional line below still needs -w.
-void Common::Warning(uint8_t* pos, string msg, const string& noticeCategory)
+void ParseContext::Warning(uint8_t* pos, string msg, const string& noticeCategory)
 {
 	if (!noticeCategory.empty())
 	{
@@ -111,8 +111,8 @@ void Common::Warning(uint8_t* pos, string msg, const string& noticeCategory)
 	if (ShowWarnings)
 	{
 		cerr << hex << setfill('0') << uppercase << endl;
-		cerr << "WARNING IN\t" << Common::FileNames.top() << endl;
-		cerr << "AT POSITION\t0x" << setw(8) << pos - Common::Offsets.top() << endl;
+		cerr << "WARNING IN\t" << FileNames.top() << endl;
+		cerr << "AT POSITION\t0x" << setw(8) << pos - Offsets.top() << endl;
 		cerr << "MESSAGE\t\t" << msg << endl;
 		cerr << endl;
 	}
@@ -122,7 +122,7 @@ void Common::Warning(uint8_t* pos, string msg, const string& noticeCategory)
 // one top-level input, then reset for the next. Shown by default (independent of
 // -w) so a normal run reports what it dropped; -w adds the per-item detail. A no
 // -op when nothing was dropped, so clean archives stay quiet.
-void Common::FlushNotices(const string& inputName)
+void ParseContext::FlushNotices(const string& inputName)
 {
 	if (Notices.empty())
 	{
@@ -144,7 +144,7 @@ void Common::FlushNotices(const string& inputName)
 	Notices.clear();
 }
 
-void Common::Push(string fileName, uint8_t* data, streamoff length)
+void ParseContext::Push(string fileName, uint8_t* data, streamoff length)
 {
 	FileNames.push(fileName);
 	Offsets.push(data);
@@ -153,7 +153,7 @@ void Common::Push(string fileName, uint8_t* data, streamoff length)
 	cout << FileNames.top() << endl;
 }
 
-void Common::Pop()
+void ParseContext::Pop()
 {
 	Offsets.pop();
 	FileNames.pop();
@@ -166,7 +166,7 @@ void Common::Pop()
 
 // Clear all parsing context. Used to recover to a clean slate after an input
 // fails partway through, so a later input is not blamed on a stale filename.
-void Common::Reset()
+void ParseContext::Reset()
 {
 	while (!FileNames.empty()) { FileNames.pop(); }
 	while (!Offsets.empty()) { Offsets.pop(); }
@@ -177,7 +177,7 @@ void Common::Reset()
 // Reject a failed or empty file open before its length is used to allocate a
 // buffer. A missing/unreadable file yields a length of -1, which would
 // otherwise become an enormous allocation and crash.
-void Common::RequireOpen(bool streamOk, streamoff length, const string& fileName)
+void ParseContext::RequireOpen(bool streamOk, streamoff length, const string& fileName)
 {
 	if (!streamOk || length <= 0)
 	{
@@ -192,7 +192,9 @@ void Common::RequireOpen(bool streamOk, streamoff length, const string& fileName
 // its id — give it a type prefix like "BANK_206" so it is recognizable and
 // banks/wave-archives/etc. that share a number don't collide. Names that carry
 // a real symbol from the archive are returned as-is (aside from sanitizing).
-string Common::TypedName(const string& name, const string& type)
+// Context-free (a pure name transform), so it stays a free function through the
+// fold rather than living on the context.
+string TypedName(const string& name, const string& type)
 {
 	string clean = name;
 
@@ -221,20 +223,86 @@ string Common::TypedName(const string& name, const string& type)
 	return type + "_" + clean;
 }
 
-void Common::Analyse(string tag, uint32_t val)
+void ParseContext::Analyse(string tag, uint32_t val)
 {
-	Common::Log.push_back(FileNames.top() + "," + tag + "," + to_string(val));
+	Log.push_back(FileNames.top() + "," + tag + "," + to_string(val));
 }
 
-void Common::Dump(string fileName)
+void ParseContext::Dump(string fileName)
 {
 	ofstream ofs(fileName);
 	ofs << "fileName,tag,val" << endl;
 
-	for (size_t i = 0; i < Common::Log.size(); ++i)
+	for (size_t i = 0; i < Log.size(); ++i)
 	{
-		ofs << Common::Log[i] << endl;
+		ofs << Log[i] << endl;
 	}
 
 	ofs.close();
+}
+
+// --- Transitional forwarders -------------------------------------------------
+// The free read functions and the `Common::` facade methods delegate to the one
+// gParseContext instance, so existing call sites are byte-identical while the
+// fold threads a context through the readers. All of this is deleted once every
+// call site passes a ParseContext by reference.
+
+int32_t ReadFixLen(uint8_t*& pos, size_t bytes, bool littleEndian, bool isSigned)
+{
+	return gParseContext.ReadFixLen(pos, bytes, littleEndian, isSigned);
+}
+
+int32_t ReadVarLen(uint8_t*& pos)
+{
+	return gParseContext.ReadVarLen(pos);
+}
+
+void Common::CheckBounds(uint8_t* pos, size_t bytes)
+{
+	gParseContext.CheckBounds(pos, bytes);
+}
+
+void Common::Warning(uint8_t* pos, string msg, const string& noticeCategory)
+{
+	gParseContext.Warning(pos, msg, noticeCategory);
+}
+
+void Common::FlushNotices(const string& inputName)
+{
+	gParseContext.FlushNotices(inputName);
+}
+
+void Common::Push(string fileName, uint8_t* data, streamoff length)
+{
+	gParseContext.Push(fileName, data, length);
+}
+
+void Common::Pop()
+{
+	gParseContext.Pop();
+}
+
+void Common::Reset()
+{
+	gParseContext.Reset();
+}
+
+void Common::RequireOpen(bool streamOk, streamoff length, const string& fileName)
+{
+	gParseContext.RequireOpen(streamOk, length, fileName);
+}
+
+string Common::TypedName(const string& name, const string& type)
+{
+	return ::TypedName(name, type);
+}
+
+void Common::Analyse(string tag, uint32_t val)
+{
+	gParseContext.Analyse(tag, val);
+}
+
+void Common::Dump(string fileName)
+{
+	gParseContext.Dump(fileName);
 }
