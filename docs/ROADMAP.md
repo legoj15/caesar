@@ -171,11 +171,15 @@ per stage. Status:
       The `ParseContext` fold shipped 2026-07-13: the six `Common::` globals
       and their helpers are now a `ParseContext` threaded by reference through
       every reader (`Common` struct deleted); output-identical, guarded by the
-      goldens + the full A/B (write-up in HISTORY). The context still spans the
-      whole run. **Next up: per-input context scoping** — the deliberate,
-      output-changing commit that fixes the multi-input `.log` bleed and the
-      group-path `-w` position nondeterminism (now a localized change), then the
-      per-file parser/exporter split, then the `caesar_core` library split.
+      goldens + the full A/B (write-up in HISTORY). Per-input context scoping
+      shipped 2026-07-13: each top-level input now gets a fresh `ParseContext`,
+      fixing the multi-input `.log` bleed (a multi-input run is now N
+      independent single-input runs; single-input output byte-identical, corpus
+      A/B exit 0, and the goldens' sole change is the multi-input `.log`). The
+      `-w` position nondeterminism turned out to be a heap-layout bug, not a
+      lifetime one, so it was *not* fixed here — it stays open under Known bugs.
+      **Next up: the per-file parser/exporter split, then the `caesar_core`
+      library split.**
 - [ ] **Stage 1 — byte-identical round-trip** of BCSEQ/BCBNK/BCSAR from a
       raw-backed model (**the next milestone** — the cheapest complete proof
       the format is understood, and the serializer everything else sits on).
@@ -308,17 +312,21 @@ list is the known defect tail.
   Surfaced by the 2026-07-11 `0xE3` research (sweep pitch and portamento are
   independent, additive mechanisms). Verify CC84 semantics across target
   players before changing anything.
-- **Multi-input runs bleed the analysis `.log` across archives.** `Common::Log`
-  is cleared only on the exception path, so in `caesar a.bcsar b.bcsar`, `b`'s
-  `.log` also contains all of `a`'s rows (`Notices` doesn't bleed — it flushes
-  per input). Related byte-surface fact: `-w` positional output on
-  group-resident conversions is nondeterministic today (positions are computed
-  against whatever frame tops the shared file-name stack, across unrelated
-  heap buffers). The stage-0 context fold must reproduce both first and fix
-  them as a separate, deliberate output-changing commit. (2026-07-13 kickoff
-  survey. The survey's other two filings — the bank read-back's stale-frame
-  leak and the unchecked `.wav` write — were both retired the same day by the
-  in-memory handoff; see HISTORY.)
+- **`-w` positional warning output is heap-layout nondeterministic.** caesar
+  computes a warning's `AT POSITION` as `pos - Offsets.top()`; when `pos` and
+  the top-of-stack buffer base come from *different* heap allocations (any
+  archive that warns during wave/bank decode — empirically **broader** than the
+  group-resident conversions first suspected), the subtraction is garbage that
+  shifts run-to-run with the heap layout. Affects only the `-w` per-item
+  `AT POSITION` line; the default-visible notice summary and every output file
+  are unaffected, so it is byte-level rather than audible. The real fix is to
+  carry each warning's offset relative to its own buffer instead of the shared
+  stack top — a stage-1 drop-the-buffer prerequisite that overlaps the Cseq
+  VM-diagnostics offset work. Pinned empirically by `tools/diag-goldens` (its
+  `-w` golden set is chosen by a twice-run byte-identity filter). *(Was filed
+  alongside the multi-input `.log` bleed, which was a lifetime bug and is now
+  fixed — 2026-07-13, HISTORY; this position bug is a separate heap-layout one
+  and remains open.)*
 - **Group WARC id collisions leak the overwritten object.** `Cgrp` inserts its
   wave archives into the shared map by plain assignment; an id already present
   (a direct WARC's or another group's) is overwritten without being freed.

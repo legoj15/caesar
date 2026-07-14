@@ -49,12 +49,11 @@ int main(int argc, char* argv[])
 
 	int exitCode = 0;
 
-	// One parse context for the whole run, threaded into every reader. Its
-	// lifetime spans all inputs (as the former process-global did), so
-	// cross-input behaviour -- the analysis .log carried between archives, the
-	// leaked cerr format flags -- is unchanged; per-input scoping is a later,
-	// deliberate, output-changing step.
-	ParseContext ctx;
+	// -w is parsed positionally in this same argv loop, so accumulate it here
+	// and apply it to each input's own context below; it affects only the
+	// inputs that follow it on the command line (unchanged positional
+	// semantics). Each input gets a fresh ParseContext inside the loop.
+	bool showWarnings = false;
 
 	for (int i = 1; i < argc; ++i)
 	{
@@ -70,7 +69,7 @@ int main(int argc, char* argv[])
 		}
 		else if (!strcmp(argv[i], "-w"))
 		{
-			ctx.ShowWarnings = true;
+			showWarnings = true;
 		}
 		else if (!strcmp(argv[i], "--pad-sustain"))
 		{
@@ -112,8 +111,20 @@ int main(int argc, char* argv[])
 		{
 			haveInput = true;
 
+			// Scope the parse context to this one input: a fresh ParseContext
+			// per input means every input behaves exactly as if it were the
+			// only argument on the command line -- no analysis .log rows,
+			// dropped/approximated notices, or diagnostic stack frames survive
+			// from an earlier input. (The leaked cerr format flags live on the
+			// stream, not the context, so they still carry across inputs; that
+			// is unchanged.) -w is applied from the positional accumulator.
+			ParseContext ctx;
+			ctx.ShowWarnings = showWarnings;
+
 			// Isolate each input: a bad file reports cleanly and the rest
-			// still process, instead of aborting the whole run.
+			// still process, instead of aborting the whole run. On failure the
+			// context is simply discarded at the end of this iteration, so a
+			// partial parse cannot leak into the next input.
 			try
 			{
 				Csar csar(argv[i], opts, ctx);
@@ -130,7 +141,6 @@ int main(int argc, char* argv[])
 				cerr << "MESSAGE\t\t" << e.what() << endl;
 				cerr << endl;
 
-				ctx.Reset();
 				exitCode = 1;
 			}
 

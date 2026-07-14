@@ -25,11 +25,13 @@ std::string TypedName(const std::string& name, const std::string& type);
 // the helpers that read and diagnose against it: the file-name and base-offset
 // stacks that diagnostics are positioned against, the loaded buffer extents
 // CheckBounds validates against, the analysis Log, the per-input
-// dropped/approximated Notices tally, and the -w flag. One instance is created
-// in main and passed by reference (Csar -> Cgrp -> Cbnk/Cwar/Cwav/Cseq, mirroring
-// the Options injection), which is what makes the readers reentrant. Its lifetime
-// today still spans the whole run, so cross-input behaviour is unchanged;
-// per-input scoping is a later, deliberate, output-changing step.
+// dropped/approximated Notices tally, and the -w flag. A fresh instance is
+// created per top-level input in main and passed by reference (Csar -> Cgrp ->
+// Cbnk/Cwar/Cwav/Cseq, mirroring the Options injection), which is what makes the
+// readers reentrant. Because its lifetime is scoped to one input, every input
+// behaves exactly as if it were the only argument on the command line -- no
+// analysis Log rows or Notices bleed from one input into the next (the leaked
+// cerr format flags, being on the stream rather than here, still carry across).
 struct ParseContext
 {
 	bool ShowWarnings = false;
@@ -77,7 +79,6 @@ struct ParseContext
 	void FlushNotices(const std::string& inputName);
 	void Push(std::string fileName, uint8_t* data, std::streamoff length);
 	void Pop();
-	void Reset();
 	void RequireOpen(bool streamOk, std::streamoff length, const std::string& fileName);
 	void CheckBounds(uint8_t* pos, size_t bytes);
 	void Analyse(std::string tag, uint32_t val);

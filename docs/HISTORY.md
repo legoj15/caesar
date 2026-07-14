@@ -2362,3 +2362,61 @@ build loop caught, not output bytes. No latent behaviour was changed; two
 pre-existing hazards the survey already filed under Known bugs (the multi-input
 `.log` bleed and the group-path `-w` position nondeterminism) are untouched and
 now cheaper to fix.
+
+## Suite stage 0 — per-input ParseContext scoping (2026-07-13)
+
+The deliberate, output-changing commit the fold intentionally deferred, and the
+change that made it a localized one. `main` created a single `ParseContext`
+spanning the whole run, so in `caesar a.bcsar b.bcsar` the analysis `Log`
+accumulated across both inputs and was cleared only on the exception path (via
+`Reset()`); `a`'s rows therefore survived into `b`'s `Dump`, and `b.log` was
+`a`'s rows *followed by* `b`'s. (The per-input dropped/approximated `Notices`
+summary never bled — `FlushNotices` already clears it per input.)
+
+**Mechanism.** The `ParseContext` declaration moved *inside* the per-input
+branch of the argv loop, so each top-level input constructs a fresh context and
+discards it at the end of its iteration. `-w` is still parsed positionally in
+that same loop, so it is accumulated into a `bool showWarnings` and each
+per-input context is initialised from it — positional semantics unchanged (it
+applies only to inputs after it on the command line). The exception-path
+`Reset()` call, and the `Reset()` method itself, were removed: its sole purpose
+was cross-input cleanup ("so a later input is not blamed on a stale filename"),
+which per-input construction now provides structurally — leaving it would have
+been dead code carrying a now-false comment. Untouched by design: the leaked
+`cerr` format flags (hex/uppercase/fill), which live on the stream rather than
+the context and so still carry across inputs, and the shared process exit code.
+
+**The honest new semantics, stated plainly.** A multi-input run is now exactly N
+independent single-input runs (modulo the two shared-stream facts above). With a
+fresh context per input, an earlier input's soft-fail (`Extract` returning
+false) or any residual diagnostic stack frames can no longer influence a later
+input's `.log`, notice attribution, or warning positions. This is the intended
+change, not a side effect.
+
+**Verification.**
+- Warning-clean MSVC Release build (CI is warnings-as-errors).
+- Corpus A/B (`tools/ab-verify`, dirty tree, baseline the fold commit
+  `9c72def`): **82 archives, 257,125 output files byte-identical, stdout/stderr
+  identical, exit 0.** `ab-verify` runs one input per process, so the bleed
+  never manifests there — its role here is to prove single-input behaviour is
+  untouched, which it is.
+- Diagnostics goldens (`tools/diag-goldens`): before recapture, **exit 1 with a
+  single differing surface — `multi-bleed` `logs` — and nothing else** (its
+  `stderr`/`stdout`/`exit` and all 16 other surfaces byte-identical). Side-by-
+  side inspection confirmed the diff is precisely the intended one: the a-side
+  `caravel.log` is byte-identical (177 rows), and the b-side `pksnd.log` dropped
+  from 303 body rows (`caravel`'s entire 177-row log prepended to `pksnd`'s 126)
+  to 126 rows — `pksnd`'s own, zero `caravel` rows. Recaptured
+  (`-Capture -Force`) and re-compared → **exit 0, all 17 surfaces identical.**
+- Manual two-archive end-to-end: `caravel` + `pksnd` in one process (`-o` into a
+  scratch dir) versus each run alone. The multi-run `pksnd.log` is **byte-
+  identical** to a lone `pksnd` run (0 `caravel` rows); the multi-run
+  `caravel.log` is identical to a lone `caravel` run (same 5,884 bytes; only the
+  `-o` output-base path segment differs, as it must).
+
+Nothing relied on the cross-input lifetime except `Reset()` (removed). The
+survey's twin filing, the `-w` positional-position nondeterminism, was *not*
+fixed here: it is a heap-layout bug (positions subtracted across unrelated
+allocations), independent of context lifetime, and now stands as its own Known-
+bugs entry with the corrected broader scope (any wave/bank-decode warning, not
+only group-resident conversions).

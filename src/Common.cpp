@@ -150,16 +150,6 @@ void ParseContext::Pop()
 	}
 }
 
-// Clear all parsing context. Used to recover to a clean slate after an input
-// fails partway through, so a later input is not blamed on a stale filename.
-void ParseContext::Reset()
-{
-	while (!FileNames.empty()) { FileNames.pop(); }
-	while (!Offsets.empty()) { Offsets.pop(); }
-	Buffers.clear();
-	Log.clear();
-}
-
 // Reject a failed or empty file open before its length is used to allocate a
 // buffer. A missing/unreadable file yields a length of -1, which would
 // otherwise become an enormous allocation and crash.

@@ -87,6 +87,24 @@ House rules:
 
 ### Fixed
 
+- **Multi-input runs no longer bleed the analysis `.log` across archives** — in
+  `caesar a.bcsar b.bcsar` the single process reused one parser context, whose
+  `Log` was cleared only on the exception path, so `b`'s `.log` was `a`'s
+  analysis rows *followed by* `b`'s own (the per-input dropped/approximated
+  notice summary already flushed per input and never bled). Each top-level input
+  now gets a fresh `ParseContext`, so every input behaves exactly as if it were
+  the only argument on the command line: a multi-input run is now N independent
+  single-input runs. The now-structurally-guaranteed cross-input isolation also
+  means an earlier input's soft-fail or a partial parse can no longer influence a
+  later input's diagnostics or attribution (the old exception-path `Reset()`,
+  which existed only for that cleanup, is removed). Unchanged across inputs, by
+  design: the leaked `cerr` format flags (they live on the stream, not the
+  context) and the shared process exit code. `-w` remains positional — it
+  applies only to inputs after it on the command line. (changes `.log` content in
+  **multi-input** runs only; single-input output is byte-identical — 82-archive /
+  257,125-file corpus A/B byte-identical with identical stdout/stderr, exit 0,
+  and the 17-surface diagnostics goldens show the sole change is the multi-input
+  `.log`, recaptured)
 - **macOS build fixed** — the in-memory sample handoff used an unqualified
   `move(...)` call, which Apple Clang rejects under `-Werror`
   (`-Wunqualified-std-cast-call`); now qualified as `std::move`. Windows/Linux
