@@ -20,19 +20,37 @@ struct Range
 	std::string name;
 };
 
+// The mutable state a single parse threads through every reader: the file-name
+// and base-offset stacks that diagnostics are positioned against, the loaded
+// buffer extents CheckBounds validates against, the analysis Log, the
+// per-input dropped/approximated Notices tally, and the -w flag. Today one
+// process-lifetime instance backs all of it (the `Common::` statics below are
+// references into it), so behaviour is unchanged; holding the state in an
+// object is the first step of the stage-0 fold toward passing it by reference,
+// which will unlock reentrancy and per-input scoping.
+struct ParseContext
+{
+	bool ShowWarnings = false;
+	std::stack<std::string> FileNames;
+	std::stack<uint8_t*> Offsets;
+	std::vector<Range> Buffers;
+	std::vector<std::string> Log;
+	std::map<std::string, size_t> Notices;
+};
+
 struct Common
 {
-	static bool ShowWarnings;
-	static std::stack<std::string> FileNames;
-	static std::stack<uint8_t*> Offsets;
-	static std::vector<Range> Buffers;
-	static std::vector<std::string> Log;
+	static bool& ShowWarnings;
+	static std::stack<std::string>& FileNames;
+	static std::stack<uint8_t*>& Offsets;
+	static std::vector<Range>& Buffers;
+	static std::vector<std::string>& Log;
 
 	// Counts, per top-level input, of content that was skipped or approximated
 	// (keyed by a human-readable category). Populated regardless of -w so the
 	// summary in FlushNotices can be shown by default; the per-item positional
 	// detail behind those counts still only prints with -w.
-	static std::map<std::string, size_t> Notices;
+	static std::map<std::string, size_t>& Notices;
 
 	template<typename T>
 	static bool Assert(uint8_t* pos, T expected, T found)

@@ -13,12 +13,19 @@
 
 using namespace std;
 
-bool Common::ShowWarnings = false;
-stack<string> Common::FileNames;
-stack<uint8_t*> Common::Offsets;
-vector<Range> Common::Buffers;
-vector<string> Common::Log;
-map<string, size_t> Common::Notices;
+// The one process-lifetime parse context. Defined before the reference bindings
+// below so it is fully constructed when they bind (single-TU static init runs in
+// definition order). The `Common::` statics are references into it, so every
+// existing `Common::X` call site reads and writes this instance unchanged; the
+// stage-0 fold will later thread this object by reference and retire the globals.
+ParseContext gParseContext;
+
+bool& Common::ShowWarnings = gParseContext.ShowWarnings;
+stack<string>& Common::FileNames = gParseContext.FileNames;
+stack<uint8_t*>& Common::Offsets = gParseContext.Offsets;
+vector<Range>& Common::Buffers = gParseContext.Buffers;
+vector<string>& Common::Log = gParseContext.Log;
+map<string, size_t>& Common::Notices = gParseContext.Notices;
 
 // Verify that a read of `bytes` bytes starting at `pos` stays inside one of the
 // currently-loaded file buffers. Offsets in these archives are read from the
