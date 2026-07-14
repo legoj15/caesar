@@ -24,6 +24,31 @@ House rules:
 
 ### Added
 
+- **BCSEQ round-trip serialization (`Cseq::Serialize()` in `caesar_core`) — the
+  stage-1 milestone's first serializer, proven byte-identical over the whole
+  corpus.** The exact inverse of `Cseq::Parse`: it walks the parsed command map
+  and re-emits every command's prefix/status/argument bytes (canonical VarLen,
+  big-endian fixed-width command args, `Rnd` bounds verbatim) plus the CSEQ
+  header and the LABL symbol section, reading only model state and never the
+  source buffer. Three findings drove the design and are now handled exactly:
+  the DATA section's `0x20` zero-padding is parsed as phantom note commands that
+  spill up to two bytes into LABL (reproduced by re-emitting the command stream
+  and truncating to the retained section length); the LABL entry table carries
+  duplicate-target labels the parse's pointer-keyed map collapses (a full label
+  table is now retained on the model, separate from the per-command label Export
+  uses); and each LABL record is null-terminated and 4-byte aligned with the
+  section `0x20`-padded. The `caesar-roundtrip` dev tool's `--verify` now
+  re-serialises every embedded `.bcseq` and compares against a saved copy of the
+  source span: **20,791 / 20,791 sequences across 82 archives byte-identical, 0
+  mismatched.** A new `--selftest` mode and the wrapper's upgraded `-SelfTest`
+  carry the byte-flip proof (round-trip a real BCSEQ, then confirm a planted
+  one-byte diff is caught). Shared little/big-endian + canonical-VarLen emit
+  primitives (`WriteFixLen`/`WriteVarLen`, the inverses of the `ReadFixLen`/
+  `ReadVarLen` parse helpers) live in `Common` for the BCBNK/BCSAR serializers
+  to reuse. (`output-identical` for the shipped `caesar` — additive `caesar_core`
+  API + dev-tool proof only; 82-archive / 257,125-file corpus A/B byte-identical
+  with identical stdout/stderr, exit 0; 18-surface diagnostics goldens
+  byte-identical.)
 - **`caesar-roundtrip` — a development tool (not shipped) that scaffolds the
   stage-1 byte-identical round-trip verifier and carries the two one-time corpus
   scans that gate the serializer commits.** It is `caesar_core`'s first external

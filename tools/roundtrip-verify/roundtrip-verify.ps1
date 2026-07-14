@@ -12,11 +12,17 @@
 
     The exe re-serialises each child from the parsed model and compares against a
     copy of the source span (never the live buffer). A format with no Serialize()
-    yet reports SKIPPED. Until the serializers land (stage-1 commits 1/3/4), EVERY
-    format is SKIPPED and every archive exits 2 ("nothing verifiable") — so this
-    wrapper exits 2 as well. That is the whole point: the harness can never print a
-    green pass before there is something to verify. As each Serialize() ships, its
-    format flips from SKIPPED to matched and the corpus verdict tightens toward 0.
+    yet reports SKIPPED. As of commit 1, BCSEQ re-serialises (its matched count is
+    the proof); BCBNK/BCSAR follow in commits 3/4, and BCWAR/BCWAV/BCWSD/BCGRP are
+    permanently opaque (DSP-ADPCM can never round-trip), so they stay SKIPPED.
+
+    Exit rule (the never-a-false-pass floor): an archive exits 0 only when every
+    child re-serialised AND matched (skipped == 0); a partial verify — some matched,
+    some still SKIPPED — is exit 2, NOT a pass. Because the BCSAR container is itself
+    a verify target and stays SKIPPED until commit 4, every archive is partial today,
+    so the whole corpus aggregates to exit 2 with BCSEQ shown green at its full
+    matched count. Exit 0 becomes reachable once commits 3-4 land and the opaque
+    formats are the only remaining skips. A single mismatch anywhere is exit 1.
 
     Discipline mirrored from tools/ab-verify (see that script's notes): a single
     Stop-harness funnel, a trap so no unhandled error is mistaken for a clean run,
@@ -319,17 +325,38 @@ if ($SelfTest) {
     if ($vVacuous.Exit -ne 2) { $failures.Add("verdict for a vacuous (0 walked) record was $($vVacuous.Exit), expected 2") }
     Write-RtInfo 'aggregation contract: all-skip->2, mismatch->1, all-match->0, vacuous->2'
 
-    # NOTE for the serializer commits (1/3/4): once a format re-serialises, extend
-    # this self-test to mutate one source byte of a verified child and assert the
-    # exe reports exactly one mismatch (exit 1) - the byte-flip proof ab-verify has.
+    # 4. THE BYTE-FLIP PROOF (commit 1: BCSEQ Serialize landed). A harness that has
+    #    never caught a planted diff must not be trusted with a clean verdict. The
+    #    exe's --selftest re-serialises the first BCSEQ child, asserts it reproduces
+    #    the source span byte-for-byte, THEN flips one output byte and asserts the
+    #    compare catches it - returning 0 only when BOTH hold. Walk the corpus
+    #    (smallest-first) to the first archive that carries a BCSEQ; exit 2 from
+    #    --selftest means "no serialisable child here, try the next".
+    $flipChecked = $false
+    foreach ($a in $corpus) {
+        $out  = & $Exe --selftest $a.Path
+        $code = $LASTEXITCODE
+        $line = @($out) | Where-Object { $_ -like "SELFTEST`t*" } | Select-Object -First 1
+        if ($code -eq 2 -or -not $line -or $line -like '*no-serialisable-child*') { continue }
+
+        $flipChecked = $true
+        if ($code -ne 0)                  { $failures.Add("$($a.Key): --selftest exit $code (expected 0: roundtrip + byteflip both hold)") }
+        if ($line -notlike '*roundtrip=1*')       { $failures.Add("$($a.Key): serializer did NOT round-trip the source ($line)") }
+        if ($line -notlike '*byteflip_caught=1*') { $failures.Add("$($a.Key): a planted byte-flip was NOT caught ($line)") }
+        Write-RtInfo "byte-flip proof: $($a.Key) -> $line"
+        break
+    }
+    if (-not $flipChecked) { $failures.Add('byte-flip proof: no corpus archive yielded a serialisable BCSEQ child') }
+
     Write-Host ''
     if ($failures.Count -gt 0) {
         foreach ($f in $failures) { Write-Host "   FAIL: $f" -ForegroundColor Red }
         Write-Host '   SELF-TEST FAILED - do not trust this harness until it is fixed.' -ForegroundColor Red
         exit $ExitHarnessErr
     }
-    Write-Host '   SELF-TEST PASSED: the exe honours exit-2-when-nothing-verifiable, a missing' -ForegroundColor Green
-    Write-Host '   archive is a harness error, and the verdict maps 0/1/2 (and vacuous->2) exactly.' -ForegroundColor Green
+    Write-Host '   SELF-TEST PASSED: the exe honours exit-2-when-not-fully-verifiable, a missing' -ForegroundColor Green
+    Write-Host '   archive is a harness error, the verdict maps 0/1/2 (and vacuous->2) exactly, and' -ForegroundColor Green
+    Write-Host '   the serializer both round-trips a real BCSEQ and has its planted byte-flip caught.' -ForegroundColor Green
     exit $ExitAllMatch
 }
 

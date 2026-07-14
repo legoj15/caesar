@@ -3445,3 +3445,103 @@ container, never re-copied. When a serializer lands, extend `roundtrip-verify
 -SelfTest` with the byte-flip proof (mutate one source byte of a verified child,
 require exactly one mismatch), the one contract the self-test cannot exercise until
 there is something to verify.
+
+## Suite stage 1 commit 1 — `Cseq::Serialize()`, the BCSEQ round-trip serializer (2026-07-14)
+
+The blueprint's commit 1: `std::vector<uint8_t> Cseq::Serialize()` on `caesar_core`,
+the exact inverse of `Cseq::Parse`. It reconstructs the whole `.bcseq` — CSEQ header,
+DATA command stream, LABL symbol section — from model state alone, never re-reading
+`Data`, and the round-trip harness proves it byte-identical over the entire corpus.
+Additive: nothing on the shipped export path calls it, so `caesar` stays
+output-identical.
+
+**Empirical method.** Before touching C++, a standalone Python re-implementation of
+the parser AND a candidate serializer was iterated against real `.bcseq` blobs pulled
+straight from the archives until it round-tripped **all 20,791 sequences byte-for-byte**;
+that reference pinned every layout fact below and every serializer decision the C++
+then mirrors. (Kept in the session scratchpad, not committed.)
+
+**The byte layout, confirmed from a corpus hexdump.** A `.bcseq` is `[header 0x40]
+[DATA][LABL]`, contiguous, DATA before LABL, every section length a multiple of `0x20`.
+The header is the 0x2C meaningful bytes (magic/BOM/`0x40`/version/file-length/block-
+count `2`/the two `0x5000`+`0x5001` section refs) zero-padded to `0x40`. The command
+stream is strictly linear (Parse's `while pos < end` walk has no gaps), so emitting the
+command map in offset order reproduces the DATA body — with two exceptions that are the
+whole story of this commit:
+
+**Finding 1 — DATA padding parses as phantom commands that spill into LABL.** DATA is
+`0x20`-aligned with trailing **zero** padding, but Parse does not know that: it walks
+the padding as note commands (`0x00` = note key 0), and the last such phantom reads its
+VarLen gate byte from the *first byte of LABL* (`'L'` = `0x4C`, high bit clear, so it is
+a single-byte value and the spill is at most two bytes). So re-emitting the parsed
+command map yields slightly MORE bytes than the section holds. Because serialize is the
+exact inverse of parse, those emitted bytes equal the original parsed range exactly, so
+the fix is to **truncate the emitted command bytes to the retained `DataLength - 8`** —
+the leading part is the true DATA content (real commands + zero pad), the spilled LABL
+bytes are sliced off and LABL is rebuilt independently. This is why `DataLength` must be
+*retained*, not recomputed: a phantom padding-note is byte-identical to a real key-0
+note, so the true section boundary cannot be inferred from the model.
+
+**Finding 2 — LABL carries duplicate-target labels the parse model dropped.** The LABL
+entry table lists `count` records, each `[0x1F00, target-offset, name-length, name]`
+with the name null-terminated and zero-filled so the next record starts 4-byte aligned;
+the section is then `0x20`-padded. The entries are stored name-sorted in the corpus, but
+Serialize reproduces the retained file order verbatim rather than assume it. The load-
+bearing catch: Parse keys labels by target *pointer* (`labls[labl.Offset]`), so when two
+distinct symbol names point at the SAME command offset (e.g. `plog.bcsar`: 24 entries,
+two sharing offset `0xE7`), the map keeps only the last and the command carries one name
+where the file listed two. The first C++ attempt rebuilt LABL from the per-command
+`CseqCmd::Label` and therefore emitted a count of 23 — **2,583 sequences mismatched**,
+all at the LABL count/entry-table bytes. Fix: retain the **full** label table
+`std::vector<std::pair<std::string,uint32_t>> Cseq::Labels` (every entry, file order) at
+parse, separate from the per-command label Export still uses for MIDI markers — so
+Export (and the `.mid`) is untouched while Serialize is lossless. After that change:
+0 mismatches.
+
+**No BCSEQ-internal opaque gaps.** Every byte between DATA+8 and the section end is a
+(possibly phantom) command; the only "unread" bytes are the section-alignment zero pad,
+which is reproduced by rule (truncate-to-length for DATA, `0x20`-pad for LABL). The
+model additions are the section-header words `DataLength`/`LablOffset`/`LablLength`
+(retained like `DataOffset`/`Version` already were) plus the full `Labels` table; there
+is **no `CseqCmd` change** — VarLen is emitted canonical, as the commit-0 scan proved
+safe (3,268,437 args, 0 non-canonical).
+
+**Writer plumbing (for commit 3).** The low-level emit primitives `WriteFixLen` /
+`WriteVarLen` — exact inverses of `ParseContext::ReadFixLen` / `ReadVarLen`, appending
+onto a `std::vector<uint8_t>` — live as free functions in `Common.hpp`/`Common.cpp`
+alongside their read siblings, deliberately reusable by the Cbnk/Csar serializers.
+CSEQ command-stream multi-byte args are big-endian (`WriteFixLen(..., littleEndian=false)`);
+header/section words are little-endian; `Rnd` bounds are written verbatim in file order
+from the retained `Arg1Rnd`/`Arg2Rnd` pairs. Two per-file static helpers
+(`emitArg`, `serializeCmd`) mirror the Parse dispatch branch-for-branch.
+
+**Harness wiring + the exit contract.** `caesar-roundtrip --verify`'s `trySerialize`
+seam now parses a BCSEQ span (read-only borrow, name echo hushed) and returns
+`Serialize()`; a mismatch prints a `MISMATCH … firstdiff=0x… got=… src=…` line pointing
+at the exact byte to hexdump. The per-archive exit rule was tightened to the honest
+floor: **exit 0 only when every child re-serialised AND matched (`skipped == 0`)**; a
+partial verify — some matched, some still SKIPPED — is exit 2, never a pass. Because the
+BCSAR container is itself a verify target and stays SKIPPED until commit 4 (and
+BCWAR/BCWAV/BCWSD/BCGRP are permanently opaque), **every archive is partial today, so the
+corpus aggregates to exit 2 with the BCSEQ row shown green at its full matched count** —
+the documented contract (in the wrapper's `.DESCRIPTION`): the BCSEQ count is the proof,
+exit 0 becomes reachable at commit 4. A new exe `--selftest` mode and the wrapper's
+upgraded `-SelfTest` carry the **byte-flip proof** the commit-0 note scheduled:
+re-serialise the first BCSEQ child, assert it reproduces the source, then flip one output
+byte and assert the compare catches it — returning 0 only when both hold.
+
+**Result + gate (all green).** `--verify` corpus-wide: **BCSEQ 20,791 / 20,791
+byte-identical, 0 mismatched, 0 skipped** (82 archives; overall run exit 2 = PARTIAL, by
+contract). Warning-clean MSVC Release build (`/W3 /WX`). Corpus A/B vs `HEAD` (`bd296f2`):
+**82 archives / 257,125 files byte-identical, stdout/stderr identical, exit 0** (baseline
+72 s, new 59 s) — the shipped `caesar` is untouched. Diagnostics goldens **18/18
+byte-identical** (exit 0). `roundtrip-verify -SelfTest` green, including the byte-flip
+proof on `caravel.bcsar` (`roundtrip=1 byteflip_caught=1`).
+
+**For commit 3 (BCBNK, after the Cbnk model split).** Reuse `WriteFixLen`/`WriteVarLen`
+from `Common`. The retain-the-header-words pattern applies (Cbnk's discarded
+`cbnkVersion`, the inst-type discriminator, the note `id`, the raw cwav index — per the
+blueprint). And the general lesson from Finding 2: any table the parse deduplicates or
+resolves-through-a-pointer needs a separate file-order retention for a lossless
+round-trip — check Cbnk's cwav/instrument references for the same collapse before
+trusting a rebuild from the resolved model.

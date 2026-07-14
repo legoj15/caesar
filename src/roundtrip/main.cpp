@@ -217,12 +217,30 @@ namespace
 	// VERIFY (default mode)
 	// -----------------------------------------------------------------------
 
-	// The serializer seam. Returns the re-serialised bytes for a format that has
-	// a Serialize() yet, else nullopt (SKIPPED). Every format is nullopt today;
-	// stage-1 commit 1 wires BCSEQ, commit 3 BCBNK, commit 4 BCSAR here — each an
-	// additive edit that flips that format from SKIPPED to verified.
-	optional<vector<uint8_t>> trySerialize(const string& /*format*/, const uint8_t* /*data*/, uint32_t /*length*/)
+	// The serializer seam. Returns the re-serialised bytes for a format that has a
+	// Serialize(), else nullopt (SKIPPED). Stage-1 commit 1 wired BCSEQ; commit 3
+	// wires BCBNK, commit 4 BCSAR — each an additive edit flipping that format from
+	// SKIPPED to verified. The permanently-opaque formats (BCWAR/BCWAV/BCWSD/BCGRP)
+	// never re-encode (CWAV cannot round-trip its DSP-ADPCM), so they stay nullopt.
+	//
+	// The Cseq ctor/Parse borrow the span read-only and never mutate it (the caller
+	// has already copied the source bytes out for the compare regardless); the cast
+	// hands the borrowed buffer to the reader, which types Data as mutable. Parse's
+	// name echo is hushed. A parse failure is a genuine SKIP: caesar itself could
+	// not read the file, so there is nothing faithful to re-serialise.
+	optional<vector<uint8_t>> trySerialize(const string& format, uint8_t* data, uint32_t length, ParseContext& ctx)
 	{
+		if (format == "BCSEQ")
+		{
+			CoutSilencer hush;
+			Cseq seq("<roundtrip-seq>", data, length, ctx);
+			if (!seq.Parse())
+			{
+				return nullopt;
+			}
+			return seq.Serialize();
+		}
+
 		return nullopt;
 	}
 
@@ -251,10 +269,10 @@ namespace
 		// Verify one unit: copy the source span out (the structural honesty
 		// guard — the compare is ALWAYS against this copy, never the live
 		// buffer), then compare a re-serialisation against it.
-		auto verifyOne = [&](const string& format, const uint8_t* data, uint32_t length)
+		auto verifyOne = [&](const string& format, uint8_t* data, uint32_t length)
 		{
 			vector<uint8_t> saved(data, data + length);
-			optional<vector<uint8_t>> produced = trySerialize(format, data, length);
+			optional<vector<uint8_t>> produced = trySerialize(format, data, length, csar.Ctx);
 
 			FormatTally& t = tallies[format];
 			if (!produced.has_value())
@@ -268,6 +286,26 @@ namespace
 			else
 			{
 				++t.mismatched;
+
+				// A mismatch is the one thing this tool exists to catch, so name it
+				// precisely: the first differing byte offset and the two bytes (or a
+				// length difference when one is a prefix of the other). The offset is
+				// into the child file / container, exactly where a hexdump should be
+				// opened.
+				const vector<uint8_t>& got = produced.value();
+				size_t n = min(got.size(), saved.size());
+				size_t at = 0;
+				while ((at < n) && (got[at] == saved[at])) { ++at; }
+
+				cout << "MISMATCH\t" << archivePath << "\t" << format
+					<< "\tfirstdiff=0x" << hex << at << dec
+					<< "\tgotlen=" << got.size() << "\tsrclen=" << saved.size();
+				if (at < n)
+				{
+					cout << "\tgot=0x" << hex << static_cast<int>(got[at])
+						<< "\tsrc=0x" << static_cast<int>(saved[at]) << dec;
+				}
+				cout << "\n";
 			}
 		};
 
@@ -297,18 +335,95 @@ namespace
 			<< "\tmismatched=" << mismatched
 			<< "\tskipped=" << skipped << "\n";
 
+		// Exit contract (per archive), tightened as serializers land:
+		//   1  any child mismatched — a real regression, the loudest signal.
+		//   0  every child re-serialised AND matched (skipped == 0).
+		//   2  otherwise: nothing was verifiable, OR some matched but some are still
+		//      SKIPPED (a partial verify is NOT a pass). This is the never-a-false-
+		//      pass floor: with only BCSEQ serialising, the BCSAR container and the
+		//      opaque BCWAR/BCWAV children are always SKIPPED, so every archive
+		//      exits 2 today — the BCSEQ matched-count is the commit-1 proof, not
+		//      the exit code. Exit 0 becomes reachable once commits 3-4 land the
+		//      BCBNK + BCSAR serializers and the opaque formats are the only skips.
 		if (mismatched > 0)
 		{
 			return ExitMismatch;
 		}
-		if (matched > 0)
+		if ((matched > 0) && (skipped == 0))
 		{
 			return ExitAllMatch;
 		}
+		if (matched > 0)
+		{
+			cout << "HARNESS\t" << archivePath << "\tpartial: " << matched
+				<< " matched but " << skipped << " still SKIPPED (not a full verify)\n";
+			return ExitHarness;
+		}
 
-		// Nothing was actually re-serialised: not a pass. Today this is EVERY
-		// run (no serializers) — the never-a-false-pass guard.
-		cout << "HARNESS\t" << archivePath << "\tno format is verifiable yet (0 serializers); nothing was proven\n";
+		// Nothing was re-serialised at all: not a pass.
+		cout << "HARNESS\t" << archivePath << "\tno format is verifiable here; nothing was proven\n";
+		return ExitHarness;
+	}
+
+	// -----------------------------------------------------------------------
+	// SELF-TEST: the byte-flip proof (scheduled by commit 0)
+	// -----------------------------------------------------------------------
+
+	// Prove, on the first serialisable child of this archive, BOTH halves of the
+	// round-trip contract: (a) Serialize() reproduces the source span byte-for-byte,
+	// and (b) a single planted byte-flip in the output is DETECTED by the compare —
+	// a harness that cannot catch a planted diff must never be trusted with a clean
+	// verdict. Prints one SELFTEST line and returns 0 only when both hold. If the
+	// archive carries no serialisable child, returns 2 so the wrapper moves on.
+	int runSelfTest(Csar& csar, const string& archivePath)
+	{
+		vector<Embedded> children;
+		try
+		{
+			children = collectEmbedded(csar);
+		}
+		catch (const HarnessError& e)
+		{
+			cout << "HARNESS\t" << archivePath << "\t" << e.message << "\n";
+			return ExitHarness;
+		}
+
+		for (const Embedded& child : children)
+		{
+			if (child.format != "BCSEQ")
+			{
+				continue;
+			}
+
+			vector<uint8_t> saved(child.data, child.data + child.length);
+			optional<vector<uint8_t>> produced = trySerialize(child.format, child.data, child.length, csar.Ctx);
+			if (!produced.has_value())
+			{
+				continue; // a child that would not parse: try the next
+			}
+
+			bool roundtrip = (produced.value() == saved);
+
+			// Plant one flipped byte and confirm the compare catches it. Mid-buffer
+			// so it lands in the command stream, XOR so it is provably a new value.
+			vector<uint8_t> tampered = produced.value();
+			bool caught = false;
+			if (!tampered.empty())
+			{
+				size_t at = tampered.size() / 2;
+				tampered[at] ^= 0xFF;
+				caught = (tampered != saved);
+			}
+
+			cout << "SELFTEST\t" << archivePath << "\t" << child.format
+				<< "\tbcseq_len=" << saved.size()
+				<< "\troundtrip=" << (roundtrip ? 1 : 0)
+				<< "\tbyteflip_caught=" << (caught ? 1 : 0) << "\n";
+
+			return (roundtrip && caught) ? ExitAllMatch : ExitMismatch;
+		}
+
+		cout << "SELFTEST\t" << archivePath << "\tno-serialisable-child\n";
 		return ExitHarness;
 	}
 
@@ -708,13 +823,13 @@ int main(int argc, char** argv)
 	for (int i = 1; i < argc; ++i)
 	{
 		string arg = argv[i];
-		if (arg == "--verify" || arg == "--scan-varlen" || arg == "--scan-gaps")
+		if (arg == "--verify" || arg == "--scan-varlen" || arg == "--scan-gaps" || arg == "--selftest")
 		{
 			mode = arg;
 		}
 		else if (arg == "-h" || arg == "--help")
 		{
-			cout << "usage: caesar-roundtrip [--verify|--scan-varlen|--scan-gaps] <archive.bcsar>\n";
+			cout << "usage: caesar-roundtrip [--verify|--selftest|--scan-varlen|--scan-gaps] <archive.bcsar>\n";
 			return ExitAllMatch;
 		}
 		else if (archivePath.empty())
@@ -731,7 +846,7 @@ int main(int argc, char** argv)
 	if (archivePath.empty())
 	{
 		cerr << "caesar-roundtrip: no archive given\n";
-		cerr << "usage: caesar-roundtrip [--verify|--scan-varlen|--scan-gaps] <archive.bcsar>\n";
+		cerr << "usage: caesar-roundtrip [--verify|--selftest|--scan-varlen|--scan-gaps] <archive.bcsar>\n";
 		return ExitHarness;
 	}
 
@@ -760,6 +875,10 @@ int main(int argc, char** argv)
 		if (mode == "--scan-gaps")
 		{
 			return runScanGaps(csar, archivePath);
+		}
+		if (mode == "--selftest")
+		{
+			return runSelfTest(csar, archivePath);
 		}
 		return runVerify(csar, archivePath);
 	}

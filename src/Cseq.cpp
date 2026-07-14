@@ -295,12 +295,17 @@ bool Cseq::Parse()
 
 	// Retain the DATA-section offset on the model: Export derives every command
 	// position (and every diagnostic AT POSITION) from it, without touching Data.
+	// Retain the section lengths/offset too, for Serialize's exact reconstruction.
 	DataOffset = dataOffset;
+	DataLength = dataLength;
 
 	if (!Ctx.Assert(pos, 0x5001, Ctx.ReadFixLen(pos, 4))) { return false; }
 
 	uint32_t lablOffset = Ctx.ReadFixLen(pos, 4);
 	uint32_t lablLength = Ctx.ReadFixLen(pos, 4);
+
+	LablOffset = lablOffset;
+	LablLength = lablLength;
 
 	pos = Data + lablOffset;
 
@@ -327,12 +332,17 @@ bool Cseq::Parse()
 		if (!Ctx.Assert(pos, 0x1F00, Ctx.ReadFixLen(pos, 4))) { return false; }
 
 		CseqLabl labl;
-		labl.Offset = Data + dataOffset + 8 + Ctx.ReadFixLen(pos, 4);
+		uint32_t labelTarget = Ctx.ReadFixLen(pos, 4);
+		labl.Offset = Data + dataOffset + 8 + labelTarget;
 		uint32_t lablLength = Ctx.ReadFixLen(pos, 4);
 		Ctx.CheckBounds(pos, lablLength);
 		labl.Label = string(reinterpret_cast<const char*>(pos), lablLength);
 
+		// The pointer-keyed map collapses labels that share a target (last wins),
+		// which is what Export wants (one marker per offset); the full-fidelity list
+		// keeps every entry in file order for Serialize.
 		labls[labl.Offset] = labl;
+		Labels.push_back({ labl.Label, labelTarget });
 	}
 
 	pos = Data + dataOffset;
@@ -627,6 +637,230 @@ bool Cseq::Parse()
 	}
 
 	return true;
+}
+
+// Emit one argument, the exact inverse of ReadArgs. For a random range the two
+// raw s16 bounds are written verbatim in file order (big-endian, as ReadArgs read
+// them) from the retained pair -- `value` is unused there. Fixed-width command
+// arguments are big-endian (CSEQ command-stream convention); the single-byte and
+// VarLen forms carry no endianness. Signed values (Int8/Int16) round-trip through
+// their two's-complement low bytes.
+static void emitArg(vector<uint8_t>& out, ArgType type, int32_t value, const pair<int32_t, int32_t>& rnd)
+{
+	switch (type)
+	{
+		case ArgType::Uint8:
+		case ArgType::Int8:
+		case ArgType::Var:
+			WriteFixLen(out, static_cast<uint32_t>(value), 1);
+			break;
+		case ArgType::Uint16:
+		case ArgType::Int16:
+			WriteFixLen(out, static_cast<uint32_t>(value), 2, false);
+			break;
+		case ArgType::VarLen:
+			WriteVarLen(out, static_cast<uint32_t>(value));
+			break;
+		case ArgType::Rnd:
+			WriteFixLen(out, static_cast<uint32_t>(rnd.first), 2, false);
+			WriteFixLen(out, static_cast<uint32_t>(rnd.second), 2, false);
+			break;
+		case ArgType::None:
+			break;
+	}
+}
+
+// Serialize one command, the inverse of the Parse dispatch: the prefix bytes in
+// the SAME order Parse reads them (If 0xA2, then the Time family 0xA3/A4/A5, then
+// Rnd/Var 0xA0/A1), the status byte (0xF0 + opcode for an extended command), the
+// command's own arguments in the layout Parse built into Args, then the trailing
+// _t (Arg2) argument. The Suffix1-governed Arg1 value lives at the Args slot Parse
+// wrote it to (after the note velocity / extended var-index where present); a Rnd
+// slot's real data is the retained bound pair, so `arg(slot)` there is only the
+// inert placeholder emitArg ignores.
+static void serializeCmd(vector<uint8_t>& out, const CseqCmd& cmd)
+{
+	if (cmd.Suffix3 == SuffixType::If) { out.push_back(0xA2); }
+
+	if      (cmd.Suffix2 == SuffixType::Time)    { out.push_back(0xA3); }
+	else if (cmd.Suffix2 == SuffixType::TimeRnd) { out.push_back(0xA4); }
+	else if (cmd.Suffix2 == SuffixType::TimeVar) { out.push_back(0xA5); }
+
+	if      (cmd.Suffix1 == SuffixType::Rnd) { out.push_back(0xA0); }
+	else if (cmd.Suffix1 == SuffixType::Var) { out.push_back(0xA1); }
+
+	uint8_t c = cmd.Cmd;
+
+	if (cmd.Extended)
+	{
+		out.push_back(0xF0);
+	}
+
+	out.push_back(c);
+
+	auto arg = [&](size_t slot) -> int32_t
+	{
+		return (slot < cmd.Args.size()) ? cmd.Args[slot] : 0;
+	};
+
+	if (!cmd.Extended)
+	{
+		if (c < 0x80)
+		{
+			WriteFixLen(out, static_cast<uint32_t>(arg(0)), 1);   // velocity
+			emitArg(out, cmd.Arg1, arg(1), cmd.Arg1Rnd);
+		}
+		else if ((c == 0x80) || (c == 0x81))
+		{
+			emitArg(out, cmd.Arg1, arg(0), cmd.Arg1Rnd);
+		}
+		else if (c == 0x88)
+		{
+			WriteFixLen(out, static_cast<uint32_t>(arg(0)), 1);   // track index
+			WriteFixLen(out, static_cast<uint32_t>(arg(1)), 3, false);
+		}
+		else if ((c == 0x89) || (c == 0x8A))
+		{
+			WriteFixLen(out, static_cast<uint32_t>(arg(0)), 3, false);
+		}
+		else if (((c >= 0xB0) && (c <= 0xDF)) || (c == 0xE0) || (c == 0xE1) || (c == 0xE3) || (c == 0xE4))
+		{
+			emitArg(out, cmd.Arg1, arg(0), cmd.Arg1Rnd);
+		}
+		else if (c == 0xFE)
+		{
+			WriteFixLen(out, static_cast<uint32_t>(arg(0)), 2, false);
+		}
+		// 0xFB / 0xFC / 0xFD / 0xFF: no arguments.
+	}
+	else
+	{
+		if (((c >= 0x80) && (c <= 0x8B)) || ((c >= 0x90) && (c <= 0x95)))
+		{
+			WriteFixLen(out, static_cast<uint32_t>(arg(0)), 1);   // target var index
+			emitArg(out, cmd.Arg1, arg(1), cmd.Arg1Rnd);
+		}
+		else if (((c >= 0xA0) && (c <= 0xB1)) || (c == 0xE0) || ((c >= 0xE1) && (c <= 0xE6)))
+		{
+			emitArg(out, cmd.Arg1, arg(0), cmd.Arg1Rnd);
+		}
+	}
+
+	// The trailing _t ramp (Arg2), appended by Parse after the command's own args;
+	// its non-Rnd value is the last element Parse pushed, its Rnd bounds the pair.
+	if (cmd.Arg2 != ArgType::None)
+	{
+		emitArg(out, cmd.Arg2, cmd.Args.empty() ? 0 : cmd.Args.back(), cmd.Arg2Rnd);
+	}
+}
+
+vector<uint8_t> Cseq::Serialize()
+{
+	// 1. The DATA command stream: emit every command in offset order, then keep
+	//    exactly DataLength - 8 bytes. Parse walks the 0x20 section padding as
+	//    phantom note commands that read up to two bytes past the section into
+	//    LABL; serialize reproduces that whole parsed byte range exactly, so its
+	//    leading DataLength - 8 bytes are the original DATA content and the tail
+	//    (the LABL spill) is sliced off -- reconstructed independently below.
+	vector<uint8_t> cmdBytes;
+
+	for (const auto& kv : Commands)
+	{
+		serializeCmd(cmdBytes, kv.second);
+	}
+
+	uint32_t dataContent = (DataLength >= 8) ? (DataLength - 8) : 0;
+
+	// 2. The LABL symbol section body (everything after its 8-byte header): the
+	//    label count, the 0x5100 entry table, then the 0x1F00 records. Emitted in
+	//    the file order the model retained (the corpus stores them name-sorted, but
+	//    reproducing the stored order verbatim needs no such assumption and keeps
+	//    duplicate-target entries the pointer-keyed parse map would drop). Each
+	//    record is the target offset (a command's own DATA+8-relative offset) plus
+	//    the name, null-terminated and zero-padded so the next record starts
+	//    4-byte aligned.
+	vector<uint8_t> lablBody;
+	WriteFixLen(lablBody, static_cast<uint32_t>(Labels.size()), 4);   // label count
+
+	// Reserve the entry table (8 bytes each); backfilled once record offsets are
+	// known. A record's relative offset is measured from the LABL header end
+	// (LablOffset + 8), which is exactly its offset within this body vector.
+	size_t entryTable = lablBody.size();
+	lablBody.resize(entryTable + Labels.size() * 8, 0);
+
+	vector<uint32_t> recordOffsets;
+
+	for (const auto& label : Labels)
+	{
+		recordOffsets.push_back(static_cast<uint32_t>(lablBody.size()));
+
+		WriteFixLen(lablBody, 0x1F00, 4);
+		WriteFixLen(lablBody, label.second, 4);                      // target offset
+		WriteFixLen(lablBody, static_cast<uint32_t>(label.first.size()), 4);
+		lablBody.insert(lablBody.end(), label.first.begin(), label.first.end());
+
+		// LablOffset + 8 is 4-aligned, so the body offset's low two bits equal the
+		// absolute offset's: one null terminator plus alignment fill, 1-4 bytes.
+		lablBody.insert(lablBody.end(), 4 - (lablBody.size() % 4), 0);
+	}
+
+	for (size_t k = 0; k < Labels.size(); ++k)
+	{
+		vector<uint8_t> entry;
+		WriteFixLen(entry, 0x5100, 4);
+		WriteFixLen(entry, recordOffsets[k], 4);
+		copy(entry.begin(), entry.end(), lablBody.begin() + entryTable + k * 8);
+	}
+
+	// 3. Assemble the file positionally from the retained framing words. Header
+	//    (0x40), DATA at DataOffset, LABL at LablOffset -- sections are contiguous
+	//    and 0x20-padded in the corpus, so the pad-to-offset loops are the zero
+	//    fill the format carries; the file-length word is the final size.
+	vector<uint8_t> out;
+
+	WriteFixLen(out, 0x43534551, 4, false);   // 'CSEQ'
+	WriteFixLen(out, 0xFEFF, 2);              // byte-order mark
+	WriteFixLen(out, 0x40, 2);                // header size
+	WriteFixLen(out, Version, 4);
+	size_t fileLenPos = out.size();
+	WriteFixLen(out, 0, 4);                   // file length (patched below)
+	WriteFixLen(out, 2, 4);                   // block count (DATA + LABL)
+	WriteFixLen(out, 0x5000, 4);
+	WriteFixLen(out, DataOffset, 4);
+	WriteFixLen(out, DataLength, 4);
+	WriteFixLen(out, 0x5001, 4);
+	WriteFixLen(out, LablOffset, 4);
+	WriteFixLen(out, LablLength, 4);
+
+	while (out.size() < DataOffset) { out.push_back(0); }
+
+	out.push_back('D'); out.push_back('A'); out.push_back('T'); out.push_back('A');
+	WriteFixLen(out, DataLength, 4);
+
+	if (cmdBytes.size() > dataContent)
+	{
+		cmdBytes.resize(dataContent);
+	}
+
+	out.insert(out.end(), cmdBytes.begin(), cmdBytes.end());
+
+	while (out.size() < static_cast<size_t>(LablOffset)) { out.push_back(0); }
+
+	out.push_back('L'); out.push_back('A'); out.push_back('B'); out.push_back('L');
+	WriteFixLen(out, LablLength, 4);
+	out.insert(out.end(), lablBody.begin(), lablBody.end());
+
+	while ((out.size() - LablOffset) < static_cast<size_t>(LablLength)) { out.push_back(0); }
+
+	// Backfill the file-length word now that the full size is known (little-endian,
+	// matching the header read).
+	uint32_t fileLen = static_cast<uint32_t>(out.size());
+	out[fileLenPos + 0] = static_cast<uint8_t>(fileLen);
+	out[fileLenPos + 1] = static_cast<uint8_t>(fileLen >> 8);
+	out[fileLenPos + 2] = static_cast<uint8_t>(fileLen >> 16);
+	out[fileLenPos + 3] = static_cast<uint8_t>(fileLen >> 24);
+
+	return out;
 }
 
 bool Cseq::Export(uint32_t startOffset)

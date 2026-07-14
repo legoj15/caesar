@@ -81,6 +81,37 @@ int32_t ParseContext::ReadVarLen(uint8_t*& pos)
 	return result;
 }
 
+void WriteFixLen(vector<uint8_t>& out, uint32_t value, size_t bytes, bool littleEndian)
+{
+	for (size_t i = 0; i < bytes; ++i)
+	{
+		out.push_back(static_cast<uint8_t>(value >> ((littleEndian ? i : bytes - i - 1) * 8)));
+	}
+}
+
+void WriteVarLen(vector<uint8_t>& out, uint32_t value)
+{
+	// Build the 7-bit groups least-significant first (the low group carries no
+	// continue bit), then emit most-significant first -- the minimum-length form
+	// ReadVarLen decodes back to the same value.
+	uint8_t groups[5];
+	size_t n = 0;
+
+	groups[n++] = value & 0x7F;
+	value >>= 7;
+
+	while (value > 0)
+	{
+		groups[n++] = static_cast<uint8_t>((value & 0x7F) | 0x80);
+		value >>= 7;
+	}
+
+	while (n-- > 0)
+	{
+		out.push_back(groups[n]);
+	}
+}
+
 // Report something the converter could not fully handle. A bare call is
 // per-item detail that only appears under -w (unchanged behaviour). When a
 // noticeCategory is given, the site is also flagged as dropped/approximated

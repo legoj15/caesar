@@ -21,6 +21,21 @@ struct Range
 // in Common.cpp for the rationale).
 std::string TypedName(const std::string& name, const std::string& type);
 
+// The write side of the parse helpers -- exact inverses of ParseContext's
+// ReadFixLen / ReadVarLen, appending onto a growing byte vector. Free functions
+// (no ParseContext, no bounds context) because a serializer builds its own buffer
+// rather than reading into loaded archive spans; they are the shared low-level
+// emit primitives every format's Serialize() uses (Cseq's command stream today,
+// Cbnk's tables next). WriteFixLen writes the low `bytes` bytes of `value`,
+// little-endian by default or big-endian when littleEndian is false -- byte i
+// carries the same shift ReadFixLen reads it from, so a signed value round-trips
+// through its two's-complement low bytes. WriteVarLen emits the CANONICAL
+// (minimum-length) 7-bits-per-byte encoding ReadVarLen decodes; the corpus scan
+// proved every CSEQ VarLen argument is already canonical (3,268,437 args, 0
+// non-canonical), so canonical output is byte-identical.
+void WriteFixLen(std::vector<uint8_t>& out, uint32_t value, size_t bytes, bool littleEndian = true);
+void WriteVarLen(std::vector<uint8_t>& out, uint32_t value);
+
 // The mutable state a single parse threads through every reader, together with
 // the helpers that read and diagnose against it: the file-name and base-offset
 // stacks that diagnostics are positioned against, the loaded buffer extents

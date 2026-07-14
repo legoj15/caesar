@@ -188,6 +188,21 @@ per stage. Status:
       their own FILE entries, so commit 4 must re-point a nested entry into the
       copied container, never double-copy it. Write-up in
       [HISTORY.md](HISTORY.md#suite-stage-1-commit-0--scans--round-trip-harness-scaffold-2026-07-14).
+    - [x] **Commit 1 — `Cseq::Serialize()`, the BCSEQ round-trip serializer
+      (2026-07-14).** `--verify` re-serialises every embedded `.bcseq` and
+      compares against a saved source span: **BCSEQ 20,791 / 20,791
+      byte-identical corpus-wide, 0 mismatched.** Emits canonical VarLen (no
+      `CseqCmd` change); the model gained the retained section-header words +
+      the full LABL table (duplicate-target labels the parse map collapses).
+      Two format facts pinned down: DATA `0x20`-pad parses as phantom notes
+      that spill into LABL (handled by truncating the emitted stream to the
+      stored length), and LABL records are null-terminated + 4-byte aligned in
+      file order. Exit contract stays 2 (PARTIAL) until commits 3-4 land —
+      every archive still has SKIPPED opaque/container children; the BCSEQ
+      matched-count is the proof, and `-SelfTest` now carries the byte-flip
+      check. `caesar` output-identical. Shared `WriteFixLen`/`WriteVarLen` emit
+      helpers in `Common` for commit 3 to reuse. Write-up in
+      [HISTORY.md](HISTORY.md#suite-stage-1-commit-1--cseqserialize-the-bcseq-round-trip-serializer-2026-07-14).
 - [ ] **Stage 2 — dry player**: native-rate voices, console interpolation,
       solved envelopes, priority voice stealing (RE'd and confirmed), tempo
       clock, single final upsample.

@@ -78,11 +78,39 @@ struct Cseq
 	uint32_t DataOffset = 0;
 	uint32_t Version = 0;
 
+	// The remaining CSEQ/section-header words, retained (like DataOffset/Version)
+	// so Serialize reconstructs the exact original framing without re-reading Data.
+	// DataLength/LablLength are the section lengths INCLUDING each section's own
+	// 8-byte magic+length header (0x20-aligned); LablOffset locates the LABL
+	// section. DataLength is load-bearing for the round-trip: the DATA section's
+	// 0x20 zero-padding is parsed as phantom note commands that spill up to two
+	// bytes into LABL, so re-emitting the command map yields slightly MORE than the
+	// section holds -- Serialize truncates the emitted command bytes to exactly
+	// DataLength - 8, which reproduces the original DATA content (real commands +
+	// zero pad) with the LABL spill sliced off. Recomputing these from the model
+	// is impossible: the phantom-padding commands are indistinguishable from real
+	// key-0 notes, so the true section boundary must be retained, not inferred.
+	uint32_t DataLength = 0;
+	uint32_t LablOffset = 0;
+	uint32_t LablLength = 0;
+
 	// The parsed command stream: offset (relative to DATA+8) -> command, built by
 	// Parse and consumed by Export. Retained on the model so the walk locates
 	// itself through stored offsets, not the live buffer -- the point of the
 	// Parse/Export split.
 	std::map<uint32_t, CseqCmd> Commands;
+
+	// The LABL symbol table exactly as the file carries it: every entry's (name,
+	// target DATA+8-relative offset), in file order. Retained SEPARATELY from the
+	// per-command CseqCmd::Label (which Export consumes for MIDI markers) because
+	// that attachment is lossy for the round-trip: the parse keys labels by target
+	// pointer, so when two labels name the SAME offset (distinct symbol names for
+	// one entry point -- e.g. plog.bcsar) the map keeps only the last, and the
+	// command carries one name where the file listed two. Serialize rebuilds the
+	// entry table and records from this list, in file order, reproducing the count
+	// and every record byte-for-byte. Export is untouched, so the .mid stays
+	// byte-identical.
+	std::vector<std::pair<std::string, uint32_t>> Labels;
 
 	// The parent hands over the span its just-written .bcseq was serialised from
 	// (a pointer + length into the parent's already-loaded buffer), so the child
@@ -97,6 +125,18 @@ struct Cseq
 	// Parse the CSEQ/LABL/DATA headers and build the command map into the model.
 	// No file output; every Assert/Error fires here. Call once before Export.
 	bool Parse();
+
+	// Re-serialize the parsed model back to the exact source .bcseq bytes: the
+	// inverse of Parse. Reads ONLY model state (the retained header words, the
+	// command map, and the per-command labels), never Data -- so it proves the
+	// model is a lossless representation of the file. Walks Commands in offset
+	// order emitting each command's prefix/status/argument bytes (canonical VarLen,
+	// big-endian fixed-width command args, Rnd bounds verbatim), truncates the DATA
+	// content to the retained section length, and rebuilds the LABL symbol section
+	// (entries sorted by name, records null-terminated + 4-byte aligned, section
+	// 0x20-padded). The stage-1 round-trip harness (caesar-roundtrip) compares the
+	// result against a saved copy of the source span. Call only after Parse().
+	std::vector<uint8_t> Serialize();
 
 	// Walk the parsed model (the convert-time VM + control-flow interpreter) and
 	// write the .mid beside FileName. Reads only model state (Commands,
