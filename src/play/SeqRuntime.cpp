@@ -1496,6 +1496,19 @@ namespace play
 			if (ev.envOverride[3] >= 0) v.envSustain = static_cast<uint8_t>(ev.envOverride[3]);
 			if (ev.envOverride[4] >= 0) v.envRelease = static_cast<uint8_t>(ev.envOverride[4]);
 
+			// The per-sound INFO volume byte: the archive-static attenuation the sound
+			// designer set on this sequence (retail archives almost never ship 127).
+			// A plain linear ratio vol/127 -- bytes ABOVE 127 exist in the wild
+			// (140/150), unrepresentable by the 128-entry decibel table, so the law is
+			// linear-with-boost. Folded into the static per-voice gain, upstream of
+			// the clamp, exactly where hardware applies its sound-level gain. Omitting
+			// this ran the bus hot: the diagnosed eShop clamp-clipping bass distortion
+			// (this byte is worth -2.0 dB there). Flagged for the Net-B capture:
+			// BGM_MAIN_Mii_Only_One (byte 64) directly calibrates the linear law.
+			float seqGain = static_cast<float>(arch.seqVolume) / 127.0f;
+			v.gainL *= seqGain;
+			v.gainR *= seqGain;
+
 			// C7: volume/pan/pitch are NOT folded here -- the voice follows its track's
 			// live timeline per frame in renderVoice (see the VoiceMod in the render
 			// loop). The VoiceSpec keeps only the note's static base (velocity x zone

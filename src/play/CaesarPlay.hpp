@@ -35,6 +35,7 @@ namespace play
 		uint32_t bankIndex = 0;    // index into Csar::CbnkRecords: the bank this seq binds to
 		uint32_t startOffset = 0;  // entry start within the shared sequence bank (DATA+8-relative)
 		uint32_t recordIndex = 0;  // index into Csar::CseqRecords
+		uint8_t volume = 127;      // the INFO per-sound volume byte (linear vol/127; >127 = boost)
 	};
 
 	// The loaded, resolved object graph for one archive plus (optionally) one
@@ -59,6 +60,7 @@ namespace play
 		std::vector<std::unique_ptr<Cbnk>> switchBanks;
 
 		uint32_t startOffset = 0;    // the chosen entry's start offset
+		uint8_t seqVolume = 127;     // the chosen sound's INFO volume byte (linear vol/127)
 
 		LoadedArchive();
 		~LoadedArchive();

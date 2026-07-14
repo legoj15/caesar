@@ -81,10 +81,20 @@ struct CsarCseq
 	uint32_t Type = 0;           // 0x2201 external stream / 0x2202 CWSD / 0x2203 sequence
 	uint32_t CbnkOffset = 0;     // offset of the record's bank-reference sub-structure
 
-	// The three record words logged (Analyse "Cseq 0x04/08/14") and dropped.
+	// The three record words logged (Analyse "Cseq 0x04/08/14") and retained
+	// verbatim for the round-trip. Word04 is the player item id; Word08's low
+	// byte is the sound's VOLUME (byte 1 = remote filter), surfaced as `Volume`
+	// below; Word14 is unidentified.
 	uint32_t Word04 = 0;
 	uint32_t Word08 = 0;
 	uint32_t Word14 = 0;
+
+	// The per-sound volume byte (Word08 & 0xFF): the archive-static attenuation
+	// the engine applies to this sound as a plain linear ratio vol/127 (values
+	// ABOVE 127 exist in retail archives -- 140/150 -- so it is a boostable
+	// linear law, not a 128-entry table lookup). The converter has no use for it
+	// (MIDI volume is per-track); the suite's player applies it per voice.
+	uint8_t Volume = 127;
 
 	// Span-relative position the 0x2201/0x2202 skip warning points at (the old
 	// live `pos - 16`), reconstructed as Data + WarnOffset at export so the

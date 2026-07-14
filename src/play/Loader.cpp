@@ -168,6 +168,7 @@ namespace play
 			info.bankIndex = rec.BankIndex;
 			info.startOffset = rec.StartOffset;
 			info.recordIndex = static_cast<uint32_t>(r);
+			info.volume = rec.Volume;
 
 			out.push_back(info);
 		}
@@ -232,6 +233,7 @@ namespace play
 
 			arch.startOffset = info.startOffset;
 			arch.bankIndex = info.bankIndex;
+			arch.seqVolume = info.volume;
 			arch.switchBanks.resize(csar.CbnkRecords.size());
 		}
 		catch (const exception& e)

@@ -363,6 +363,19 @@ House rules:
 
 ### Fixed
 
+- **`caesar-play`: the per-sound INFO volume byte now reaches the mix.** Every
+  CSAR sound entry carries a designer-set volume (low byte of the retained
+  `Word08`); the player never applied it, so the bus ran hot and the final
+  clamp flat-topped loud passages — the diagnosed eShop-menu bass distortion
+  (`SEQ_TIGER_TOP_EF` ships at 101 = −2.0 dB; retail archives almost never use
+  127). The byte is now a typed `CsarCseq::Volume` field applied per voice as
+  a plain linear ratio `vol/127` (bytes above 127 exist in retail archives, so
+  the law is linear-with-boost, not a dB-table lookup). Measured: eShop
+  clipped samples collapse 2,367 → 166 and the render's RMS shifts −1.98 dB
+  against the byte's predicted −1.99 dB. **Changes `caesar-play` rendered
+  audio only** — the converter never consumed the byte and its outputs are
+  byte-identical (ab-verify + diag-goldens + round-trip all exit 0).
+
 - **`caesar-play`: a force-stopped voice now declicks over one DSP frame instead
   of stopping dead.** A voice cut by a pool steal, a mono re-trigger or the
   render cap ended at its instantaneous amplitude with no ramp — an audible

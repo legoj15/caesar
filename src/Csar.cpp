@@ -399,6 +399,7 @@ bool Csar::Parse()
 		cseq.Id = Ctx.ReadFixLen(pos, 4);
 		cseq.Word04 = Ctx.ReadFixLen(pos, 4);
 		cseq.Word08 = Ctx.ReadFixLen(pos, 4);
+		cseq.Volume = static_cast<uint8_t>(cseq.Word08 & 0xFF);
 		cseq.Type = Ctx.ReadFixLen(pos, 4);
 		cseq.CbnkOffset = Ctx.ReadFixLen(pos, 4);
 		cseq.Word14 = Ctx.ReadFixLen(pos, 4);
