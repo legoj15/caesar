@@ -207,17 +207,31 @@ per stage. Status:
       audible sequence command a `BGM`/`SE` render touches is now native. Full
       write-up (per-feature evidence class, the ramp-domain finding, the golden
       inventory) in the HISTORY 2026-07-14 Phase III entry.
-      **Next: Phase IV — C11 the console-tolerance net (BLOCKED on fresh New 3DS
-      captures; the old music captures are gone).** Needs
-      `BGM_MAIN_Mii_Only_One`, per-instrument isolated notes, and the MeetSound
-      SEs; ask the user for the captures. The **flagged unknowns** the captures
-      recalibrate (all chosen-and-documented, none structurally blocking): the LFO
-      rate→Hz constant + sine resolution; the portamento time→duration mapping; the
-      LPF/biquad topology (RBJ) + Q; the velocity `(vel/127)²` law; the pan
+      **Phase IV — C11 the console-tolerance net: harness built + self-validated,
+      and the two existing BGM captures both PASS (2026-07-14).** The numpy-only
+      analyzer + PowerShell driver (`tools/console-tolerance/`) verdict a render
+      against a New 3DS line-in capture — match within tolerance EXCEPT the reverb
+      tail — over envelope / tempo / spectrum / loudness, report the
+      reverb-attributable residual separately (stage 3's target), and measure each
+      flagged constant. `--self-validate` proves it before any capture exists (a
+      realistic capture-chain fixture passes; wrong-tempo/padded-release/different-
+      sequence each fail their named metric). The 2026-07-08 captures
+      (`BGM_MAIN_Mii_Only_One_console.wav`, `EMPTY_LANDSCAPE_console.wav`,
+      192 kHz/16-bit) both PASS all four metrics on the first dry-player-vs-console
+      run; tempo slope is exactly 1.0000 on both (default-tempo + 160/32728 frame
+      period confirmed on hardware); reverb residual −36 dB (Only_One gap) / −6 dB
+      (dense pads). **Still open: the per-instrument isolated-note captures**
+      (`SE_NEW_DRUM01`, `SE_LEGEND_KEY_FLY`, +optional) that recalibrate the
+      envelope/level/pan/decay-table constants a busy BGM cannot isolate — see
+      [docs/CAPTURE-REQUEST.md](CAPTURE-REQUEST.md). The **flagged unknowns** the
+      captures recalibrate (none structurally blocking): the LFO rate→Hz constant
+      (a first reading is ~4.00 Hz in Only_One) + sine resolution; the portamento
+      time→duration mapping (needs a glide SE); the LPF/biquad topology (RBJ) + Q;
+      the velocity `(vel/127)²` law (needs ≥2 isolated notes); the pan
       sqrt-polynomial vs equal-power; the envelope floor / attack-done threshold /
       update cadence / amplitude `/40`-vs-`/20`; absolute output level; the pool
-      sorted-insert tie order; and the console **interpolation filter** (ship
-      linear; recover via the offline teakra oracle).
+      sorted-insert tie order; and the console **interpolation filter** (the capture
+      shows HF energy the band-limited render lacks; recover via the teakra oracle).
 - [ ] **Stage 3 — reverb + delay**: offline `teakra` impulse capture →
       comb/allpass fit → New 3DS hardware validation. The long pole.
       Same oracle method now also covers the **Surround-mode virtualization**

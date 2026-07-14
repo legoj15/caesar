@@ -4338,3 +4338,138 @@ committed (only the script + README).
   suppresses only NEW notes (a sounding voice is not retroactively silenced); a
   mid-ramp tempo change slightly mis-sizes a `_t` duration (converted once at the
   command tick). All are single-line fixes if a capture ever shows them.
+
+## Suite stage 2 Phase IV (part 1) — the console-tolerance net, built, self-validated, and run against the real captures (2026-07-14)
+
+Executed C11 of the dry-player blueprint: the Net-B console-tolerance harness
+(`tools/console-tolerance/`), built and **self-validated before depending on any
+capture**, then run against the two console captures that turned out still to
+exist. No C++ changed — this is dev tooling, `caesar` byte-for-byte unchanged
+(ab-verify + diag-goldens + play-goldens all exit 0; the harness adds no build
+input, so the play-goldens/diag-goldens freshness gates see nothing stale).
+
+### What it is
+
+`console_tolerance.py` (numpy only — scipy is not installed, so every DSP
+primitive is hand-rolled on `numpy.fft`, exactly like `tools/surround-probe`)
+ingests a New 3DS line-in capture of a sequence and a `caesar-play --render` of
+the same sequence, and verdicts them to the stage-2 criterion: **match within
+tolerance, EXCEPT the reverb tail.** A PowerShell driver
+(`console-tolerance.ps1`) renders each captured sequence at the capture's own
+sample rate and runs the analyzer, with the ab-verify/play-goldens discipline
+(build-freshness gate, Stop-funnel, exit 0/1/2, `-AllowStaleExe`).
+
+**Alignment** (captures have unknown lead-in / gain / clock): bring the capture
+to the render rate; integer onset-lag; a **scale-search cross-correlation of the
+two onset-strength envelopes** for the tempo/clock ratio (continuous, so it is
+robust to the density/reverb mismatch that defeats discrete onset-peak matching);
+a global gain offset over the trusted window.
+
+**Metrics and tolerances** (each with a reasoned reverb exclusion):
+
+| Metric | Validates | Pass tolerance | Reverb handling |
+|---|---|---|---|
+| envelope-fit | envelope shape; tracks output level | median-subtracted shape residual <= 3.0 dB (music) / 6.0 dB (short note); dB-slope in [0.85, 1.15] | trusted = render above floor+6 dB, below peak-1 dB, before the last shared onset; frames where the console sits > 4 dB above the render are reverb-dominated -> excluded |
+| onset-timing | tempo / frame-period / clock | \|slope-1\| <= 1.0 %; xcorr >= 0.08 floor; needs >= 4 onsets over >= 1 s | onsets are attacks; a single note is not a tempo (N/A) |
+| psd-distance | spectral fidelity (interp/pan/velocity) | per-channel MAGDEV <= 6.0 dB (median-subtracted, 100-14000 Hz, over the body) | body only; median-subtraction removes level |
+| loudness | dynamics realism (EMPTY_LANDSCAPE precedent) | \|d(p95-p50)\| <= 4 dB, \|d(p95-p25)\| <= 6 dB over the trusted body | upper distribution only — reverb fills valleys, so a valley-depth range always reads the dry render as "more dynamic"; that is the reverb exception, not a fault |
+| reverb residual | *report only — stage 3's target* | never fails | the console energy where the dry render is silent (trailing tail AND interior all-voices-off gaps), relative to body energy |
+
+The reverb exception is realised three ways, all so the exception cannot mask a
+real fault: (1) the trusted window's lower bound is the render's own floor, so the
+render-silent tail is excluded by construction; (2) within the window, only frames
+where the *console* exceeds the *render* are excluded (a padded/wrong envelope,
+where the *render* is louder, still fails); (3) the reverb residual is computed and
+reported separately over every render-silent frame, never contributing to pass/fail.
+The envelope is lightly smoothed (~15 ms) so the fit measures the ADSHR-scale
+shape, not 5 ms micro-structure a reverb reshapes.
+
+**Per-flagged-unknown diagnostics** emitted alongside the verdict: output level
+(the render-vs-console gain), pan (L/R RMS ratio -> sqrt-poly vs equal-power),
+vibrato/tremolo rate (1-12 Hz modulation FFT -> `kLfoRateHz = 5/64`), exposed-tail
+decay time (exp-grid fit aligned at the -25 dB crossing — the EMPTY_LANDSCAPE /
+Only_One precedent — reported for console AND render since release+reverb are not
+separable from the tail alone), and an interpolation HF-energy proxy. Velocity and
+portamento are flagged as needing dedicated repros (>= 2 isolated notes / a glide SE).
+
+### The fixture-realism discipline (the 2026-07-11 lesson)
+
+`--self-validate` synthesizes a fake "console capture" from a real render by
+applying the **whole capture chain** — resample to the capture rate, a -6 dB gain,
+the surround-probe's measured **-85 dBFS** noise floor, a 37 ms lead-in, **+-50 ppm**
+clock drift, and a synthetic exponential reverb tail (-20 dB send, tau 0.4 s) so the
+reverb-exception path is exercised. This is a direct answer to the 2026-07-11
+surround-probe lesson (the synthetic validation passed but the real capture broke
+the segmenter because the fixture was unrealistic): an idealized fixture is
+worthless. The synthetic noise is seeded, so the whole self-validate is
+deterministic (byte-identical run to run).
+
+**Self-validation evidence** (on two real `caesar-play` renders as the base,
+`BGM_DEN_RESULT` and `BGM_DEN_MAP`, plus the short SE `SE_SQUARE_CONGRATULATION`):
+the realistic fixture PASSES all applicable metrics (e.g. base_map envelope 1.11 dB,
+tempo slope 1.0000, PSD 0.20 dB, loudness d<=0.2 dB), and the three negative controls
+each FAIL their named metric — a **wrong-tempo** render (retimed 2 %) fails
+onset-timing (slope 0.9805 = 1/1.02, correctly recovered), a **padded-release**
+render fails envelope-fit (and ONLY envelope-fit on the music bases — clean
+attribution), and a **different sequence** fails. Exit contract verified:
+0 pass / 1 out-of-tolerance / 2 harness-error (bad input, missing numpy, any
+exception -> 2, never a false pass).
+
+Two design corrections found during self-validation (both real): a relative-to-max
+onset threshold made the dry render's single-dominant-transient yield a sparse
+clustered onset set while the reverb'd console yielded a dense spread one — the
+scale-search cross-correlation replaced discrete peak-matching to fix it; and a
+single percussive note's ~4 clustered strength peaks spuriously triggered
+onset-timing, fixed by requiring the onsets to span >= 1 s.
+
+### The real captures (the "gone" captures were not gone)
+
+Mid-task the user surfaced the 2026-07-08 captures at
+`...\MiiPlaza\sound\MeetSound\BANK_BGM\`: `BGM_MAIN_Mii_Only_One_console.wav` and
+`EMPTY_LANDSCAPE_console.wav`, both **192 kHz / 16-bit stereo** New 3DS line-in.
+The harness reads 16-bit at 192 kHz directly and its default `-CapturesDir` now
+points there. First dry-player-vs-console comparison (tolerances were calibrated on
+synthetic fixtures + the self-validate bases, NOT on these captures):
+
+| Capture | envelope | onset (tempo) | psd | loudness | verdict | reverb residual |
+|---|---|---|---|---|---|---|
+| `BGM_MAIN_Mii_Only_One` (60.5 s) | 2.31 dB | slope **1.0000**, 450 onsets | L/R 0.81 dB | dmbp 1.2 / drange 0.5 dB | **PASS** | **-35.6 dB** over 3.08 s (the ~51 s gap) |
+| `BGM_DEN_EMPTY_LANDSCAPE` (29.1 s) | 2.33 dB | slope **1.0000**, 132 onsets | L/R 2.59 dB | dmbp 1.1 / drange 0.9 dB | **PASS** | **-6.0 dB** over 4.61 s |
+
+Both PASS all four metrics — a strong, honest first result (not tuned to these
+files). What the numbers say about the flagged constants:
+
+- **Tempo / frame-period: confirmed.** The onset-timing slope is exactly 1.0000 on
+  both, so the 120 BPM default and the physically-forced 160/32728 frame period are
+  right against hardware.
+- **The reverb residual is stage 3's target, and it is quantitatively the
+  2026-07-08 finding.** It is a modest -35.6 dB on the sparse `Only_One` (mostly the
+  ~1.6 s all-voices-off gap at ~51 s, where the console rings and the dry render is
+  silent) but a large **-6.0 dB** on the dense `EMPTY_LANDSCAPE` pads — the
+  numerical form of "the console's sustain there is carried heavily by DSP reverb a
+  soundfont cannot encode." The dry player is *correctly* dry; the gap is exactly
+  the reverb stage 3 must model.
+- **Interpolation filter: the capture shows HF energy the render lacks.** The
+  high-band (> 0.6*Nyquist at 192 kHz) energy fraction is -42.9 dB (console) vs
+  -90.9 dB (render) on `Only_One` — the render is band-limited to the native
+  16.4 kHz Nyquist by construction and clean-upsampled, while the console output
+  carries reconstruction/imaging energy far above it. The linear-vs-polyphase
+  question is real and lives here (recover via the teakra oracle).
+- **LFO rate: a first reading.** A clean 4.00 Hz modulation (SNR 19) is measured in
+  `Only_One` -> a commanded rate byte ~= 51 at the current `kLfoRateHz = 5/64`
+  (1.45 Hz, SNR 36, in `EMPTY_LANDSCAPE`). Consistent with the constant; an
+  isolated vibrato note would pin it.
+- **Absolute output level** reads -19.8 dB (`Only_One`) / -12.9 dB
+  (`EMPTY_LANDSCAPE`) render-below-console — recording-gain-relative (the slider/
+  interface gain set the console level), so only the ~7 dB *difference between
+  tracks* is potentially meaningful, and only if the same gain was used.
+
+### Still open (Phase IV part 2)
+
+The per-instrument **isolated-note** captures a busy BGM cannot isolate — `docs/
+CAPTURE-REQUEST.md` names `SE_NEW_DRUM01` (a percussive one-shot for the queued
+decay-table spot-check), `SE_LEGEND_KEY_FLY` (a ~9 s sustained voice whose exposed
+tail is the release-vs-reverb witness), and two optional short SEs. Those close the
+envelope-floor / decay-table / pan-law / absolute-level constants; portamento and
+the velocity-squared law need their own repros. The captures are the user's to take;
+the harness verdicts whatever is present, so a partial set is immediately useful.

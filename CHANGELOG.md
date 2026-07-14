@@ -60,6 +60,25 @@ House rules:
   peak-clip 0.64 % of samples → 11 samples, RMS 0.29 → 0.12, with a real stereo
   field). **`output-identical` for the converter** — `caesar` stays byte-for-byte
   unchanged (ab-verify + diag-goldens exit 0); only `caesar-play`'s audio changes.
+- **`caesar-play` Phase IV — the console-tolerance net (`tools/console-tolerance/`),
+  built and self-validated, and run against the real captures.** A numpy-only
+  analyzer (`console_tolerance.py`) verdicts a `caesar-play --render` against a New
+  3DS line-in capture of the same sequence to the stage-2 criterion — match within
+  tolerance EXCEPT the reverb tail — over four metrics (envelope fit, onset-timing
+  tempo/clock, per-channel Welch-PSD distance, loudness distribution), reports the
+  reverb-attributable residual separately (never a failure; it is stage 3's target),
+  and emits a targeted measurement for each flagged constant (output level, pan,
+  vibrato rate, tail-decay time, interpolation HF). A PowerShell driver
+  (`console-tolerance.ps1`) renders each captured sequence at the capture's own rate
+  and verdicts it (default `-CapturesDir` is the extracted MeetSound bank directory,
+  handling **192 kHz / 16-bit** captures), with the ab-verify/play-goldens discipline
+  (build-freshness gate, Stop-funnel, exit 0/1/2). A mandatory `--self-validate`
+  synthesizes a realistic capture-chain fixture (capture-rate resample, gain, −85 dBFS
+  noise, lead-in, ±50 ppm drift, exponential reverb tail) that must PASS while three
+  negative controls (wrong tempo, padded release, different sequence) each FAIL their
+  named metric. First real run: `BGM_MAIN_Mii_Only_One` and `BGM_DEN_EMPTY_LANDSCAPE`
+  both PASS all four metrics against their console captures. **`output-identical`** —
+  no C++ changed; this is dev tooling only (`caesar` byte-for-byte unchanged).
 - **`caesar-play` Phase III — the fidelity mass (C7–C10): live `_t` ramps, tie,
   sweep, portamento, the LFO, and the remaining track features.** Per-track
   volume/pan/pitch/expression stop latching at note-on: a reusable

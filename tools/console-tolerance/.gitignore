@@ -1,0 +1,5 @@
+# Console captures and analysis artifacts are corpus-derived — never commit them.
+captures/*.wav
+*.wav
+__pycache__/
+*.pyc
