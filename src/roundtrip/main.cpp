@@ -427,7 +427,7 @@ namespace
 			return ExitHarness;
 		}
 
-		int proven = 0;
+		size_t proven = 0;
 		bool allOk = true;
 
 		// The two halves of the round-trip contract, on one saved source span: (a)
