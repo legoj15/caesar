@@ -214,8 +214,19 @@ per stage. Status:
       Cseq slice of the `-w` heap-nondeterminism Known bug, though it is latent
       corpus-wide (no sequence is group-resident) — so the blueprint's "intentional
       `-w` golden change" did not materialise; output-identical on every surface,
-      with a new `w-dlplay` golden added to cover the Cseq `-w` surface. One commit
-      remains (`Csar`+`Cgrp`).**
+      with a new `w-dlplay` golden added to cover the Cseq `-w` surface. **Commit
+      5 of 5 done (2026-07-14): `Csar` and `Cgrp` → `Parse` (whole archive → a
+      persistent record tree: `Strgs`/`Files`/`Cwar`/`Cbnk`/`Cseq`/`Cgrp` records,
+      the discarded header words, and the player/set/INFX regions as opaque spans)
+      / `Export` (the child-dump/recurse walk, ending in the `.log` dump). Record
+      offsets are span-relative; the internal/external file discriminator is
+      explicit; the logged-then-dropped INFO words are retained. The `.log`-tagging
+      finding forced the Analyse replay into the export walk (its rows are stamped
+      with `FileNames.top()`, a persistent child frame, so a pure parse pass would
+      retag them) — output-identical regardless. Step 3 (parser/exporter split) is
+      **complete across all six classes.****
+      What remains of stage 0 is only the **`caesar_core` library split** (step 4):
+      lift the parser/exporter model into a static library the CLI links against.
 - [ ] **Stage 1 — byte-identical round-trip** of BCSEQ/BCBNK/BCSAR from a
       raw-backed model (**the next milestone** — the cheapest complete proof
       the format is understood, and the serializer everything else sits on).

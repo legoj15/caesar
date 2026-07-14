@@ -3070,3 +3070,110 @@ exists.
   - Stored offsets now exist on `CseqCmd`/`Cseq` (`Offset`, `DataOffset`,
     `Version`) — the stage-1 round-trip serializer's Cseq inputs. `Csar`/`Cgrp`
     still have no persistent record tree; that is commit 5's job.
+
+## Suite stage 0 — model/exporter split, commit 5: Csar + Cgrp (2026-07-14)
+
+The blueprint's fifth and last per-class split, and the riskiest: the two
+containers orchestrate every other class. `Csar::Extract` and `Cgrp::Extract`
+each walked headers/INFO/STRG/FILE and, interleaved in the same pass, created
+directories, wrote child blobs, constructed children (whose constructors echo to
+stdout), and drove their `Parse`/`Export`/`Convert`. Each is now **`Parse`** (the
+whole archive → a persistent record tree; no I/O, no child construction) and
+**`Export`** (the child-dump/recurse walk that emits every output byte).
+`Csar::Extract` survives as the public entry `main` calls — a thin
+compose-dir → `Parse` → `Export` driver — so `caesar.cpp` is unchanged. **The
+change is output-identical on every surface.**
+
+**The record tree per class (all offsets span-relative — no new raw-pointer
+state, the stage-1-drop-the-buffer rule).**
+
+- *Csar* gained retained members where before **everything** was `Extract`-local:
+  `Strgs`, `Files`, `CwarRecords`, `CbnkRecords`, `CseqRecords`, `CgrpRecords`,
+  `NamesById`, `CseqsFromCsar`. `CsarStrg`/`CsarFile`/`CsarCbnk`/`CsarCseq`/
+  `CsarCgrp` changed their `uint8_t* Offset` to a **`uint32_t` span-relative
+  offset** (Export resolves `Data + Offset`), matching commits 1–4. Added a
+  `CsarCwar` struct (the wave-archive table was inline before). The
+  internal/external file discriminator — an `Offset == nullptr` sentinel — is now
+  an explicit `CsarFile::Internal` bool, with `Location` carrying the external
+  (`0x220D`) sibling path.
+- *Cgrp* promoted its `CgrpFile` records to a retained `Files` member and made the
+  same pointer→span-relative + explicit-`Present` change; its `Cbnks`/`Cseqs`
+  child vectors were already retained.
+
+**Opaque-span / dropped-field inventory retained for the round-trip.** The four
+`[[maybe_unused]]` Csar header words (`fileLength`, `strgStringsOffset`,
+`strgUnknownOffset`, `infoEndOffset`) and `csarVersion` are now typed members; the
+never-parsed **player (`0x2102`)** and **set (`0x2104`)** tables are kept as
+opaque spans — the section start plus the entry-offset arrays `Parse` already
+walks (see the residue note below). Cgrp retains `cgrpVersion`, the `0x7801`
+`fileLength`, and the **INFX (`0x7802`)** chunk as a clean offset+length opaque
+span (both come straight from the chunk table). The Analyse-logged-then-dropped
+INFO words (`Cwar 0x04`; `Cbnk 0x04/08/0C`; `Cseq 0x04/08/14`; the `0x220C`
+reserved third word) are retained as typed record fields. **CSEQ INFO bank-tail
+choice:** only the two fields the converter reaches beyond `CbnkOffset`
+(`StartOffset`, `BankIndex`) are parsed; the rest of that sub-structure is
+unparsed and is covered by each sequence's own `Files[Id]` data span for stage-1
+copy-through.
+
+**The `.log`-tagging finding — why Analyse had to move into the export walk (the
+one deviation from the blueprint's "Analyse stays in the parse phase").** The
+blueprint assumed the `.log` is safe if parse order is preserved. It is not,
+because `Analyse` stamps each row with `FileNames.top()`, and for Csar that top is
+**not** the archive's own frame: a direct wave archive lives in the archive-
+lifetime shared `Cwars` map, so its constructor's `Push` frame stays on the stack
+for the rest of `Extract`. Every `Cbnk 0x04`/`Cseq 0x04` row is therefore tagged
+with the *last wave archive's* name, and the interleave with `Cbnk::Convert`'s own
+`Note` rows (the only child that Analyses) is per-entry. A pure parse pass — which
+pushes no child frames — would retag every row with the archive name and reorder
+them. So `Parse` does **no** `Analyse`; it stores the words, and `Export` replays
+each `Analyse` at the exact point in the walk where today's interleaved pass
+emitted it, with the identical stack top. This reproduces both the row order and
+the (quirky) filename column byte-for-byte, verified by the `caravel`/`multi-bleed`
+goldens and the whole-corpus `.log` A/B.
+
+**No interleaving needed a partial seam.** The skip warnings (external-stream/CWSD
+in the Cseq walk, external-group in the Cgrp walk) fire from the export walk at
+their original positions via the **pointer-form** `Warning(Data + storedOffset,
+…)` — deliberately *not* the `uint32_t` overload — so their `pos − Offsets.top()`
+attribution (deterministic for these Csar sites, since the archive frame tops the
+stack when they fire, but heap-nondeterministic for the external-group site once a
+prior group left its wave-archive frames on the stack) is preserved **exactly**,
+nondeterminism included. Cgrp's two-loop shape (construct all children in the
+file-table walk, then `Convert`/`Parse`/`Export` in the deferred loops) is kept
+verbatim, so a group-resident `Cbnk`'s release-127 `-w` position keeps firing with
+a sibling frame on top — the pinned `Cbnk`/`Cgrp`/`Csar` `-w` nondeterminism is
+untouched. The shared `Cwars` map semantics (including the id-collision leak) are
+unchanged.
+
+**One latent, unobservable change on corrupt input (documented, arguably a fix).**
+Parse-phase `Assert`/`Error` now fire with only the archive frame on the stack, so
+a corrupt archive that fails a *late* table marker (`Cbnk`/`Cseq`/player/set/`Cgrp`
+offsets, or an invalid music/file type) after at least one wave archive was built
+prints a `Data`-relative `AT POSITION` instead of the old
+`pos − <last-wave-frame>` garbage. Not in the corpus (healthy) and not in the
+goldens (all seven corrupt fixtures fail **early** — header/STRG/INFO, before any
+child is constructed), so both harnesses are byte-identical; and the old value was
+heap-nondeterministic garbage, so nothing meaningful is lost.
+
+**Gate (full battery, all green).** Warning-clean MSVC Release build. Diagnostics
+goldens **18/18 byte-identical** (exit 0) — including `multi-bleed` (the caravel
+bank's `Note` `.log` rows + `<id>.wav` echoes, the surface most exposed to
+container restructuring) and the three `-w` surfaces. Corpus A/B vs `HEAD`
+(`65901aa`): **82 archives / 257,125 files byte-identical, stdout/stderr
+identical, exit 0** (baseline 74 s, new 59 s) — `ctr_dash` exercises the
+embedded-group path (its groups hold banks, so the deferred-loop nondeterminism
+and the group `.log` `Note` rows are both on that path).
+
+**Stage-1 handoff — what the serializer still lacks after this commit.** The
+model→bytes writer does not exist; every offset and size table must be recomputed
+on the way out (never copied). The retained-vs-still-needed split: **retained** —
+all record fields, span offsets, blob spans, symbol strings, the discarded header
+words, the INFX span. **Still needs work** — (1) the player/set tables have their
+section start + entry-offset arrays but **no section byte-length and no per-entry
+record payload** (the header gives no direct length; stage 1 must bound them from
+the sorted section layout / `InfoEndOffset`); (2) inter-record **alignment
+padding** is modeled nowhere and must be reproduced by rule or captured as opaque
+gap-spans; (3) an out-of-range `0x220C` file's raw offset/length are dropped (as
+before — they were nulled), a corrupt-only edge. Step 3 of stage 0 (parser/
+exporter split) is **complete across all six classes**; only the `caesar_core`
+library split (step 4) remains.

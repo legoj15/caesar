@@ -49,7 +49,104 @@ Cgrp::~Cgrp()
 	// group and every child above); do not delete it here.
 }
 
-bool Cgrp::Extract()
+bool Cgrp::Parse()
+{
+	uint8_t* pos = Data;
+
+	if (!Ctx.Assert(pos, 0x43475250, Ctx.ReadFixLen(pos, 4, false))) { return false; }
+	if (!Ctx.Assert(pos, 0xFEFF, Ctx.ReadFixLen(pos, 2))) { return false; }
+	if (!Ctx.Assert(pos, 0x40, Ctx.ReadFixLen(pos, 2))) { return false; }
+
+	Version = Ctx.ReadFixLen(pos, 4);
+
+	// The whole-file length word: used only to check against the actual span
+	// length, never retained (the 0x7801 FILE-chunk length below is the retained
+	// FileLength). Kept a local so the two length concepts do not collide.
+	uint32_t declaredLength = Ctx.ReadFixLen(pos, 4);
+
+	if (!Ctx.Assert<uint64_t>(pos, Length, declaredLength)) { return false; }
+
+	uint32_t chunkCount = Ctx.ReadFixLen(pos, 4);
+
+	uint32_t infoOffset = 0;
+	uint32_t infoLength = 0;
+
+	uint32_t fileOffset = 0;
+
+	for (uint32_t i = 0; i < chunkCount; ++i)
+	{
+		uint32_t chunkId = Ctx.ReadFixLen(pos, 4);
+
+		switch (chunkId)
+		{
+			case 0x7800:
+				infoOffset = Ctx.ReadFixLen(pos, 4);
+				infoLength = Ctx.ReadFixLen(pos, 4);
+
+				break;
+
+			case 0x7801:
+				fileOffset = Ctx.ReadFixLen(pos, 4);
+				FileLength = Ctx.ReadFixLen(pos, 4);
+
+				break;
+
+			case 0x7802:
+				InfxOffset = Ctx.ReadFixLen(pos, 4);
+				InfxLength = Ctx.ReadFixLen(pos, 4);
+
+				break;
+
+			default:
+			{
+				Ctx.Error(pos - 4, "A valid chunk type", chunkId);
+
+				return false;
+			}
+		}
+	}
+
+	pos = Data + infoOffset;
+
+	if (!Ctx.Assert(pos, 0x494E464F, Ctx.ReadFixLen(pos, 4, false))) { return false; }
+	if (!Ctx.Assert<uint32_t>(pos, infoLength, Ctx.ReadFixLen(pos, 4))) { return false; }
+
+	uint32_t fileCount = Ctx.ReadFixLen(pos, 4);
+
+	vector<uint32_t> fileOffsets;
+
+	for (uint32_t i = 0; i < fileCount; ++i)
+	{
+		if (!Ctx.Assert(pos, 0x7900, Ctx.ReadFixLen(pos, 4))) { return false; }
+
+		fileOffsets.push_back(infoOffset + 8 + Ctx.ReadFixLen(pos, 4));
+	}
+
+	for (uint32_t i = 0; i < fileCount; ++i)
+	{
+		pos = Data + fileOffsets[i];
+
+		// Each record is a fixed 16 bytes: Id, a presence marker, an offset, and a
+		// length. The offset field must be consumed unconditionally -- reading it
+		// only when the marker is 0x1F00 (as a short-circuiting ?: did) left pos 4
+		// bytes short on any other marker, so Length picked up the offset field and
+		// every following record was parsed from the wrong position. A group holding
+		// an external or absent file (marker != 0x1F00) misparsed everything after it.
+		CgrpFile file{};
+		file.Id = Ctx.ReadFixLen(pos, 4);
+		file.Marker = Ctx.ReadFixLen(pos, 4);
+		uint32_t offset = Ctx.ReadFixLen(pos, 4);
+		file.Present = file.Marker == 0x1F00;
+		file.Offset = file.Present ? fileOffset + 8 + offset : 0;
+		file.Length = Ctx.ReadFixLen(pos, 4);
+
+		Files.push_back(file);
+	}
+
+	return true;
+}
+
+bool Cgrp::Export()
 {
 	// A group shares the archive's output directory (the folder its own dump was
 	// written into); its wave-archives/banks get sub-folders there and its
@@ -75,109 +172,19 @@ bool Cgrp::Extract()
 		return TypedName(to_string(id), type);
 	};
 
-	uint8_t* pos = Data;
-
-	if (!Ctx.Assert(pos, 0x43475250, Ctx.ReadFixLen(pos, 4, false))) { return false; }
-	if (!Ctx.Assert(pos, 0xFEFF, Ctx.ReadFixLen(pos, 2))) { return false; }
-	if (!Ctx.Assert(pos, 0x40, Ctx.ReadFixLen(pos, 2))) { return false; }
-
-	[[maybe_unused]] uint32_t cgrpVersion = Ctx.ReadFixLen(pos, 4);
-
-	if (!Ctx.Assert<uint64_t>(pos, Length, Ctx.ReadFixLen(pos, 4))) { return false; }
-
-	uint32_t chunkCount = Ctx.ReadFixLen(pos, 4);
-
-	uint32_t infoOffset = 0;
-	uint32_t infoLength = 0;
-
-	uint32_t fileOffset = 0;
-	[[maybe_unused]] uint32_t fileLength = 0;
-
-	uint32_t infxOffset = 0;
-	[[maybe_unused]] uint32_t infxLength = 0;
-
-	for (uint32_t i = 0; i < chunkCount; ++i)
+	for (uint32_t i = 0; i < Files.size(); ++i)
 	{
-		uint32_t chunkId = Ctx.ReadFixLen(pos, 4);
-
-		switch (chunkId)
-		{
-			case 0x7800:
-				infoOffset = Ctx.ReadFixLen(pos, 4);
-				infoLength = Ctx.ReadFixLen(pos, 4);
-
-				break;
-
-			case 0x7801:
-				fileOffset = Ctx.ReadFixLen(pos, 4);
-				fileLength = Ctx.ReadFixLen(pos, 4);
-
-				break;
-
-			case 0x7802:
-				infxOffset = Ctx.ReadFixLen(pos, 4);
-				infxLength = Ctx.ReadFixLen(pos, 4);
-
-				break;
-
-			default:
-			{
-				Ctx.Error(pos - 4, "A valid chunk type", chunkId);
-
-				return false;
-			}
-		}
-	}
-
-	pos = Data + infoOffset;
-
-	if (!Ctx.Assert(pos, 0x494E464F, Ctx.ReadFixLen(pos, 4, false))) { return false; }
-	if (!Ctx.Assert<uint32_t>(pos, infoLength, Ctx.ReadFixLen(pos, 4))) { return false; }
-
-	uint32_t fileCount = Ctx.ReadFixLen(pos, 4);
-
-	vector<uint8_t*> fileOffsets;
-
-	for (uint32_t i = 0; i < fileCount; ++i)
-	{
-		if (!Ctx.Assert(pos, 0x7900, Ctx.ReadFixLen(pos, 4))) { return false; }
-
-		fileOffsets.push_back(Data + infoOffset + 8 + Ctx.ReadFixLen(pos, 4));
-	}
-
-	vector<CgrpFile> files;
-
-	for (uint32_t i = 0; i < fileCount; ++i)
-	{
-		// Each record is a fixed 16 bytes: Id, a presence marker, an offset, and a
-		// length. The offset field must be consumed unconditionally -- reading it
-		// only when the marker is 0x1F00 (as a short-circuiting ?: did) left pos 4
-		// bytes short on any other marker, so Length picked up the offset field and
-		// every following record was parsed from the wrong position. A group holding
-		// an external or absent file (marker != 0x1F00) misparsed everything after it.
-		CgrpFile file{};
-		file.Id = Ctx.ReadFixLen(pos, 4);
-		uint32_t marker = Ctx.ReadFixLen(pos, 4);
-		uint32_t offset = Ctx.ReadFixLen(pos, 4);
-		file.Offset = marker == 0x1F00 ? Data + fileOffset + 8 + offset : nullptr;
-		file.Length = Ctx.ReadFixLen(pos, 4);
-
-		files.push_back(file);
-	}
-
-	for (uint32_t i = 0; i < fileCount; ++i)
-	{
-		if (files[i].Offset == nullptr)
+		if (!Files[i].Present)
 		{
 			continue;
 		}
 
-		if (CseqsFromCsar[files[i].Id] == true)
+		if (CseqsFromCsar[Files[i].Id] == true)
 		{
 			continue;
 		}
 
-		pos = files[i].Offset;
+		uint8_t* pos = Data + Files[i].Offset;
 
 		uint32_t fileId = Ctx.ReadFixLen(pos, 4, false);
 
@@ -191,7 +198,7 @@ bool Cgrp::Extract()
 
 				pos -= 16;
 
-				string name = nameFor(files[i].Id, "WARC");
+				string name = nameFor(Files[i].Id, "WARC");
 
 				path warcDir = baseDir / name;
 				create_directories(warcDir);
@@ -210,12 +217,12 @@ bool Cgrp::Extract()
 				// stack-local Cgrp's Data, which is freed when this Cgrp is
 				// destroyed at the end of Csar's group loop -- so it must own a
 				// private copy (ownsData = true), not borrow.
-				(*Cwars)[files[i].Id] = new Cwar(warcFile, pos, cwarLength, true, Ctx);
+				(*Cwars)[Files[i].Id] = new Cwar(warcFile, pos, cwarLength, true, Ctx);
 
 				// Parse the model, then write the sub-files and recurse into the
 				// child Cwavs, back to back per file (see the Csar call site) so
 				// the .bcwav dumps, stdout echoes, and diagnostics stay identical.
-				if (!(*Cwars)[files[i].Id]->Parse() || !(*Cwars)[files[i].Id]->Export())
+				if (!(*Cwars)[Files[i].Id]->Parse() || !(*Cwars)[Files[i].Id]->Export())
 				{
 					return false;
 				}
@@ -231,7 +238,7 @@ bool Cgrp::Extract()
 
 				pos -= 16;
 
-				string name = nameFor(files[i].Id, "BANK");
+				string name = nameFor(Files[i].Id, "BANK");
 
 				path bankDir = baseDir / name;
 				create_directories(bankDir);
@@ -249,7 +256,7 @@ bool Cgrp::Extract()
 				// archive-lifetime shared Cwars map), this Cbnk lives only in
 				// Cgrp::Cbnks and is freed in ~Cgrp before Cgrp::Data, so the borrow
 				// is safe even though its conversion is deferred to later in this
-				// same Extract call.
+				// same Export call.
 				Cbnks.push_back(new Cbnk(bankFile, pos, cbnkLength, Cwars, Opts, Ctx));
 
 				break;
@@ -263,7 +270,7 @@ bool Cgrp::Extract()
 
 				pos -= 16;
 
-				string name = nameFor(files[i].Id, "SEQ");
+				string name = nameFor(Files[i].Id, "SEQ");
 
 				Ctx.CheckBounds(pos, cseqLength);
 
@@ -276,7 +283,7 @@ bool Cgrp::Extract()
 				// Cgrp's buffer; hand that span to the child instead of re-reading
 				// the file. This Cseq lives only in Cgrp::Cseqs and is freed in
 				// ~Cgrp before Cgrp::Data, so the borrow is safe even though its
-				// conversion is deferred to later in this same Extract call.
+				// conversion is deferred to later in this same Export call.
 				Cseqs.push_back(new Cseq(seqFile, pos, cseqLength, Ctx));
 
 				break;
@@ -321,9 +328,9 @@ bool Cgrp::Extract()
 		}
 	}
 
-	if (infxOffset)
+	if (InfxOffset)
 	{
-		pos = Data + infxOffset;
+		uint8_t* pos = Data + InfxOffset;
 
 		Ctx.Warning(pos, "Skipping INFX chunk", "INFX metadata chunks skipped");
 	}

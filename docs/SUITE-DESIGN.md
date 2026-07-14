@@ -144,6 +144,19 @@ everything that isn't** (unimplemented opcodes, CWSD, INFX, the `0x6001` mystery
 IMA-ADPCM payloads). Serialize by walking the tree and **recomputing every offset and size table
 from scratch**, never copying them.
 
+_Status (2026-07-14): step 3 done — all six classes now parse into a retained model and export
+from it (`Cwav`/`Cwar`/`Cbnk`/`Cseq`, then `Csar`/`Cgrp`). Every record carries **span-relative
+offsets**, not raw pointers, so the tree survives a stage-1 buffer drop. Record offsets/lengths
+are stored; the discarded header words are retained as typed fields; and the regions never parsed
+today are held as opaque spans — CWAV IMA-ADPCM/raw DATA, CBNK `0x6001`/`DataRef` words, CGRP
+**INFX** (a clean offset+length span from the chunk table), and CSAR's **player (`0x2102`)** and
+**set (`0x2104`)** tables (section start + the entry-offset arrays; the per-entry record payload
+and the section byte-length are the remaining stage-1 gap — the header gives no direct length, so
+stage 1 must bound them from the sorted section layout / `InfoEndOffset`). What still does **not**
+exist: the model→bytes writer itself (every offset/size table must be recomputed on the way out),
+and the inter-record alignment padding, which is modeled nowhere and must be reproduced by rule or
+captured as opaque gap-spans. Those are stage 1._
+
 **The safety net does not cover audio.** The byte-identical A/B guards only the current export
 path; the player's output is invisible to it. A second net is required — deterministic golden-hash
 renders (fixed rate, seeded randomness, pinned reverb) plus tolerance-band comparison against the

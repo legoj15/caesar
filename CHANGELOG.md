@@ -149,6 +149,21 @@ House rules:
   (`output-identical` — 82-archive / 257,125-file corpus A/B byte-identical with
   identical stdout/stderr, exit 0; diagnostics goldens byte-identical, including
   the `-w` surfaces corpus-wide.)
+- **`Csar` and `Cgrp` now parse the whole archive into a persistent record tree,
+  then export from it — the model/exporter split is complete across all six
+  classes** (stage-0 model/exporter split, commit 5 of 5). Each container's
+  former one-pass `Extract` splits into `Parse` (headers/STRG/INFO/FILE →
+  retained `Strgs`/`Files`/`Cwar`/`Cbnk`/`Cseq`/`Cgrp` record vectors, the
+  discarded header words, and the never-parsed player/set/INFX regions as opaque
+  spans) and `Export` (the child-dump/recurse walk: directory creation, blob
+  writes, child echoes, conversions, and skip/external warnings, ending in the
+  `.log` dump). `Csar::Extract` stays the public entry `main` calls, now a thin
+  Parse-then-Export driver. Every record offset is span-relative (no new
+  raw-pointer state), the internal/external discriminator on file records is
+  explicit, and the previously logged-then-dropped INFO words are retained as
+  typed fields. (`output-identical` — 82-archive / 257,125-file corpus A/B
+  byte-identical with identical stdout/stderr, exit 0; 18-surface diagnostics
+  goldens byte-identical, including the multi-input and `-w` surfaces.)
 
 ### Fixed
 
