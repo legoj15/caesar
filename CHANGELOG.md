@@ -100,6 +100,22 @@ House rules:
 
 ### Changed
 
+- **`Cbnk` now parses into a retained model, then builds the SF2 from it in a
+  separate step** (stage-1 commit 2 — the split the other five classes already
+  had). The former one-pass `Convert` is split into `Parse` (the CBNK/INFO walk:
+  the CWAV reference table, every instrument and note body, and all of the
+  parse-phase `Analyse`/`Warning`/`Assert` output) and `Export` (the live-`Cwav`
+  sample resolution, the `<id>.wav` echoes, the release-127 warning, and the SF2
+  write); Csar and Cgrp call them back to back per bank, so the output stream is
+  unchanged. The model is promoted off `Convert`'s function locals onto the
+  object and the last two raw-pointer model fields (`CbnkInst::Offset`,
+  `CbnkNote::Offset`) become span-relative `uint32_t` body offsets; the model now
+  also retains the discarded `cbnkVersion`, the instrument-type discriminator,
+  the note `id` gating the layered-note quartet, the raw CWAV index, and the raw
+  instrument/note offset-table words — the lossless retention the BCBNK
+  round-trip serializer will consume. (`output-identical` — 82-archive /
+  257,125-file corpus A/B byte-identical with identical stdout/stderr, exit 0;
+  18-surface diagnostics goldens byte-identical.)
 - **`Cwav` now parses into a retained model, then writes the `.wav` from that
   model in a separate step** (stage-0 model/exporter split, commit 1 of 5). The
   former one-pass `Convert` is split into `Parse` (INFO walk + PCM decode into

@@ -307,7 +307,11 @@ bool Cgrp::Export()
 
 	for (uint32_t i = 0; i < Cbnks.size(); ++i)
 	{
-		if (!Cbnks[i]->Convert())
+		// Parse then emit, back to back per bank (the Cseq deferred-conversion
+		// convention below). Deferred to this loop exactly as the old single
+		// Convert() was, so the group's per-file interleave is unchanged; the parse
+		// model now survives into Export instead of living in Convert's locals.
+		if (!Cbnks[i]->Parse() || !Cbnks[i]->Export())
 		{
 			return false;
 		}

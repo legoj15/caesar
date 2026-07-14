@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <string>
 #include <map>
+#include <utility>
 #include <vector>
 
 struct ParseContext;
@@ -16,12 +17,14 @@ struct ParseContext;
 // instrument walk when a note references this sample. The decoded PCM, sample
 // rate, channel count and loop points are NOT stored here -- they are resolved
 // live from the owning Cwav at SF2-emit time, so the parser never reaches into
-// live Cwav objects (see Cbnk::Convert's sample-creation loop).
+// live Cwav objects (see Cbnk::Export's sample-creation loop). Cwar is the war
+// index resolved as (raw first table word - 0x5000000); Serialize re-adds the
+// 0x5000000 to reproduce the stored word.
 struct CbnkCwav
 {
-	uint32_t Cwar;
-	uint32_t Id;
-	uint32_t Key;
+	uint32_t Cwar = 0;
+	uint32_t Id = 0;
+	uint32_t Key = 0;
 };
 
 struct WaveSmpl
@@ -37,21 +40,42 @@ struct WaveSmpl
 struct CbnkNote
 {
 	bool Exists = true;
-	uint8_t* Offset;
 
-	CbnkCwav* Cwav;
-	uint8_t StartNote;
-	uint8_t EndNote;
-	uint32_t RootKey;
-	uint32_t Volume;
-	uint32_t Pan;
+	// The note's file-order entry in the instrument's note-offset table: the raw
+	// first word (0x5901 on an existing note, whatever the file carried otherwise)
+	// and the body offset relative to the instrument body + 8. Retained so
+	// Serialize rebuilds the table verbatim, including non-existent entries.
+	uint32_t TableMagic = 0;
+	uint32_t TableOffset = 0;
+
+	// This note body's absolute offset within the .bcbnk (relative to Data), the
+	// span-relative replacement for the old raw uint8_t* Offset. Parse locates the
+	// body through it and the release-127 warning positions against it.
+	uint32_t BodyOffset = 0;
+
+	// The note body's first word. 0x6001 gates the four extra Word6001 words below;
+	// any other value is a plain single-note body. Retained because NoteCount alone
+	// cannot tell a layered 0x6001 note from a plain one at the same key.
+	uint32_t Id = 0;
+
+	// The raw CWAV index as stored in the note body. Kept separate from the resolved
+	// Cwav pointer: the out-of-range substitution path repoints Cwav to the first
+	// sample, so the original index would otherwise be lost to Serialize.
+	uint32_t CwavIndex = 0;
+
+	CbnkCwav* Cwav = nullptr;
+	uint8_t StartNote = 0;
+	uint8_t EndNote = 0;
+	uint32_t RootKey = 0;
+	uint32_t Volume = 0;
+	uint32_t Pan = 0;
 	float Tune = 1.0f;
-	uint8_t Interpolation;
-	uint8_t Attack;
-	uint8_t Decay;
-	uint8_t Sustain;
-	uint8_t Hold;
-	uint8_t Release;
+	uint8_t Interpolation = 0;
+	uint8_t Attack = 0;
+	uint8_t Decay = 0;
+	uint8_t Sustain = 0;
+	uint8_t Hold = 0;
+	uint8_t Release = 0;
 
 	// Note words the parse walk reads and logs (Ctx.Analyse) but does not yet act
 	// on, retained here so the model is lossless for the stage-1 round-trip. The
@@ -74,9 +98,24 @@ struct CbnkNote
 struct CbnkInst
 {
 	bool Exists = true;
-	uint8_t* Offset;
 
-	uint32_t NoteCount;
+	// The instrument's file-order entry in the bank's instrument-offset table: the
+	// raw first word (0x5900 on an existing instrument) and the body offset relative
+	// to InfoOffset + 24. Retained so Serialize rebuilds the table verbatim.
+	uint32_t TableMagic = 0;
+	uint32_t TableOffset = 0;
+
+	// This instrument body's absolute offset within the .bcbnk (relative to Data),
+	// the span-relative replacement for the old raw uint8_t* Offset.
+	uint32_t BodyOffset = 0;
+
+	// The instrument-type discriminator word: 0x6000 (a single implicit note over
+	// the whole keyboard), 0x6001 (a layered key-split list), or 0x6002 (a drum
+	// kit, one note per key). Retained because the three serialize with different
+	// body headers and 0x6000 is not recoverable from a 1-note NoteCount alone.
+	uint32_t Type = 0;
+
+	uint32_t NoteCount = 0;
 	std::vector<CbnkNote> Notes;
 
 	bool IsDrumKit = false;
@@ -93,6 +132,22 @@ struct Cbnk
 	std::map<int, Cwar*>* Cwars;
 	Options Opts;
 
+	// CBNK/INFO framing words retained for Serialize's exact reconstruction. The
+	// file length is Length (the file-length header word equals it, asserted at
+	// parse); Version is the 0x20-header version word, previously read and
+	// discarded. CwavOffset/InstOffset are the INFO sub-table pointers.
+	uint32_t Version = 0;
+	uint32_t InfoOffset = 0;
+	uint32_t InfoLength = 0;
+	uint32_t CwavOffset = 0;
+	uint32_t InstOffset = 0;
+
+	// The parsed model, promoted from Convert's function locals so it survives the
+	// Parse -> Export split (the offsets on CbnkInst/CbnkNote reference into Data,
+	// so this owner must outlive any use of them).
+	std::vector<CbnkCwav> Cwavs;
+	std::vector<CbnkInst> Insts;
+
 	// The parent hands over the span its just-written .bcbnk was serialised from
 	// (a pointer + length into the parent's already-loaded buffer), so the child
 	// no longer re-reads the file it was just written from. FileName stays the
@@ -102,5 +157,14 @@ struct Cbnk
 	// provably outlives this Cbnk, so the destructor never frees it.
 	Cbnk(const std::string& fileName, uint8_t* data, std::streamoff length, std::map<int, Cwar*>* cwars, const Options& opts, ParseContext& ctx);
 	~Cbnk();
-	bool Convert();
+
+	// Parse the CBNK/INFO headers and build the model (cwav table, instrument and
+	// note bodies). No SF2 output; every parse-phase Assert/Error/Analyse/Warning
+	// fires here. Call once before Export.
+	bool Parse();
+
+	// Build and write the .sf2 from the parsed model, resolving live Cwav samples
+	// from the shared Cwars. The per-sample <id>.wav stdout echo, the release-127
+	// warning, and the missing-sample throw fire here. Call only after Parse().
+	bool Export();
 };

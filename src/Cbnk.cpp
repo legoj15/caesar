@@ -173,7 +173,15 @@ Cbnk::~Cbnk()
 	// child); do not delete it here.
 }
 
-bool Cbnk::Convert()
+// Walk the CBNK/INFO headers, the CWAV reference table, and every instrument and
+// note body into the retained model (Cwavs/Insts). No SF2 output happens here;
+// every Assert/Error/Analyse/Warning of the parse phase fires exactly as the old
+// single-pass Convert() did, in the same order, because Export is called straight
+// after this per file. The instrument/note bodies are located through the offset
+// tables (BodyOffset is the file offset relative to Data), and the raw table words
+// (TableMagic/TableOffset), the instrument type, the note id, and the raw CWAV
+// index are retained so the model is a lossless representation of the file.
+bool Cbnk::Parse()
 {
 	uint8_t* pos = Data;
 
@@ -181,34 +189,32 @@ bool Cbnk::Convert()
 	if (!Ctx.Assert(pos, 0xFEFF, Ctx.ReadFixLen(pos, 2))) { return false; }
 	if (!Ctx.Assert(pos, 0x20, Ctx.ReadFixLen(pos, 2))) { return false; }
 
-	[[maybe_unused]] uint32_t cbnkVersion = Ctx.ReadFixLen(pos, 4);
+	Version = Ctx.ReadFixLen(pos, 4);
 
 	if (!Ctx.Assert<uint64_t>(pos, Length, Ctx.ReadFixLen(pos, 4))) { return false; }
 	if (!Ctx.Assert(pos, 0x1, Ctx.ReadFixLen(pos, 4))) { return false; }
 	if (!Ctx.Assert(pos, 0x5800, Ctx.ReadFixLen(pos, 4))) { return false; }
 
-	uint32_t infoOffset = Ctx.ReadFixLen(pos, 4);
-	uint32_t infoLength = Ctx.ReadFixLen(pos, 4);
+	InfoOffset = Ctx.ReadFixLen(pos, 4);
+	InfoLength = Ctx.ReadFixLen(pos, 4);
 
 	if (!Ctx.Assert(pos, 0x494E464F, Ctx.ReadFixLen(pos, 4, false))) { return false; }
-	if (!Ctx.Assert<uint32_t>(pos, infoLength, Ctx.ReadFixLen(pos, 4))) { return false; }
+	if (!Ctx.Assert<uint32_t>(pos, InfoLength, Ctx.ReadFixLen(pos, 4))) { return false; }
 	if (!Ctx.Assert(pos, 0x100, Ctx.ReadFixLen(pos, 4))) { return false; }
 
-	uint32_t cwavOffset = Ctx.ReadFixLen(pos, 4);
+	CwavOffset = Ctx.ReadFixLen(pos, 4);
 
 	if (!Ctx.Assert(pos, 0x101, Ctx.ReadFixLen(pos, 4))) { return false; }
 
-	uint32_t instOffset = Ctx.ReadFixLen(pos, 4);
+	InstOffset = Ctx.ReadFixLen(pos, 4);
 
-	pos = Data + infoOffset + 8 + cwavOffset;
+	pos = Data + InfoOffset + 8 + CwavOffset;
 
 	uint32_t cwavCount = Ctx.ReadFixLen(pos, 4);
 
-	vector<CbnkCwav> cwavs;
-
 	for (uint32_t i = 0; i < cwavCount; ++i)
 	{
-		pos = Data + infoOffset + 8 + cwavOffset + 4 + (i * 8);
+		pos = Data + InfoOffset + 8 + CwavOffset + 4 + (i * 8);
 
 		// The parse -> model seam: this walk records only the raw sample reference
 		// (war id, sample id). Resolving the live Cwav -- decoded PCM, sample rate,
@@ -216,76 +222,81 @@ bool Cbnk::Convert()
 		// parser's. Value-initialize: Key is only assigned when a note references
 		// this sample, but every sample with Id < 0xF000 is still emitted (with Key
 		// as its shdr byOriginalKey). Without this, an unreferenced sample would
-		// emit an uninitialized byte, making SF2 output non-deterministic.
+		// emit an uninitialized byte, making SF2 output non-deterministic. Cwar is
+		// the war index resolved as (raw word - 0x5000000); Serialize re-adds it.
 		CbnkCwav cwav{};
 		cwav.Cwar = Ctx.ReadFixLen(pos, 4) - 0x5000000;
 		cwav.Id = Ctx.ReadFixLen(pos, 4);
 
-		cwavs.push_back(cwav);
+		Cwavs.push_back(cwav);
 	}
 
-	pos = Data + infoOffset + 8 + instOffset;
+	pos = Data + InfoOffset + 8 + InstOffset;
 
 	uint32_t instCount = Ctx.ReadFixLen(pos, 4);
-
-	vector<CbnkInst> insts;
 
 	for (uint32_t i = 0; i < instCount; ++i)
 	{
 		CbnkInst inst{};
 
-		if (Ctx.ReadFixLen(pos, 4) != 0x5900)
+		// Retain the raw table word (0x5900 marks a present instrument; a null
+		// entry carries a different word) so Serialize rebuilds the table verbatim,
+		// including the non-existent entries whose bodies are never parsed.
+		inst.TableMagic = Ctx.ReadFixLen(pos, 4);
+
+		if (inst.TableMagic != 0x5900)
 		{
 			inst.Exists = false;
 		}
 
-		inst.Offset = Data + infoOffset + 24 + Ctx.ReadFixLen(pos, 4);
+		inst.TableOffset = Ctx.ReadFixLen(pos, 4);
+		inst.BodyOffset = InfoOffset + 24 + inst.TableOffset;
 
-		insts.push_back(inst);
+		Insts.push_back(inst);
 	}
 
 	for (uint32_t i = 0; i < instCount; ++i)
 	{
-		if (!insts[i].Exists)
+		if (!Insts[i].Exists)
 		{
 			continue;
 		}
 
-		pos = insts[i].Offset;
+		pos = Data + Insts[i].BodyOffset;
 
-		uint32_t instType = Ctx.ReadFixLen(pos, 4);
+		Insts[i].Type = Ctx.ReadFixLen(pos, 4);
 
 		if (!Ctx.Assert(pos, 0x8, Ctx.ReadFixLen(pos, 4))) { return false; }
 
-		switch (instType)
+		switch (Insts[i].Type)
 		{
 			case 0x6000:
 			{
-				insts[i].NoteCount = 1;
+				Insts[i].NoteCount = 1;
 
 				CbnkNote note{};
 				note.StartNote = 0;
 				note.EndNote = 127;
 
-				insts[i].Notes.push_back(note);
+				Insts[i].Notes.push_back(note);
 
 				break;
 			}
 
 			case 0x6001:
 			{
-				insts[i].NoteCount = Ctx.ReadFixLen(pos, 4);
+				Insts[i].NoteCount = Ctx.ReadFixLen(pos, 4);
 
-				for (uint32_t j = 0; j < insts[i].NoteCount; ++j)
+				for (uint32_t j = 0; j < Insts[i].NoteCount; ++j)
 				{
 					CbnkNote note{};
-					note.StartNote = j == 0 ? 0 : insts[i].Notes[j - 1].EndNote + 1;
+					note.StartNote = j == 0 ? 0 : Insts[i].Notes[j - 1].EndNote + 1;
 					note.EndNote = Ctx.ReadFixLen(pos, 1);
 
-					insts[i].Notes.push_back(note);
+					Insts[i].Notes.push_back(note);
 				}
 
-				uint8_t padding = insts[i].NoteCount % 4;
+				uint8_t padding = Insts[i].NoteCount % 4;
 
 				if (padding)
 				{
@@ -297,52 +308,59 @@ bool Cbnk::Convert()
 
 			case 0x6002:
 			{
-				insts[i].NoteCount = Ctx.ReadFixLen(pos, 2, false) + 1;
+				Insts[i].NoteCount = Ctx.ReadFixLen(pos, 2, false) + 1;
 
-				for (uint32_t j = 0; j < insts[i].NoteCount; ++j)
+				for (uint32_t j = 0; j < Insts[i].NoteCount; ++j)
 				{
 					CbnkNote note{};
 					note.StartNote = j;
 					note.EndNote = j;
 
-					insts[i].Notes.push_back(note);
+					Insts[i].Notes.push_back(note);
 				}
 
 				if (!Ctx.Assert(pos, 0x0, Ctx.ReadFixLen(pos, 2))) { return false; }
 
-				insts[i].IsDrumKit = true;
+				Insts[i].IsDrumKit = true;
 
 				break;
 			}
 
 			default:
 			{
-				Ctx.Error(pos - 8, "A valid instrument type", instType);
+				Ctx.Error(pos - 8, "A valid instrument type", Insts[i].Type);
 
 				return false;
 			}
 		}
 
-		for (uint32_t j = 0; j < insts[i].NoteCount; ++j)
+		for (uint32_t j = 0; j < Insts[i].NoteCount; ++j)
 		{
-			if (Ctx.ReadFixLen(pos, 4) != 0x5901)
+			// As with the instrument table, retain the raw note-table word (0x5901
+			// marks a present note) plus the offset, so the table round-trips.
+			Insts[i].Notes[j].TableMagic = Ctx.ReadFixLen(pos, 4);
+
+			if (Insts[i].Notes[j].TableMagic != 0x5901)
 			{
-				insts[i].Notes[j].Exists = false;
+				Insts[i].Notes[j].Exists = false;
 			}
 
-			insts[i].Notes[j].Offset = insts[i].Offset + 8 + Ctx.ReadFixLen(pos, 4);
+			Insts[i].Notes[j].TableOffset = Ctx.ReadFixLen(pos, 4);
+			Insts[i].Notes[j].BodyOffset = Insts[i].BodyOffset + 8 + Insts[i].Notes[j].TableOffset;
 		}
 
-		for (uint32_t j = 0; j < insts[i].NoteCount; ++j)
+		for (uint32_t j = 0; j < Insts[i].NoteCount; ++j)
 		{
-			if (!insts[i].Notes[j].Exists)
+			if (!Insts[i].Notes[j].Exists)
 			{
 				continue;
 			}
 
-			pos = insts[i].Notes[j].Offset;
+			pos = Data + Insts[i].Notes[j].BodyOffset;
 
-			uint32_t id = Ctx.ReadFixLen(pos, 4);
+			// The note body's first word gates the layered-note quartet below and is
+			// retained: a 0x6001-id note is not recoverable from NoteCount alone.
+			Insts[i].Notes[j].Id = Ctx.ReadFixLen(pos, 4);
 
 			if (!Ctx.Assert(pos, 0x8, Ctx.ReadFixLen(pos, 4))) { return false; }
 
@@ -351,42 +369,46 @@ bool Cbnk::Convert()
 			// exact read order and value the inline Analyse argument had.
 			uint32_t note08 = Ctx.ReadFixLen(pos, 4);
 			Ctx.Analyse("Note 0x08", note08);
-			insts[i].Notes[j].Word08 = note08;
+			Insts[i].Notes[j].Word08 = note08;
 
 			uint32_t note0C = Ctx.ReadFixLen(pos, 4);
 			Ctx.Analyse("Note 0x0C", note0C);
-			insts[i].Notes[j].Word0C = note0C;
+			Insts[i].Notes[j].Word0C = note0C;
 
-			if (id == 0x6001)
+			if (Insts[i].Notes[j].Id == 0x6001)
 			{
 				uint32_t note6001_10 = Ctx.ReadFixLen(pos, 4);
 				Ctx.Analyse("Note 0x6001 0x10", note6001_10);
-				insts[i].Notes[j].Word6001_10 = note6001_10;
+				Insts[i].Notes[j].Word6001_10 = note6001_10;
 
 				uint32_t note6001_14 = Ctx.ReadFixLen(pos, 4);
 				Ctx.Analyse("Note 0x6001 0x14", note6001_14);
-				insts[i].Notes[j].Word6001_14 = note6001_14;
+				Insts[i].Notes[j].Word6001_14 = note6001_14;
 
 				uint32_t note6001_18 = Ctx.ReadFixLen(pos, 4);
 				Ctx.Analyse("Note 0x6001 0x18", note6001_18);
-				insts[i].Notes[j].Word6001_18 = note6001_18;
+				Insts[i].Notes[j].Word6001_18 = note6001_18;
 
 				uint32_t note6001_1C = Ctx.ReadFixLen(pos, 4);
 				Ctx.Analyse("Note 0x6001 0x1C", note6001_1C);
-				insts[i].Notes[j].Word6001_1C = note6001_1C;
+				Insts[i].Notes[j].Word6001_1C = note6001_1C;
 			}
 
 			uint32_t cwav = Ctx.ReadFixLen(pos, 4);
 
-			if (cwav < cwavs.size())
+			// Retain the raw index: the out-of-range substitution below repoints Cwav
+			// to the first sample, which would otherwise lose the original index.
+			Insts[i].Notes[j].CwavIndex = cwav;
+
+			if (cwav < Cwavs.size())
 			{
-				insts[i].Notes[j].Cwav = &cwavs[cwav];
+				Insts[i].Notes[j].Cwav = &Cwavs[cwav];
 			}
-			else if (!cwavs.empty())
+			else if (!Cwavs.empty())
 			{
 				Ctx.Warning(pos - 4, "CWAV " + to_string(cwav) + " does not exist", "instrument notes referencing a missing sample (substituted the first sample)");
 
-				insts[i].Notes[j].Cwav = &cwavs[0];
+				Insts[i].Notes[j].Cwav = &Cwavs[0];
 			}
 			else
 			{
@@ -400,13 +422,13 @@ bool Cbnk::Convert()
 
 			uint32_t noteFlags = Ctx.ReadFixLen(pos, 4);
 			Ctx.Analyse("Note 0x14", noteFlags);
-			insts[i].Notes[j].Flags = noteFlags;
+			Insts[i].Notes[j].Flags = noteFlags;
 
 			// For ordinary (non-0x6001) notes this word is the note's flags, which
 			// is 0x21F across every observed bank; the field layout parsed below is
 			// hardcoded for that value. Surface a note whose flags differ, since its
 			// envelope/pitch/pan fields may then sit at other offsets and misparse.
-			if (id != 0x6001 && noteFlags != 0x21F)
+			if (Insts[i].Notes[j].Id != 0x6001 && noteFlags != 0x21F)
 			{
 				ostringstream flagsMsg;
 				flagsMsg << "note flags 0x" << hex << uppercase << noteFlags << " (expected 0x21F)";
@@ -414,10 +436,10 @@ bool Cbnk::Convert()
 				Ctx.Warning(pos - 4, flagsMsg.str(), "bank notes with an unrecognized flags word (envelope/pitch/pan may be misparsed)");
 			}
 
-			insts[i].Notes[j].RootKey = Ctx.ReadFixLen(pos, 4);
-			insts[i].Notes[j].Cwav->Key = insts[i].Notes[j].RootKey;
-			insts[i].Notes[j].Volume = Ctx.ReadFixLen(pos, 4);
-			insts[i].Notes[j].Pan = Ctx.ReadFixLen(pos, 4);
+			Insts[i].Notes[j].RootKey = Ctx.ReadFixLen(pos, 4);
+			Insts[i].Notes[j].Cwav->Key = Insts[i].Notes[j].RootKey;
+			Insts[i].Notes[j].Volume = Ctx.ReadFixLen(pos, 4);
+			Insts[i].Notes[j].Pan = Ctx.ReadFixLen(pos, 4);
 
 			// Note 0x24 is an f32 pitch ratio (frequency multiplier on top of the
 			// root key), stored as raw little-endian bits. Reinterpret those bits
@@ -427,37 +449,50 @@ bool Cbnk::Convert()
 
 			float tune;
 			memcpy(&tune, &tuneBits, sizeof(tune));
-			insts[i].Notes[j].Tune = tune;
+			Insts[i].Notes[j].Tune = tune;
 
 			uint16_t note28 = static_cast<uint16_t>(Ctx.ReadFixLen(pos, 2));
 			Ctx.Analyse("Note 0x28", note28);
-			insts[i].Notes[j].Word28 = note28;
+			Insts[i].Notes[j].Word28 = note28;
 
-			insts[i].Notes[j].Interpolation = Ctx.ReadFixLen(pos, 1);
+			Insts[i].Notes[j].Interpolation = Ctx.ReadFixLen(pos, 1);
 
 			if (!Ctx.Assert(pos, 0x0, Ctx.ReadFixLen(pos, 1))) { return false; }
 
 			uint32_t note2C = Ctx.ReadFixLen(pos, 4);
 			Ctx.Analyse("Note 0x2C", note2C);
-			insts[i].Notes[j].DataRef2C = note2C;
+			Insts[i].Notes[j].DataRef2C = note2C;
 
 			uint32_t note30 = Ctx.ReadFixLen(pos, 4);
 			Ctx.Analyse("Note 0x30", note30);
-			insts[i].Notes[j].DataRef30 = note30;
+			Insts[i].Notes[j].DataRef30 = note30;
 
 			uint32_t note34 = Ctx.ReadFixLen(pos, 4);
 			Ctx.Analyse("Note 0x34", note34);
-			insts[i].Notes[j].DataRef34 = note34;
+			Insts[i].Notes[j].DataRef34 = note34;
 
-			insts[i].Notes[j].Attack = Ctx.ReadFixLen(pos, 1);
-			insts[i].Notes[j].Decay = Ctx.ReadFixLen(pos, 1);
-			insts[i].Notes[j].Sustain = Ctx.ReadFixLen(pos, 1);
-			insts[i].Notes[j].Hold = Ctx.ReadFixLen(pos, 1);
-			insts[i].Notes[j].Release = Ctx.ReadFixLen(pos, 1);
+			Insts[i].Notes[j].Attack = Ctx.ReadFixLen(pos, 1);
+			Insts[i].Notes[j].Decay = Ctx.ReadFixLen(pos, 1);
+			Insts[i].Notes[j].Sustain = Ctx.ReadFixLen(pos, 1);
+			Insts[i].Notes[j].Hold = Ctx.ReadFixLen(pos, 1);
+			Insts[i].Notes[j].Release = Ctx.ReadFixLen(pos, 1);
 
 			if (!Ctx.Assert(pos, 0x0, Ctx.ReadFixLen(pos, 3))) { return false; }
 		}
 	}
+
+	return true;
+}
+
+// Build the SoundFont from the parsed model and write the .sf2 beside FileName,
+// resolving each sample live from its owning Cwar at emit time. Reads model state
+// and the shared Cwars only. The per-sample <id>.wav stdout echo, the release-127
+// warning, and the missing-sample throw stay at their original positions in the
+// output stream. Call only after a successful Parse().
+bool Cbnk::Export()
+{
+	uint32_t cwavCount = static_cast<uint32_t>(Cwavs.size());
+	uint32_t instCount = static_cast<uint32_t>(Insts.size());
 
 	SoundFont sf2;
 	sf2.set_sound_engine("EMU8000");
@@ -470,7 +505,7 @@ bool Cbnk::Convert()
 
 	for (uint32_t i = 0; i < cwavCount; ++i)
 	{
-		if (cwavs[i].Id >= 0xF000)
+		if (Cwavs[i].Id >= 0xF000)
 		{
 			continue;
 		}
@@ -488,23 +523,23 @@ bool Cbnk::Convert()
 
 		for (; it != Cwars->end(); ++it, ++k)
 		{
-			if (k == cwavs[i].Cwar)
+			if (k == Cwavs[i].Cwar)
 			{
 				break;
 			}
 		}
 
-		if (it == Cwars->end() || it->second == nullptr || cwavs[i].Id >= it->second->Cwavs.size() || !it->second->Cwavs[cwavs[i].Id]->Converted)
+		if (it == Cwars->end() || it->second == nullptr || Cwavs[i].Id >= it->second->Cwavs.size() || !it->second->Cwavs[Cwavs[i].Id]->Converted)
 		{
-			throw runtime_error("could not open or read file (missing, empty, or unreadable): " + to_string(cwavs[i].Id) + ".wav");
+			throw runtime_error("could not open or read file (missing, empty, or unreadable): " + to_string(Cwavs[i].Id) + ".wav");
 		}
 
-		Cwav* src = it->second->Cwavs[cwavs[i].Id];
+		Cwav* src = it->second->Cwavs[Cwavs[i].Id];
 
 		// Keep the per-sample stdout echo (empty range: no reads happen here now).
 		// Relocated with the resolution from the parse-phase CWAV walk; the echo is
 		// the only stdout inside a Cbnk conversion, so its overall order is unchanged.
-		Ctx.Push(to_string(cwavs[i].Id) + ".wav", nullptr, 0);
+		Ctx.Push(to_string(Cwavs[i].Id) + ".wav", nullptr, 0);
 
 		uint16_t chanCount = src->ChanCount;
 		uint32_t sampleRate = src->SampleRate;
@@ -556,18 +591,18 @@ bool Cbnk::Convert()
 
 		if (chanCount == 1)
 		{
-			leftSamples[cwavs[i].Id] = sf2.NewSample(to_string(cwavs[i].Id), std::move(leftPcm), loopStart, loopEnd, sampleRate, cwavs[i].Key, 0);
+			leftSamples[Cwavs[i].Id] = sf2.NewSample(to_string(Cwavs[i].Id), std::move(leftPcm), loopStart, loopEnd, sampleRate, Cwavs[i].Key, 0);
 		}
 		else
 		{
-			leftSamples[cwavs[i].Id] = sf2.NewSample(to_string(cwavs[i].Id) + "l", std::move(leftPcm), loopStart, loopEnd, sampleRate, cwavs[i].Key, 0);
-			rightSamples[cwavs[i].Id] = sf2.NewSample(to_string(cwavs[i].Id) + "r", std::move(rightPcm), loopStart, loopEnd, sampleRate, cwavs[i].Key, 0);
+			leftSamples[Cwavs[i].Id] = sf2.NewSample(to_string(Cwavs[i].Id) + "l", std::move(leftPcm), loopStart, loopEnd, sampleRate, Cwavs[i].Key, 0);
+			rightSamples[Cwavs[i].Id] = sf2.NewSample(to_string(Cwavs[i].Id) + "r", std::move(rightPcm), loopStart, loopEnd, sampleRate, Cwavs[i].Key, 0);
 
-			leftSamples[cwavs[i].Id]->set_link(rightSamples[cwavs[i].Id]);
-			rightSamples[cwavs[i].Id]->set_link(leftSamples[cwavs[i].Id]);
+			leftSamples[Cwavs[i].Id]->set_link(rightSamples[Cwavs[i].Id]);
+			rightSamples[Cwavs[i].Id]->set_link(leftSamples[Cwavs[i].Id]);
 
-			leftSamples[cwavs[i].Id]->set_type(SFSampleLink::kLeftSample);
-			rightSamples[cwavs[i].Id]->set_type(SFSampleLink::kRightSample);
+			leftSamples[Cwavs[i].Id]->set_type(SFSampleLink::kLeftSample);
+			rightSamples[Cwavs[i].Id]->set_type(SFSampleLink::kRightSample);
 		}
 	}
 
@@ -575,47 +610,49 @@ bool Cbnk::Convert()
 
 	for (uint32_t i = 0; i < instCount; ++i)
 	{
-		if (insts[i].Exists)
+		if (Insts[i].Exists)
 		{
 			vector<SFInstrumentZone> instrumentZones;
 
-			for (uint32_t j = 0; j < insts[i].NoteCount; ++j)
+			for (uint32_t j = 0; j < Insts[i].NoteCount; ++j)
 			{
-				if ((insts[i].Notes[j].Exists) && (insts[i].Notes[j].Cwav->Id < 0xF000))
+				if ((Insts[i].Notes[j].Exists) && (Insts[i].Notes[j].Cwav->Id < 0xF000))
 				{
 					size_t k = 0;
 					auto it = Cwars->begin();
 
 					for (; it != Cwars->end(); ++it, ++k)
 					{
-						if (k == insts[i].Notes[j].Cwav->Cwar)
+						if (k == Insts[i].Notes[j].Cwav->Cwar)
 						{
 							break;
 						}
 					}
 
-					SFGeneratorItem keyRange(SFGenerator::kKeyRange, RangesType(insts[i].Notes[j].StartNote, insts[i].Notes[j].EndNote));
-					SFGeneratorItem overridingRootKey(SFGenerator::kOverridingRootKey, insts[i].Notes[j].RootKey);
-					SFGeneratorItem initialAttenuation(SFGenerator::kInitialAttenuation, static_cast<int16_t>(ConvertVolume(insts[i].Notes[j].Volume)));
-					SFGeneratorItem pan(SFGenerator::kPan, static_cast<int16_t>(ConvertPan(insts[i].Notes[j].Pan)));
-					SFGeneratorItem attackVolEnv(SFGenerator::kAttackVolEnv, static_cast<int16_t>(ConvertAttack(insts[i].Notes[j].Attack)));
-					SFGeneratorItem holdVolEnv(SFGenerator::kHoldVolEnv, static_cast<int16_t>(ConvertHold(insts[i].Notes[j].Hold)));
-					SFGeneratorItem decayVolEnv(SFGenerator::kDecayVolEnv, static_cast<int16_t>(ConvertDecay(insts[i].Notes[j].Decay, insts[i].Notes[j].Sustain)));
-					SFGeneratorItem releaseVolEnv(SFGenerator::kReleaseVolEnv, static_cast<int16_t>(ConvertRelease(insts[i].Notes[j].Release, insts[i].Notes[j].Sustain, Opts.PadSustainSeconds)));
-					SFGeneratorItem sustainVolEnv(SFGenerator::kSustainVolEnv, static_cast<int16_t>(ConvertSustain(insts[i].Notes[j].Sustain)));
+					SFGeneratorItem keyRange(SFGenerator::kKeyRange, RangesType(Insts[i].Notes[j].StartNote, Insts[i].Notes[j].EndNote));
+					SFGeneratorItem overridingRootKey(SFGenerator::kOverridingRootKey, Insts[i].Notes[j].RootKey);
+					SFGeneratorItem initialAttenuation(SFGenerator::kInitialAttenuation, static_cast<int16_t>(ConvertVolume(Insts[i].Notes[j].Volume)));
+					SFGeneratorItem pan(SFGenerator::kPan, static_cast<int16_t>(ConvertPan(Insts[i].Notes[j].Pan)));
+					SFGeneratorItem attackVolEnv(SFGenerator::kAttackVolEnv, static_cast<int16_t>(ConvertAttack(Insts[i].Notes[j].Attack)));
+					SFGeneratorItem holdVolEnv(SFGenerator::kHoldVolEnv, static_cast<int16_t>(ConvertHold(Insts[i].Notes[j].Hold)));
+					SFGeneratorItem decayVolEnv(SFGenerator::kDecayVolEnv, static_cast<int16_t>(ConvertDecay(Insts[i].Notes[j].Decay, Insts[i].Notes[j].Sustain)));
+					SFGeneratorItem releaseVolEnv(SFGenerator::kReleaseVolEnv, static_cast<int16_t>(ConvertRelease(Insts[i].Notes[j].Release, Insts[i].Notes[j].Sustain, Opts.PadSustainSeconds)));
+					SFGeneratorItem sustainVolEnv(SFGenerator::kSustainVolEnv, static_cast<int16_t>(ConvertSustain(Insts[i].Notes[j].Sustain)));
 
 					// A release-127 voice stops instantly on hardware; its audible tail is
 					// DSP reverb, which no soundfont can carry. Say so either way: by
 					// default the tail is simply absent (the sequence's CC91 send needs a
-					// reverb-capable player), and under --pad-sustain it is faked.
-					if (insts[i].Notes[j].Release == 127)
+					// reverb-capable player), and under --pad-sustain it is faked. The
+					// position is reconstructed from the note's retained BodyOffset, which
+					// is exactly the pointer the old model field held (Data + BodyOffset).
+					if (Insts[i].Notes[j].Release == 127)
 					{
-						Ctx.Warning(insts[i].Notes[j].Offset, "instrument " + to_string(i) + " note " + to_string(j) + " has release 127",
+						Ctx.Warning(Data + Insts[i].Notes[j].BodyOffset, "instrument " + to_string(i) + " note " + to_string(j) + " has release 127",
 							Opts.PadSustainSeconds > 0
 								? "instrument tails faked with a held release (--pad-sustain; not hardware behaviour)"
 								: "instrument tails that are console DSP reverb, not release (play the MIDI's CC91 send through a reverb-capable player, or approximate it with --pad-sustain)");
 					}
-					SFGeneratorItem sampleModes(SFGenerator::kSampleModes, it->second->Cwavs[insts[i].Notes[j].Cwav->Id]->SampleMode);
+					SFGeneratorItem sampleModes(SFGenerator::kSampleModes, it->second->Cwavs[Insts[i].Notes[j].Cwav->Id]->SampleMode);
 
 					// Emit the per-note tune (Note 0x24) as SF2 coarse (semitone) + fine
 					// (cent) tune, split so the fine part stays within +/-50 cents and the
@@ -624,7 +661,7 @@ bool Cbnk::Convert()
 					vector<SFGeneratorItem> tuneGens;
 
 					{
-						double tuneCents = ConvertTune(insts[i].Notes[j].Tune);
+						double tuneCents = ConvertTune(Insts[i].Notes[j].Tune);
 
 						// A corrupt bank could store tune <= 0 or NaN, which makes the log
 						// non-finite and lround() undefined; treat that as no detune.
@@ -658,9 +695,9 @@ bool Cbnk::Convert()
 
 					// Channel count comes from the live Cwav (resolved via the same
 					// positional lookup as sampleModes above), not the raw model record.
-					if (it->second->Cwavs[insts[i].Notes[j].Cwav->Id]->ChanCount == 1)
+					if (it->second->Cwavs[Insts[i].Notes[j].Cwav->Id]->ChanCount == 1)
 					{
-						instrumentZones.push_back(SFInstrumentZone(leftSamples[insts[i].Notes[j].Cwav->Id], zoneGens(pan), vector<SFModulatorItem> { }));
+						instrumentZones.push_back(SFInstrumentZone(leftSamples[Insts[i].Notes[j].Cwav->Id], zoneGens(pan), vector<SFModulatorItem> { }));
 					}
 					else
 					{
@@ -669,16 +706,16 @@ bool Cbnk::Convert()
 							SFGeneratorItem left(SFGenerator::kPan, -500);
 							SFGeneratorItem right(SFGenerator::kPan, 500);
 
-							instrumentZones.push_back(SFInstrumentZone(leftSamples[insts[i].Notes[j].Cwav->Id], zoneGens(left), vector<SFModulatorItem> { }));
-							instrumentZones.push_back(SFInstrumentZone(rightSamples[insts[i].Notes[j].Cwav->Id], zoneGens(right), vector<SFModulatorItem> { }));
+							instrumentZones.push_back(SFInstrumentZone(leftSamples[Insts[i].Notes[j].Cwav->Id], zoneGens(left), vector<SFModulatorItem> { }));
+							instrumentZones.push_back(SFInstrumentZone(rightSamples[Insts[i].Notes[j].Cwav->Id], zoneGens(right), vector<SFModulatorItem> { }));
 						}
 						else
 						{
-							SFGeneratorItem left(SFGenerator::kPan, static_cast<int16_t>(((static_cast<double>(insts[i].Notes[j].Pan) / 128.0f) * 500) - 500));
-							SFGeneratorItem right(SFGenerator::kPan, static_cast<int16_t>((static_cast<double>(insts[i].Notes[j].Pan) / 128.0f) * 500));
+							SFGeneratorItem left(SFGenerator::kPan, static_cast<int16_t>(((static_cast<double>(Insts[i].Notes[j].Pan) / 128.0f) * 500) - 500));
+							SFGeneratorItem right(SFGenerator::kPan, static_cast<int16_t>((static_cast<double>(Insts[i].Notes[j].Pan) / 128.0f) * 500));
 
-							instrumentZones.push_back(SFInstrumentZone(leftSamples[insts[i].Notes[j].Cwav->Id], zoneGens(left), vector<SFModulatorItem> { }));
-							instrumentZones.push_back(SFInstrumentZone(rightSamples[insts[i].Notes[j].Cwav->Id], zoneGens(right), vector<SFModulatorItem> { }));
+							instrumentZones.push_back(SFInstrumentZone(leftSamples[Insts[i].Notes[j].Cwav->Id], zoneGens(left), vector<SFModulatorItem> { }));
+							instrumentZones.push_back(SFInstrumentZone(rightSamples[Insts[i].Notes[j].Cwav->Id], zoneGens(right), vector<SFModulatorItem> { }));
 						}
 					}
 				}
@@ -701,7 +738,7 @@ bool Cbnk::Convert()
 
 	for (uint32_t i = 0; i < instCount; ++i)
 	{
-		if (insts[i].Exists && (instruments[i] != nullptr))
+		if (Insts[i].Exists && (instruments[i] != nullptr))
 		{
 			// Instruments are indexed 0..N-1, but a MIDI program change only
 			// addresses 0-127, so an instrument at index >= 128 is unreachable
@@ -711,7 +748,7 @@ bool Cbnk::Convert()
 			// selecting instrument i then emits bank i/128 + program i%128 and lands
 			// on the matching preset. Banks with < 128 instruments are unaffected
 			// (i/128 == 0, i%128 == i), so their SF2 output is unchanged.
-			sf2.NewPreset(instruments[i]->name(), i % 128, (!insts[i].IsDrumKit ? 0 : 128) + i / 128, vector<SFPresetZone> { SFPresetZone(instruments[i]) });
+			sf2.NewPreset(instruments[i]->name(), i % 128, (!Insts[i].IsDrumKit ? 0 : 128) + i / 128, vector<SFPresetZone> { SFPresetZone(instruments[i]) });
 		}
 	}
 

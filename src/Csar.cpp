@@ -592,7 +592,11 @@ bool Csar::Export(const string& archiveDir)
 			// Csar::Data is alive, so borrowing is safe.
 			Cbnk bank(bankFile, pos, cbnkLength, &Cwars, Opts, Ctx);
 
-			if (!bank.Convert())
+			// Parse then emit, back to back per bank (the Cwar/Cwav/Cseq split
+			// convention). Parse builds the retained model and fires every parse-phase
+			// diagnostic; Export resolves live samples and writes the .sf2. Splitting
+			// at that seam keeps the output stream byte-for-byte unchanged.
+			if (!bank.Parse() || !bank.Export())
 			{
 				return false;
 			}

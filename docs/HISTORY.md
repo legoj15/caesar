@@ -3545,3 +3545,55 @@ blueprint). And the general lesson from Finding 2: any table the parse deduplica
 resolves-through-a-pointer needs a separate file-order retention for a lossless
 round-trip — check Cbnk's cwav/instrument references for the same collapse before
 trusting a rebuild from the resolved model.
+
+## Suite stage 1 commit 2 — the Cbnk retained-model + Parse/Export split (2026-07-14)
+
+The blueprint's commit 2: the one class that never got the stage-0 model/exporter
+split. `Cbnk::Convert` parsed the CBNK/INFO walk and emitted the SF2 in a single pass,
+with the model living in `Convert`'s function locals (`insts`/`cwavs`), and
+`CbnkInst::Offset`/`CbnkNote::Offset` were the codebase's last raw-pointer model fields.
+Now `Convert` is split into `Parse` (the walk → retained model; every parse-phase
+`Analyse`/`Warning`/`Assert` fires here) and `Export` (the live-`Cwav` sample resolution,
+the `<id>.wav` echoes, the release-127 warning, the SF2 write). Csar (direct banks) and
+Cgrp (deferred, group-resident banks) call `Parse` then `Export` back to back per bank,
+so the output stream is byte-for-byte unchanged. **Pure refactor — additive retention,
+no behaviour change.**
+
+**The retained model (lossless, for the commit-3 serializer).** Promoted onto the object:
+`Version` (the discarded `cbnkVersion`), `InfoOffset`/`InfoLength`/`CwavOffset`/`InstOffset`,
+`Cwavs`, `Insts`. The two raw-pointer fields become span-relative `uint32_t BodyOffset`
+(file offset relative to `Data`); the release-127 warning reconstructs `Data + BodyOffset`,
+which is *exactly* the pointer the old field held, so its `-w` `AT POSITION` is unchanged
+(the Csar direct case resolves to the bank's own frame; the Cgrp deferred case keeps the
+same heap-relative value the old code produced — a latent nondeterminism inherited
+verbatim, not introduced). Per-record retention the blueprint §4 called for: the
+instrument-type discriminator (`CbnkInst::Type` — 0x6000 is not recoverable from a 1-note
+`NoteCount`), the note `id` gating the layered-note quartet (`CbnkNote::Id`), the raw CWAV
+index (`CbnkNote::CwavIndex`, kept beside the resolved `Cwav*` because the out-of-range
+substitution path repoints the pointer to the first sample and would otherwise lose the
+original index), and the raw instrument/note offset-table words (`TableMagic`/`TableOffset`,
+so non-existent entries and the exact offsets round-trip). The war id is stored resolved
+(`Cwar = raw − 0x5000000`); the serializer re-adds the constant (exact under uint32 wrap).
+
+**Finding (deferred to commit 3): the CWAV/instrument references do NOT collapse, but the
+body layout is out-of-order with gaps.** Checked for the Finding-2 pointer/dedup collapse
+per the commit-1 lesson: the cwav table is a flat file-order list (no dedup), and each
+note carries its own raw index, so a rebuild from the model is faithful — no separate
+file-order retention needed there. The real Cbnk-internal trap (surfaced by a standalone
+Python parser+serializer over all 11,136 corpus banks, the commit-1 empirical method):
+instrument and note **bodies are placed at arbitrary offsets, out of index order, with
+inter-body gaps**, because the offset tables are authoritative and the parser locates every
+body through them. The read fields nonetheless tile each bank almost perfectly — corpus-wide
+only **1,584 bytes are never read, all in 5 banks** (MeetSound, SoundData1: note-body tails
+where a 0x6001 record strides 0x80 but the parser reads 0x50); the other 11,131 banks have
+**zero** unread bytes. This settles the commit-3 serializer as **positional reconstruction
+(each body written at its retained offset) + a retained unread-gap overlay**, not a linear
+re-emit. That gap-capture and the `Serialize()` itself are commit 3; this commit only lands
+the split + the lossless scalar model.
+
+**Gate (all green).** Warning-clean MSVC Release build (`/W3 /WX`). Corpus A/B vs `HEAD`
+(`5f5ae2a`): **82 archives / 257,125 files byte-identical, stdout/stderr identical, exit 0**
+(baseline 77 s, new 60 s). Diagnostics goldens **18/18 byte-identical** (exit 0) — including
+`multi-bleed` (the caravel bank's Note `.log` rows + `<id>.wav` echoes) and the `-w`
+`w-pksnd`/`w-dlplay`/`w-queenstream` surfaces that carry Cbnk warnings, so the split's
+diagnostic output is proven unchanged.
