@@ -82,6 +82,249 @@ namespace play
 
 			return sin(px) / px;
 		}
+
+		// --- The NW4R EnvGenerator (C4) ------------------------------------------
+		//
+		// A direct port of the 3DS NW4C `nw::snd::internal::EnvGenerator`, which the
+		// disasm (docs/NW4C-disasm-handoff.md) proved is a behavioural 1:1 of the Wii
+		// NW4R `EnvGenerator`. This REPLACES the SF2 timecent approximations in
+		// Cbnk.cpp (Attack/Hold/DecayTable/ConvertTime) -- those exist for sf2cute,
+		// not the engine. Provenance of every constant is documented inline.
+
+		// DecibelSquareTable[128] (s16) and attackTable[128] (f32): read BYTE-FOR-BYTE
+		// from StreetPass Mii Plaza `code.bin` at vaddr 0x328844 / 0x328944 (file
+		// offset vaddr-0x100000), the exact addresses NW4C-disasm-handoff.md records.
+		// Both are identical to the Wii NW4R ogws tables. The head/tail match the
+		// doc's fingerprint (DecibelSquareTable -723,-722,-721,-651,...,-1,0;
+		// attackTable 0.9992175...0.0).
+		const int16_t DecibelSquareTable[128] =
+		{
+			-723, -722, -721, -651, -601, -562, -530, -503,
+			-480, -460, -442, -425, -410, -396, -383, -371,
+			-360, -349, -339, -330, -321, -313, -305, -297,
+			-289, -282, -276, -269, -263, -257, -251, -245,
+			-239, -234, -229, -224, -219, -214, -210, -205,
+			-201, -196, -192, -188, -184, -180, -176, -173,
+			-169, -165, -162, -158, -155, -152, -149, -145,
+			-142, -139, -136, -133, -130, -127, -125, -122,
+			-119, -116, -114, -111, -109, -106, -103, -101,
+			-99, -96, -94, -91, -89, -87, -85, -82,
+			-80, -78, -76, -74, -72, -70, -68, -66,
+			-64, -62, -60, -58, -56, -54, -52, -50,
+			-49, -47, -45, -43, -42, -40, -38, -36,
+			-35, -33, -31, -30, -28, -27, -25, -23,
+			-22, -20, -19, -17, -16, -14, -13, -11,
+			-10, -8, -7, -6, -4, -3, -1, 0,
+		};
+
+		const float attackTable[128] =
+		{
+			0.99921751f, 0.998432577f, 0.997645199f, 0.996855319f, 0.996062875f, 0.995267928f,
+			0.994470417f, 0.993670404f, 0.992867708f, 0.992062509f, 0.991254628f, 0.990444124f,
+			0.989630878f, 0.988815129f, 0.987996519f, 0.987175226f, 0.986351192f, 0.985524416f,
+			0.984694898f, 0.983862519f, 0.983027279f, 0.982189298f, 0.981348276f, 0.980504513f,
+			0.979657829f, 0.978808105f, 0.97795552f, 0.977099895f, 0.976241291f, 0.975379705f,
+			0.974515021f, 0.973647177f, 0.972776294f, 0.971902311f, 0.971025109f, 0.970144808f,
+			0.969261229f, 0.968374372f, 0.967484415f, 0.966591001f, 0.965694427f, 0.964794397f,
+			0.963891029f, 0.962984204f, 0.962073982f, 0.961160421f, 0.960243285f, 0.959322572f,
+			0.958398402f, 0.957470596f, 0.956539214f, 0.955604196f, 0.954665482f, 0.953723073f,
+			0.952776909f, 0.95182699f, 0.950873196f, 0.949915707f, 0.948954225f, 0.947988808f,
+			0.947019517f, 0.946046174f, 0.945068896f, 0.944087505f, 0.943102002f, 0.942112386f,
+			0.941118598f, 0.940120578f, 0.939118385f, 0.938111782f, 0.937100887f, 0.936085582f,
+			0.935065925f, 0.934041679f, 0.933013082f, 0.931979775f, 0.930941999f, 0.929899514f,
+			0.92885232f, 0.927800417f, 0.926743627f, 0.925682127f, 0.924615622f, 0.923544228f,
+			0.922467828f, 0.921386421f, 0.920299828f, 0.919208109f, 0.918111205f, 0.917009115f,
+			0.915901601f, 0.914788723f, 0.913670301f, 0.912546515f, 0.911417127f, 0.910282075f,
+			0.909141421f, 0.907994926f, 0.906842709f, 0.905684471f, 0.904520392f, 0.903350174f,
+			0.902173996f, 0.900991619f, 0.899802923f, 0.898608029f, 0.897406578f, 0.896198809f,
+			0.894984424f, 0.890059888f, 0.882462204f, 0.875924706f, 0.869186103f, 0.863640606f,
+			0.853578806f, 0.843018889f, 0.82861352f, 0.814909875f, 0.800217211f, 0.778066278f,
+			0.755474985f, 0.724212527f, 0.682823896f, 0.632916927f, 0.559213519f, 0.455141097f,
+			0.329876989f, 0.0f,
+		};
+
+		// CalcRelease: ported VERBATIM from the disasm (docs/NW4C-disasm-handoff.md,
+		// re-confirmed by this session's own disasm at MiiPlaza 0x201D60/0x201E3C).
+		// Byte 127 -> 65535/ms = the FASTEST rate (instant): this is the release-127
+		// correction. One curve serves both decay and release. Rates are per-ms.
+		float calcRelease(int x)
+		{
+			if (x == 127) return 65535.0f;
+			if (x == 126) return 24.0f;
+			if (x < 50)   return (x * 2 + 1) / 128.0f / 5.0f;
+			return 60.0f / (126 - x) / 5.0f;
+		}
+
+		// SetHold, from the disasm at MiiPlaza 0x201D40: the hold DURATION in ms is
+		// round((hold+1)^2 / 4). (0 -> 0, 1 -> 1, 4 -> 6, 127 -> 4096 ms.)
+		float holdMsFromByte(int h)
+		{
+			int v = (h + 1) * (h + 1);
+			return static_cast<float>((v + 2) / 4);  // +2 = round-to-nearest of /4
+		}
+
+		// The envelope updates once per DSP frame (160 samples / 32728 Hz = 4.889 ms),
+		// matching the sequence runtime's frame clock. NW4R's Update takes an integer
+		// msec per sound frame; the exact 3DS cadence is unconfirmed (a Net-B item).
+		const double kMsPerFrame = 1000.0 * static_cast<double>(kFrameSamples) / static_cast<double>(kNativeRate);
+
+		// The envelope value floor / attack start. NW4R's exact reset constant is not
+		// byte-confirmed in this binary (a Net-B item); -2000 in the value domain maps
+		// (see gainFromValue) to ~1e-5 amplitude -- inaudible -- so attack rises from
+		// silence and release settles to silence. Decay/sustain timing is INDEPENDENT
+		// of this (they use the fixed DecibelSquareTable range), so only the slow-attack
+		// rise-time and the release tail-to-silence depend on it.
+		const float kEnvFloor = -2000.0f;
+		const float kAttackDone = -0.03125f;  // -1/32: attack completes near 0 (NW4R; flagged)
+		const float kStopGain = 1.0f / 32768.0f;  // 16-bit LSB: below this the voice is silent -> Stop()
+
+		// Convert an envelope value to a LINEAR amplitude gain. GetValue()=value/10 is
+		// a decibel-square (power) quantity, so amplitude = 10^(value/400). Verified
+		// numerically against the console table: 10^(DecibelSquareTable[s]/400) tracks
+		// s/127 to <1% across all 128 sustain levels -- i.e. the sustain byte maps
+		// ~linearly to amplitude, which is the "square" (the /400, not /200). The
+		// /40-vs-/20 split of GetValue is flagged for the Net-B capture.
+		float gainFromValue(float value)
+		{
+			if (value <= kEnvFloor) return 0.0f;
+			if (value >= 0.0f) return 1.0f;
+			return powf(10.0f, value / 400.0f);
+		}
+
+		// The ported EnvGenerator state machine. Phases: Attack (multiply toward full),
+		// Hold (dwell at peak), Decay (rate down to Sustain level), Sustain (hold),
+		// Release (rate down on note-off). Update runs once per frame.
+		struct EnvGen
+		{
+			enum Status { Attack, Hold, Decay, Sustain, Release, Done };
+
+			Status status = Attack;
+			float value = kEnvFloor;
+			float attackMul = 0.0f;
+			float decayRate = 0.0f;
+			float releaseRate = 0.0f;
+			float holdRemain = 0.0f;
+			int sustainIdx = 127;
+
+			EnvGen(uint8_t a, uint8_t h, uint8_t d, uint8_t s, uint8_t r)
+			{
+				attackMul = attackTable[a & 0x7F];
+				decayRate = calcRelease(d & 0x7F);
+				releaseRate = calcRelease(r & 0x7F);
+				holdRemain = holdMsFromByte(h & 0x7F);
+				sustainIdx = s & 0x7F;
+			}
+
+			// Note-off: drop into Release from wherever the value currently sits.
+			void noteOff()
+			{
+				if (status != Done && status != Release)
+				{
+					status = Release;
+				}
+			}
+
+			void advance(double ms)
+			{
+				switch (status)
+				{
+					case Attack:
+						// mValue *= attackMul each ms (compounded over the frame). For
+						// attackMul == 0 (byte 127) this snaps to 0 in one step: instant.
+						value *= powf(attackMul, static_cast<float>(ms));
+
+						if (value > kAttackDone)
+						{
+							value = 0.0f;
+							status = (holdRemain > 0.0f) ? Hold : Decay;
+						}
+						break;
+
+					case Hold:
+						holdRemain -= static_cast<float>(ms);
+
+						if (holdRemain <= 0.0f)
+						{
+							status = Decay;
+						}
+						break;
+
+					case Decay:
+					{
+						value -= decayRate * static_cast<float>(ms);
+						float target = static_cast<float>(DecibelSquareTable[sustainIdx]);
+
+						if (value <= target)
+						{
+							value = target;
+							status = Sustain;
+						}
+						break;
+					}
+
+					case Sustain:
+						break;
+
+					case Release:
+						value -= releaseRate * static_cast<float>(ms);
+
+						if (value <= kEnvFloor || gainFromValue(value) <= kStopGain)
+						{
+							value = kEnvFloor;
+							status = Done;
+						}
+						break;
+
+					case Done:
+						break;
+				}
+			}
+
+			float gain() const { return gainFromValue(value); }
+			bool done() const { return status == Done; }
+		};
+	}
+
+	uint32_t voiceEndSample(const VoiceSpec& v, uint32_t startSample, uint32_t gateSamples, uint32_t capSample)
+	{
+		// The envelope release tail (frame-stepped, coarse). Runs the same EnvGen the
+		// render uses, counting frames until Done.
+		EnvGen env(v.envAttack, v.envHold, v.envDecay, v.envSustain, v.envRelease);
+
+		uint32_t s = 0;
+		uint32_t budget = (capSample > startSample) ? (capSample - startSample) : 0;
+
+		while (s < budget)
+		{
+			if (s >= gateSamples)
+			{
+				env.noteOff();
+			}
+
+			env.advance(kMsPerFrame);
+
+			if (env.done())
+			{
+				break;
+			}
+
+			s += kFrameSamples;
+		}
+
+		uint32_t envEnd = (s < budget) ? s : budget;
+
+		// One-shot sample exhaustion: a non-looped voice cannot sound past its PCM.
+		uint32_t audioEnd = budget;
+
+		if (!v.looped && v.step > 0.0)
+		{
+			double samples = static_cast<double>(v.sampleCount) / v.step;
+			audioEnd = static_cast<uint32_t>(samples < static_cast<double>(budget) ? samples + 1.0 : static_cast<double>(budget));
+		}
+
+		uint32_t end = min(envEnd, audioEnd);
+
+		return startSample + end;
 	}
 
 	bool resolveVoice(const LoadedArchive& arch, uint32_t program, int key, int velocity, VoiceSpec& out)
@@ -183,28 +426,72 @@ namespace play
 		out.gainL = gain;
 		out.gainR = gain;
 
+		// The note's ADSHR envelope bytes (the same fields Cbnk parses at note+0x38);
+		// the player runs the NW4R EnvGenerator over them. Per-track 0xB1/0xD0-0xD3
+		// overrides are applied by the caller (they are track state, not note state).
+		out.envAttack = zone->Attack;
+		out.envHold = zone->Hold;
+		out.envDecay = zone->Decay;
+		out.envSustain = zone->Sustain;
+		out.envRelease = zone->Release;
+
 		return true;
 	}
 
-	void renderVoice(StereoBus& bus, const VoiceSpec& v, uint32_t startSample, uint32_t gateSamples)
+	void renderVoice(StereoBus& bus, const VoiceSpec& v, uint32_t startSample, uint32_t gateSamples,
+		uint32_t stopSample)
 	{
-		if (gateSamples == 0 || !v.chan0)
+		if (!v.chan0)
 		{
 			return;
 		}
 
-		bus.ensure(static_cast<size_t>(startSample) + gateSamples);
+		// The voice lives from note-on until the NW4R envelope goes silent (its
+		// release tail extends past gateSamples). voiceEndSample runs the same
+		// EnvGen forward to find that length; an early `stopSample` (a C5 steal /
+		// mono re-trigger / render cap) cuts it shorter.
+		uint32_t cap = (stopSample == UINT32_MAX) ? UINT32_MAX : stopSample;
+		uint32_t endSample = voiceEndSample(v, startSample, gateSamples, cap);
 
-		// A short linear declick at each edge so a hard gate on a non-zero-crossing
-		// sample does not click. This is NOT the envelope (C4 ports the real NW4R
-		// EnvGenerator); it just keeps the trivial gate from buzzing.
-		const uint32_t declick = min<uint32_t>(64, gateSamples / 2);
+		if (endSample <= startSample)
+		{
+			return;
+		}
+
+		uint32_t length = endSample - startSample;
+
+		bus.ensure(static_cast<size_t>(endSample));
+
+		// Re-run the envelope in lockstep with the sample fetch (deterministic, so it
+		// tracks voiceEndSample exactly). The envelope updates once per frame; its
+		// gain is linearly ramped across the 160 samples of each frame to avoid a
+		// zipper. It starts at 0 (silence) and releases back to 0, so there is no
+		// hard gate and no declick needed.
+		EnvGen env(v.envAttack, v.envHold, v.envDecay, v.envSustain, v.envRelease);
 
 		double pos = 0.0;
+		float gCur = env.gain();
+		float gStep = 0.0f;
 
-		for (uint32_t s = 0; s < gateSamples; ++s)
+		for (uint32_t s = 0; s < length; ++s)
 		{
-			// One-shot that ends before the gate: stop (leaves the rest as the tail).
+			if (s % kFrameSamples == 0)
+			{
+				if (s >= gateSamples)
+				{
+					env.noteOff();
+				}
+
+				float gPrev = env.gain();
+				env.advance(kMsPerFrame);
+				float gNext = env.gain();
+
+				gCur = gPrev;
+				gStep = (gNext - gPrev) / static_cast<float>(kFrameSamples);
+			}
+
+			// One-shot that ends before the envelope (guarded by voiceEndSample, but
+			// keep the runtime guard so a rounding edge can never read past the PCM).
 			if (!v.looped && pos >= static_cast<double>(v.sampleCount))
 			{
 				break;
@@ -220,30 +507,14 @@ namespace play
 				}
 			}
 
-			float env = 1.0f;
-
-			if (declick > 0)
-			{
-				if (s < declick)
-				{
-					env *= static_cast<float>(s) / static_cast<float>(declick);
-				}
-
-				uint32_t remaining = gateSamples - s;
-
-				if (remaining < declick)
-				{
-					env *= static_cast<float>(remaining) / static_cast<float>(declick);
-				}
-			}
-
 			float sL = interp(*v.chan0, pos, v);
 			float sR = interp(*v.chan1, pos, v);
 
 			size_t idx = static_cast<size_t>(startSample) + s;
-			bus.l[idx] += sL * v.gainL * env;
-			bus.r[idx] += sR * v.gainR * env;
+			bus.l[idx] += sL * v.gainL * gCur;
+			bus.r[idx] += sR * v.gainR * gCur;
 
+			gCur += gStep;
 			pos += v.step;
 		}
 	}
@@ -368,9 +639,12 @@ namespace play
 
 				if (resolveVoice(arch, static_cast<uint32_t>(p), key, 100, v))
 				{
-					const uint32_t gate = kNativeRate;          // 1 s note
-					bus.ensure(static_cast<size_t>(kNativeRate) * 2);  // 1 s note + 1 s tail
-					renderVoice(bus, v, 0, gate);
+					// A 1 s gate: the NW4R envelope now shapes attack/hold/decay/
+					// sustain over the note and its release tail past the gate (bus
+					// sized by renderVoice). Cap the release tail at 4 s so a slow
+					// release cannot run unbounded in this DSP-proof fixture.
+					const uint32_t gate = kNativeRate;  // 1 s note-on
+					renderVoice(bus, v, 0, gate, kNativeRate * 5);
 
 					return true;
 				}

@@ -27,6 +27,9 @@ namespace play
 		constexpr uint32_t kCondRetakeBudget = 1024;
 
 		// One scheduled note: everything the DSP needs, resolved later per voice.
+		// envOverride carries the track's 0xB1/0xD0-0xD3 ADSHR overrides as they stood
+		// at note-on (-1 = use the note's own byte). Order: attack, hold, decay,
+		// sustain, release. Applied in Phase B on top of the resolved note bytes.
 		struct NoteEvent
 		{
 			uint32_t startSample;
@@ -34,6 +37,7 @@ namespace play
 			uint32_t program;
 			int key;
 			int velocity;
+			int envOverride[5] = { -1, -1, -1, -1, -1 };
 		};
 
 		// A 48-slot variable file with the converter's scoping: 0-31 are shared
@@ -49,6 +53,12 @@ namespace play
 			uint32_t waitTicks = 0;
 			bool noteWait = true;
 			uint32_t program = 0;
+
+			// Per-track ADSHR envelope overrides (0xB1 hold, 0xD0 attack, 0xD1 decay,
+			// 0xD2 sustain, 0xD3 release; 0xFB resets all). -1 = no override (use the
+			// note's own byte). Order: attack, hold, decay, sustain, release. The
+			// converter drops these (no MIDI equivalent); the player honours them.
+			int envOverride[5] = { -1, -1, -1, -1, -1 };
 
 			bool cmpFlag = true;
 			int16_t vars[16] = { 0 };        // slots 32-47 (track-local)
@@ -384,6 +394,11 @@ namespace play
 						ev.key = static_cast<int>(c);
 						ev.velocity = velocity;
 
+						for (int e = 0; e < 5; ++e)
+						{
+							ev.envOverride[e] = t.envOverride[e];
+						}
+
 						rt.events.push_back(ev);
 
 						if (rt.stats)
@@ -624,6 +639,38 @@ namespace play
 					continue;
 				}
 
+				// Per-track ADSHR envelope overrides (C4). 0xB1 hold, 0xD0 attack,
+				// 0xD1 decay, 0xD2 sustain, 0xD3 release: latch the resolved value
+				// (plain / Var / Rnd) into the track override slot so the next note
+				// uses it instead of its own byte. 0xFB resets all overrides. The
+				// value is an engine ADSHR byte (0..127); clamp defensively.
+				if (c == 0xB1 || c == 0xD0 || c == 0xD1 || c == 0xD2 || c == 0xD3)
+				{
+					bool drop = false;
+					int32_t val = cmd.Args.empty() ? 0 : resolveArg(rt, track, cmd, 0, drop);
+
+					if (!drop)
+					{
+						int slot = (c == 0xD0) ? 0 : (c == 0xB1) ? 1 : (c == 0xD1) ? 2 : (c == 0xD2) ? 3 : 4;
+						t.envOverride[slot] = clamp<int32_t>(val, 0, 127);
+					}
+
+					++t.cursor;
+					continue;
+				}
+
+				// Envelope reset: back to the note's own ADSHR bytes.
+				if (c == 0xFB)
+				{
+					for (int e = 0; e < 5; ++e)
+					{
+						t.envOverride[e] = -1;
+					}
+
+					++t.cursor;
+					continue;
+				}
+
 				// Everything else is a parameter/effect command that does NOT bear
 				// time (volume, pan, pitch bend, LFO, fx sends, ...). Safe-skip it so
 				// the cursor never desyncs; native rendering of these is C6+.
@@ -719,6 +766,10 @@ namespace play
 
 		// Phase B: render each note event's voice into the bus, in event order
 		// (deterministic accumulation). A note with no resolvable voice is dropped.
+		// A hard cap bounds each voice's envelope release tail (a release byte 0 is a
+		// ~19-minute tail) so the bus cannot grow unbounded past the render window.
+		const uint32_t renderCap = maxSamples + 2u * kNativeRate;
+
 		for (const NoteEvent& ev : rt.events)
 		{
 			VoiceSpec v;
@@ -729,7 +780,15 @@ namespace play
 				continue;
 			}
 
-			renderVoice(bus, v, ev.startSample, ev.gateSamples);
+			// Apply the track's ADSHR overrides (captured at note-on) on top of the
+			// note's own envelope bytes. Order: attack, hold, decay, sustain, release.
+			if (ev.envOverride[0] >= 0) v.envAttack = static_cast<uint8_t>(ev.envOverride[0]);
+			if (ev.envOverride[1] >= 0) v.envHold = static_cast<uint8_t>(ev.envOverride[1]);
+			if (ev.envOverride[2] >= 0) v.envDecay = static_cast<uint8_t>(ev.envOverride[2]);
+			if (ev.envOverride[3] >= 0) v.envSustain = static_cast<uint8_t>(ev.envOverride[3]);
+			if (ev.envOverride[4] >= 0) v.envRelease = static_cast<uint8_t>(ev.envOverride[4]);
+
+			renderVoice(bus, v, ev.startSample, ev.gateSamples, renderCap);
 		}
 
 		// Stats.

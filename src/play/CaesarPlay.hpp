@@ -110,6 +110,17 @@ namespace play
 		uint32_t loopStart = 0;
 		uint32_t loopEnd = 0;
 		uint32_t sampleCount = 0;
+
+		// The NW4R ADSHR envelope bytes for this note (resolved from the CbnkNote,
+		// or overridden by the track's 0xB1/0xD0-0xD3 commands). The player runs the
+		// real NW4R EnvGenerator over these (see Dsp.cpp) -- NOT Cbnk's SF2 timecent
+		// approximations. Each byte is 0..127 in the engine's own units; 127 on decay
+		// or release is the FASTEST rate (instant), the release-127 correction.
+		uint8_t envAttack = 127;   // 127 = instant attack
+		uint8_t envHold = 0;       // 0 = no hold
+		uint8_t envDecay = 127;    // 127 = instant decay to sustain
+		uint8_t envSustain = 127;  // 127 = full level (0 dB)
+		uint8_t envRelease = 127;  // 127 = instant release
 	};
 
 	// Resolve (program, key, velocity) against the loaded bank and its wave
@@ -121,11 +132,22 @@ namespace play
 	bool resolveVoice(const LoadedArchive& arch, uint32_t program, int key, int velocity, VoiceSpec& out);
 
 	// Render one voice into the native-rate bus: loop-aware, linearly-interpolated
-	// sample fetch, gated for `gateSamples` (a trivial on/off gate with a short
-	// declick fade at both edges -- C4 replaces it with the NW4R EnvGenerator),
-	// accumulated (+=) at `startSample`. Deterministic; the caller drives the
-	// accumulation order by the order it renders voices.
-	void renderVoice(StereoBus& bus, const VoiceSpec& v, uint32_t startSample, uint32_t gateSamples);
+	// sample fetch, shaped by the NW4R EnvGenerator (attack/hold/decay/sustain, then
+	// release once the note-off at `gateSamples` is crossed), accumulated (+=) at
+	// `startSample`. The voice renders past `gateSamples` for its release tail until
+	// the envelope is silent. `stopSample` (absolute, on the bus) force-stops the
+	// voice early -- a C5 steal / mono re-trigger / the render cap; UINT32_MAX = no
+	// early stop. Deterministic; the caller drives the accumulation order by the
+	// order it renders voices.
+	void renderVoice(StereoBus& bus, const VoiceSpec& v, uint32_t startSample, uint32_t gateSamples,
+		uint32_t stopSample = UINT32_MAX);
+
+	// The absolute sample at which this voice falls silent (note-on at `startSample`,
+	// note-off at `startSample + gateSamples`): the max of its envelope release tail
+	// and its one-shot sample exhaustion, clamped to `capSample`. Frame-quantised.
+	// The C5 voice allocator uses this to know when a pool slot frees; renderVoice
+	// uses it to size the bus. Pure function of the VoiceSpec envelope + loop.
+	uint32_t voiceEndSample(const VoiceSpec& v, uint32_t startSample, uint32_t gateSamples, uint32_t capSample);
 
 	// One final band-limited resample of the native-rate bus to `outRate`, then
 	// clamp + round to interleaved 16-bit stereo PCM (ready for writeWavPcm).
