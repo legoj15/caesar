@@ -193,7 +193,15 @@ per stage. Status:
       (output-identical, full gate green each commit — write-up in HISTORY).
       **Next up: the per-class model/exporter split (promote the parse structs
       to a lossless model, separating the reader from the SF2/MIDI/WAV
-      emitters), then the `caesar_core` library split.**
+      emitters), then the `caesar_core` library split.** The split is surveyed
+      and blueprinted (2026-07-13): no output-file blocker exists (SF2/MIDI/WAV
+      are pure functions of a model + deterministic writers); the phase
+      boundary stays per-file (never global) to preserve the diagnostic
+      surfaces; execution order Cwav → Cwar → Cbnk → Cseq → Csar+Cgrp, with
+      the Cseq commit fixing the stored-offsets stage-1 prerequisite and the
+      `-w` heap-nondeterminism Known bug together (an intentional, isolated
+      `-w` golden change). Full blueprint in
+      [HISTORY.md](HISTORY.md#suite-stage-0--the-modelexporter-split-blueprint-2026-07-13-survey).
 - [ ] **Stage 1 — byte-identical round-trip** of BCSEQ/BCBNK/BCSAR from a
       raw-backed model (**the next milestone** — the cheapest complete proof
       the format is understood, and the serializer everything else sits on).

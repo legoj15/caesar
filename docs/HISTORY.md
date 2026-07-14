@@ -2676,3 +2676,78 @@ archives are present). (3) The stale top-of-stack `-w AT POSITION` attribution o
 group paths (Known bugs, heap-layout nondeterministic) is untouched and still
 rides the shared `Offsets` stack — a per-model offset base is the real fix and
 overlaps the stage-1 drop-the-buffer work.
+
+## Suite stage 0 — the model/exporter-split blueprint (2026-07-13 survey)
+
+Read-only survey run after the span-construction tranches, producing the
+execution plan for step 3's second half (promote the half-models to lossless;
+split parse-to-model from emit-from-model) and the stage-1 groundwork map.
+
+**The two framing facts.** Diagnostics are two-tier: `Warning` tallies
+`Notices` unconditionally but prints positional lines only under `-w`, and
+`FlushNotices` prints the summary *sorted by category* — so under the default
+surface, warning ordering is irrelevant; only the sorted summary, stdout
+echoes, `.log`, and output bytes are pinned. And `.log` is already deferred
+(every `Analyse` is parse-phase; `Dump` fires once at the end of
+`Csar::Extract`), so a split that preserves parse order cannot disturb it.
+
+**The headline: no output-file blocker exists.** SF2 (sf2cute sorts
+generators), WAV (linear from PCM), and MIDI (libsmfc's stable time-sort;
+equal-tick insertion order is fully determined by the model + walk) are all
+pure functions of the model plus deterministic writers. The genuinely
+un-replayable surfaces are diagnostic/progress only: (1) **the parser performs
+stdout I/O** — `Push` echoes fire from every child constructor during parse,
+so the "parsers do no I/O" rule needs an explicit exemption for progress
+echoes (or a thin driver visiting nodes in identical depth-first order);
+(2) **`-w` positional stderr is emit-order-dependent** — a *global*
+parse-all-then-emit-all would interleave differently than today's per-file
+parse-then-emit, so **the phase boundary stays per-file, never global**;
+(3) the `cerr` format-flag leakage means diagnostic *calls* must not reorder
+relative to `FlushNotices`.
+
+**Lossless-model gaps per class** (full field lists in the survey report,
+summarized): Csar has no persistent record tree at all (everything is
+`Extract`-local); the player (0x2102) and set (0x2104) tables are never
+parsed and become opaque spans; four header words are read-and-discarded and
+several INFO words are `Analyse`-logged then dropped. Cgrp's INFX chunk is
+located but never parsed (opaque span). Cwar is the thinnest (offset table +
+blob section). **Cwav is the largest gap**: after `Convert`, only the
+SF2-path fields survive — `codec`, the per-channel `SampOffset`/`AdpcmType`/
+DSP coefficients/contexts, and the raw DATA payload are all discarded, and
+decoded PCM cannot be re-encoded losslessly, so round-trip needs the raw DATA
+span retained (or the explicit decision that BCWAV rides as an archive-level
+opaque blob — stage 1's list is BCSEQ/BCBNK/BCSAR). Cbnk's `CbnkCwav` is a
+parse/emit boundary violation: the parser fills it by reaching into live
+`Cwav` objects, and the SF2 build still reads `->SampleMode` live — the raw
+record is just two dwords, so the model must shrink to the raw ref and
+resolution must move into the exporter (taking the per-sample `<id>.wav`
+stdout echo with it). Cseq's model is the most complete (the Rnd blocker
+already resolved); what remains is `cseqVersion`, storing each command's own
+source offset + `dataOffset`, and canonical re-encoding rules for suffix
+prefix order and VarLen args.
+
+**The Cseq offset prerequisite = the open `-w` nondeterminism bug.** The emit
+walk reconstructs `here = Data + dataOffset + 8 + i->first` (Cseq.cpp:913 and
+three siblings) for ~40 warning sites — position-by-pointer-subtraction
+against the shared stack top, the same defect behind the heap-nondeterministic
+`-w` positions. The fix (offset-taking `Warning` overload + stored command
+offsets) unblocks stage-1 drop-the-buffer AND makes `-w` deterministic in one
+commit — an intentional `-w` golden change, re-pinned via `-Capture -Force`.
+
+**Execution order (one commit each, per-file phase boundary, full gate):**
+1. **Cwav** — retain raw DATA + channel/DSP context + `codec`; extract the
+   WAV writer from the decoder. Leaf; strongest default-on byte signal.
+2. **Cwar** — model = cwav table + FILE span; exporter = dump + recurse.
+3. **Cbnk** — decouple parser from live Cwav (raw refs + `SampleMode` in the
+   model; resolution + echo into the SF2 exporter; retain the dropped words).
+4. **Cseq** — stored offsets + offset-based Warning + extract the emit walk;
+   the isolated intentional `-w` golden change.
+5. **Csar + Cgrp** — persistent archive record tree with opaque spans; the
+   stage-1 whole-archive offset/size recomputation lives here. Preserve
+   depth-first construction order and `Dump`-last.
+
+Stage-1 handoff: after these five, the round-trip serializer is a new
+model→bytes exporter per format; the recompute set (every offset/size table)
+vs copy-through set (strings, locations, blobs, ADPCM payloads) is enumerated
+per format in the survey; inter-record alignment padding is modeled nowhere
+today and must be reproduced by rule or stored as opaque gap-spans.
