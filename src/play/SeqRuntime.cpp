@@ -1049,6 +1049,46 @@ namespace play
 					continue;
 				}
 
+				// The persistent track LFO (C9): ONE parameter block, retargetable. 0xCA
+				// depth / 0xCB rate / 0xCD range / 0xCC target (0 pitch, 1 volume, 2 pan)
+				// each latch (or `_t`-glide) their own curve; the block persists across a
+				// target switch, so a value commanded on any target survives it -- exactly
+				// the converter's wire/shadow model, but trivially, since the player keeps
+				// the values. Applied per frame in renderVoice; pitch cents = depth x range.
+				if (c == 0xCA || c == 0xCB || c == 0xCC || c == 0xCD)
+				{
+					ParamCurve& curve =
+						(c == 0xCA) ? t.timeline.lfoDepth :
+						(c == 0xCB) ? t.timeline.lfoRate :
+						(c == 0xCD) ? t.timeline.lfoRange : t.timeline.lfoTarget;
+
+					setParam(rt, track, cmd, currentSample, curve, 0, 127);
+
+					if (rt.stats) { ++rt.stats->lfoCommands; }
+
+					++t.cursor;
+					continue;
+				}
+
+				// Mod delay (0xE0): time from note-on before the LFO engages, in 5 ms
+				// units (NW4R lfoParam.delay = arg * 5 ms). Stored as ms.
+				if (c == 0xE0)
+				{
+					bool drop = false;
+					int32_t v = cmd.Args.empty() ? 0 : resolveArg(rt, track, cmd, 0, drop);
+
+					if (!drop)
+					{
+						int32_t ms = (v > 0 ? v : 0) * 5;
+						t.timeline.lfoDelayMs.set(currentSample, static_cast<float>(ms), 0);
+
+						if (rt.stats) { ++rt.stats->lfoCommands; }
+					}
+
+					++t.cursor;
+					continue;
+				}
+
 				// Native volume / pan / pitch (C7), as LIVE curves. A `_t` suffix glides
 				// the parameter from its current value to the target over the trailing
 				// duration (ticks -> samples at the current tempo); a plain command is an

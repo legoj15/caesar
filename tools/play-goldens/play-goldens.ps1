@@ -157,10 +157,15 @@ function Remove-PgDir { param([string] $Path)
 #   torte      Kirby: Planet Robobot — a direct-path archive carrying the Phase III
 #              feature repros: a clean single long `_t` volume fade (the C7 ramp
 #              witness) and the tied no-rest WarpstarUp sweeps (the C8 tie repro).
+#   sounddata1 WarioWare Gold SoundData1 — a pitch-vibrato mini-game tune (the C9
+#              LFO witness) and the mid-sequence bank-switch repro (0xB6, 4,585
+#              selects; the C10 bank witness, where dropped notes resolve once the
+#              switch loads the target bank).
 $SourceArchives = @(
     @{ Key = 'caravel';    Rel = 'F-Zero\caravel.bcsar' }
     @{ Key = 'meetsound';  Rel = 'MiiPlaza\sound\MeetSound.bcsar' }
     @{ Key = 'torte';      Rel = 'Kirby Planet Robobot\snd\Torte.bcsar' }
+    @{ Key = 'sounddata1'; Rel = 'wariowareG\Sound\SoundData1.bcsar' }
 )
 
 # Every render invocation, in a fixed order. Fields:
@@ -194,6 +199,12 @@ $Invocations = @(
     # now collapse into 3 CONTINUOUS voices whose pitch retunes 243x with no
     # re-attack and zero steals — the both-edges-release tie semantics.
     @{ Name = 'tie-warpstar';   Mode = '--render'; Source = 'torte';     Seq = 'SE_Map_WarpstarUp2';       Rate = 48000; MaxSeconds = 15;  ExpectExit = 0 }
+
+    # C9 — the LFO witness. SEQ_M_ZELDA1 drives the persistent track LFO (depth 0xCA
+    # / rate 0xCB / delay 0xE0) on its melody, so the render carries periodic pitch
+    # modulation (controlled proof: rate linear in the commanded value at 5/64 Hz per
+    # unit, peak deviation = depth x range cents; targets 0/1/2 route pitch/vol/pan).
+    @{ Name = 'vibrato-zelda';  Mode = '--render'; Source = 'sounddata1'; Seq = 'SEQ_M_ZELDA1';            Rate = 48000; MaxSeconds = 20;  ExpectExit = 0 }
 )
 
 # ---------------------------------------------------------------------------

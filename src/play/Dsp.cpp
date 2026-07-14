@@ -18,6 +18,19 @@ namespace play
 	{
 		constexpr double kPi = 3.14159265358979323846;
 
+		// --- The track LFO (C9) --------------------------------------------------
+		//
+		// The disasm doc records NO LFO/sine/rate address (session 4 stopped at the
+		// variable VM), so the LFO uses the NW4R precedent and every constant below is
+		// FLAGGED for the console capture. rate -> Hz is anchored so a mid rate (~64)
+		// gives a musical ~5 Hz vibrato; the exact scaling is one constant to
+		// recalibrate. A continuous four-quadrant sine stands in for NW4R's 32-step
+		// quarter-sine table (its high-resolution limit; the table quantisation is
+		// inaudible here and is the flagged detail). Pitch cents = depth x range (the
+		// vibrato-gating memory), clamped to +/-1 octave defensively.
+		constexpr float kLfoRateHz = 5.0f / 64.0f;     // Hz per rate unit (anchored, flagged)
+		constexpr float kLfoMaxCents = 1200.0f;        // defensive clamp on depth x range
+
 		// Read one source sample (normalised to [-1, 1)), honouring the loop for a
 		// looped voice and returning silence past the end of a one-shot. idx is a
 		// signed index so the interpolator's i0-1 / i0+1 neighbours are safe at the
@@ -468,6 +481,50 @@ namespace play
 		return true;
 	}
 
+	// The persistent track LFO's contribution at absolute sample `absPos` (C9). ONE
+	// LfoParam per track, retargeted by lfoTarget (0 pitch / 1 volume / 2 pan), with
+	// a per-note delay (0xE0) before it engages. `targetOut` returns the live target.
+	// The return is in the target's native units: pitch -> semitones; volume/pan -> a
+	// control-value delta. Zero when depth/rate is zero, before the delay, or for an
+	// out-of-range target (the engine applies no LFO there).
+	float lfoValue(const TrackTimeline& tl, uint32_t noteOn, uint32_t absPos, int& targetOut)
+	{
+		int target = static_cast<int>(tl.lfoTarget.valueAt(absPos) + 0.5f);
+		targetOut = target;
+
+		float depth = tl.lfoDepth.valueAt(absPos);
+		float rate = tl.lfoRate.valueAt(absPos);
+
+		if (depth <= 0.0f || rate <= 0.0f || target > 2 || absPos < noteOn)
+		{
+			return 0.0f;
+		}
+
+		float delayMs = tl.lfoDelayMs.valueAt(absPos);
+		float elapsedMs = 1000.0f * static_cast<float>(absPos - noteOn) / static_cast<float>(kNativeRate);
+
+		if (elapsedMs < delayMs)
+		{
+			return 0.0f;
+		}
+
+		float hz = rate * kLfoRateHz;
+		float phase = 2.0f * static_cast<float>(kPi) * hz * (elapsedMs - delayMs) / 1000.0f;
+		float sine = sinf(phase);   // four-quadrant
+
+		if (target == 0)
+		{
+			// Pitch: peak deviation cents = depth x range (memory), clamped defensively.
+			float cents = depth * tl.lfoRange.valueAt(absPos);
+			cents = cents > kLfoMaxCents ? kLfoMaxCents : cents;
+
+			return sine * cents / 100.0f;   // -> semitones
+		}
+
+		// Volume (1) / pan (2): a control-value delta scaled by depth.
+		return sine * depth;
+	}
+
 	// The additive semitone offset a per-note glide (sweep 0xE3 or portamento
 	// 0xC9/CE/CF) contributes at absolute sample `absPos`: it starts at `fromSemis`
 	// and ramps LINEARLY to 0 over `durSamples`, then stays 0. Sweep and portamento
@@ -569,6 +626,22 @@ namespace play
 
 						semis = (tl.bend.valueAt(absPos) / 128.0) * tl.bendRange.valueAt(absPos)
 							+ tl.transpose.valueAt(absPos);
+
+						// The persistent track LFO (C9), routed to its live target. The
+						// single param block persists across a retarget (the curves hold
+						// their values), so a value commanded on any target survives it.
+						int lfoTarget = 0;
+						float lfo = lfoValue(tl, mod->noteOnSample, absPos, lfoTarget);
+
+						if (lfo != 0.0f)
+						{
+							if (lfoTarget == 0)      { semis += lfo; }   // pitch vibrato (semitones)
+							else if (lfoTarget == 1)                     // tremolo: volume delta in dB units
+							{
+								volAmp *= decibelSquareAmp(127.0f + lfo) / decibelSquareAmp(127.0f);
+							}
+							else if (lfoTarget == 2) { panPos += lfo; } // auto-pan: control-value delta
+						}
 					}
 
 					if (mod->master)

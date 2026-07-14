@@ -187,6 +187,11 @@ namespace
 				<< stats.tieRetunes << " no-attack retunes\n";
 		}
 
+		if (stats.lfoCommands > 0)
+		{
+			cout << "  lfo: " << stats.lfoCommands << " command(s) (depth/rate/target/range/delay)\n";
+		}
+
 		if (stats.loopDetected)
 		{
 			cout << "  whole-song loop detected: body rendered once (a track's backward jump ended it)\n";

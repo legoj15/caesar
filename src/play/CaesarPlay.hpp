@@ -385,6 +385,10 @@ namespace play
 		uint32_t tieVoices = 0;
 		uint32_t tieRetunes = 0;
 
+		// C9: track-LFO parameter commands executed (0xCA/CB/CC/CD/E0). A vibrato /
+		// tremolo / auto-pan track shows a positive count.
+		uint32_t lfoCommands = 0;
+
 		// Opcodes the walk safe-skipped (never desyncing time): plain command byte,
 		// or 0x100 | ext for an extended (0xF0-prefixed) op. For the handoff report.
 		std::vector<uint32_t> skippedOps;
