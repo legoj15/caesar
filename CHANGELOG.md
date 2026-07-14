@@ -59,6 +59,16 @@ House rules:
 
 ### Changed
 
+- **`Cwav` now parses into a retained model, then writes the `.wav` from that
+  model in a separate step** (stage-0 model/exporter split, commit 1 of 5). The
+  former one-pass `Convert` is split into `Parse` (INFO walk + PCM decode into
+  the object; no file output) and `ExportWav` (RIFF/`smpl` writer, reading only
+  model fields); the wave archive calls them back to back. The object now retains
+  the codec, per-channel DSP context/coefficients as span-relative offsets, the
+  raw DATA-section span (offset+length, no copy), and the previously discarded
+  header words — groundwork for the round-trip serializer. (`output-identical` —
+  82-archive / 257,125-file corpus A/B byte-identical with identical
+  stdout/stderr, exit 0; 17-surface diagnostics goldens byte-identical.)
 - **Embedded wave archives and waves are parsed from the parent's buffer
   instead of re-reading the file they were just written to** (stage-0 per-file
   split, first tranche: `Cwar`, then `Cwav`). `Csar`/`Cgrp` still write each

@@ -124,10 +124,16 @@ bool Cwar::Extract()
 		// ~Cwar, so the borrow is safe.
 		Cwavs.push_back(new Cwav(cwavFile, cwavs[i].Offset, cwavs[i].Length, Ctx));
 
-		if (!Cwavs[i]->Convert())
+		// Parse (INFO walk + PCM decode into the model), then export the .wav from
+		// that model: two phases split out of the former one-pass Convert, invoked
+		// back to back so the .wav bytes, the stdout echo, and every parse-phase
+		// diagnostic stay byte-identical.
+		if (!Cwavs[i]->Parse())
 		{
 			return false;
 		}
+
+		Cwavs[i]->ExportWav();
 	}
 
 	return true;

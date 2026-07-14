@@ -2751,3 +2751,74 @@ model→bytes exporter per format; the recompute set (every offset/size table)
 vs copy-through set (strings, locations, blobs, ADPCM payloads) is enumerated
 per format in the survey; inter-record alignment padding is modeled nowhere
 today and must be reproduced by rule or stored as opaque gap-spans.
+
+## Suite stage 0 — model/exporter split, commit 1: Cwav (2026-07-14)
+
+First of the blueprint's five per-class splits. `Cwav::Convert` used to decode
+the INFO/DATA sections and write the `.wav` in one pass, discarding everything
+but the SF2-path fields after the walk. It is now two members: **`Parse`** (INFO
+walk + PCM decode into the object, no file output) and **`ExportWav`** (the RIFF
++ optional `smpl` writer, reading only model fields). The wave archive
+(`Cwar.cpp`) invokes them back to back per file — `if (!Parse()) return false;`
+then `ExportWav();` — so the parse-failure `return false` and the I/O-failure
+throw keep their exact original positions and the whole observable surface (the
+`.wav` bytes, the write-failure message, the stdout echo emitted at construction,
+the IMA-ADPCM notice, and every `Assert`/`Error` text and order) is unchanged.
+`Convert` was the only public entry and its sole caller was this one site, so the
+rename is coherent, not a compatibility break.
+
+**What the model now retains** (previously function-local and dropped): the
+`Codec`; the per-channel records (`ChannelInfo`, one `CwavChan` each) carrying
+`SampOffset`/`AdpcmType`/`AdpcmOffset`, the 16 `DspCoeffs`, and both `DspContext`
+records; the raw DATA-section span as `DataSpanOffset`/`DataSpanLength` (a window
+into `Data`, **no bytes copied**); and the three previously read-and-discarded
+header words — `Version` (cwavVersion), `UnalignedLoopStart`, and the DATA length
+(kept as `DataSpanLength`). The pre-existing SF2-path fields (`SampleMode`,
+`ChanCount`, `SampleRate`, `LoopStart`, `LoopEnd`, decoded `Channels`,
+`Converted`) are unchanged and are what `Cbnk` still reads live.
+
+**Offset-vs-pointer choice: converted outright, no parallel pointers.** The old
+`CwavChan` held three raw `uint8_t*` fields (`Offset`, `SampOffset`,
+`AdpcmOffset`). As retained state those became `uint32_t` **offsets relative to
+the span base (`Data`)** — `InfoOffset`/`SampOffset`/`AdpcmOffset` — and parse
+reconstructs each read cursor as `Data + <offset>`. This adds **no new
+raw-pointer state** to the model (the blueprint's stage-1-drop-the-buffer rule)
+and is arithmetically identical to the old pointers: each stored offset is the
+exact value the old `Data + …` expression added, so every `Assert` still sees the
+same `pos`. Decoded PCM is written straight into `Channels[i]` during Parse
+(via `Channels.assign(chanCount, {})`) rather than into a throwaway
+`PcmSamples` per channel and moved at the end, so the decoded bytes are stored
+**once**, not doubled.
+
+**Memory impact.** The retained per-channel metadata is tiny (~40 bytes/channel:
+three offsets + 16 `int16_t` coeffs + two 5-byte contexts) and the raw DATA
+payload is recorded as **offset+length only — the parent `Cwar` buffer already
+holds those bytes, so nothing is copied**. Net growth over the prior in-memory
+handoff is negligible; the large `Channels` PCM buffer is the same one that
+already existed.
+
+**Stage-1 note.** The raw DATA span is borrowed from the parent `Cwar` buffer
+(freed after this child), so offset+length resolves for the object's whole life
+today. When stage 1 drops the source buffer, `Cwav` needs an explicit
+copy-or-keep decision for `[DataSpanOffset, DataSpanOffset + DataSpanLength)` —
+flagged in the header comment beside the field.
+
+**Verification (full gate, all green).** Warning-clean MSVC Release build (3
+compilers' `-Werror` discipline honoured; `std::move` no longer needed on the
+decode path). Diagnostics goldens **17/17 byte-identical** (exit 0). Corpus A/B
+(dirty tree, baseline `HEAD` = `89a58d4`) **82 archives / 257,125 files
+byte-identical, stdout/stderr identical, exit 0** (baseline 84 s, new 85 s) — the
+`.wav` bytes are the strongest default-on signal for exactly this change.
+
+**For commit 2 (`Cwar`) and commit 3 (`Cbnk`).** `Cwav` exposes `Parse()` (bool)
+and `ExportWav()` (void, throws on write failure) separately now; `Convert()` is
+gone. When `Cwar` splits its own parse/emit (commit 2), the natural seam is to
+call `cwav->Parse()` in `Cwar`'s parse phase and `cwav->ExportWav()` in its emit
+phase — but keep them per-file back to back until then, because a global
+parse-all-then-emit-all would reorder `-w` stderr. `Cbnk` (commit 3) still reads
+`Converted`/`ChanCount`/`SampleRate`/`Channels`/`SampleMode`/`LoopStart`/
+`LoopEnd` off the live `Cwav`; those field names and semantics are untouched, so
+commit 3 can migrate `CbnkCwav` without touching `Cwav`. `Converted` is now set
+at the end of `Parse` (decode succeeded) rather than after the write; on the only
+path where that differs — a write-failure throw — the process is already
+unwinding fatally, so it is unobservable and the A/B confirms it.

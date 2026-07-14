@@ -39,7 +39,7 @@ Cwav::~Cwav()
 	// after this child); do not delete it here.
 }
 
-bool Cwav::Convert()
+bool Cwav::Parse()
 {
 	uint8_t* pos = Data;
 
@@ -47,7 +47,7 @@ bool Cwav::Convert()
 	if (!Ctx.Assert(pos, 0xFEFF, Ctx.ReadFixLen(pos, 2))) { return false; }
 	if (!Ctx.Assert(pos, 0x40, Ctx.ReadFixLen(pos, 2))) { return false; }
 
-	[[maybe_unused]] uint32_t cwavVersion = Ctx.ReadFixLen(pos, 4);
+	Version = Ctx.ReadFixLen(pos, 4);
 
 	if (!Ctx.Assert<uint64_t>(pos, Length, Ctx.ReadFixLen(pos, 4))) { return false; }
 	if (!Ctx.Assert(pos, 0x2, Ctx.ReadFixLen(pos, 4))) { return false; }
@@ -59,14 +59,20 @@ bool Cwav::Convert()
 	if (!Ctx.Assert(pos, 0x7001, Ctx.ReadFixLen(pos, 4))) { return false; }
 
 	uint32_t dataOffset = Ctx.ReadFixLen(pos, 4);
-	[[maybe_unused]] uint32_t dataLength = Ctx.ReadFixLen(pos, 4);
+	uint32_t dataLength = Ctx.ReadFixLen(pos, 4);
+
+	// Record the raw DATA-section payload as an offset+length window into Data
+	// (no bytes copied; the parent buffer backs it). Stage 1's buffer drop must
+	// decide here whether to copy or keep these bytes.
+	DataSpanOffset = dataOffset;
+	DataSpanLength = dataLength;
 
 	pos = Data + infoOffset;
 
 	if (!Ctx.Assert(pos, 0x494E464F, Ctx.ReadFixLen(pos, 4, false))) { return false; }
 	if (!Ctx.Assert<uint32_t>(pos, infoLength, Ctx.ReadFixLen(pos, 4))) { return false; }
 
-	uint8_t codec = Ctx.ReadFixLen(pos, 1);
+	Codec = Ctx.ReadFixLen(pos, 1);
 	SampleMode = Ctx.ReadFixLen(pos, 1);
 
 	if (!Ctx.Assert(pos, 0x0, Ctx.ReadFixLen(pos, 2))) { return false; }
@@ -74,12 +80,12 @@ bool Cwav::Convert()
 	uint32_t sampleRate = Ctx.ReadFixLen(pos, 4);
 	uint32_t loopStart = Ctx.ReadFixLen(pos, 4);
 	uint32_t loopEnd = Ctx.ReadFixLen(pos, 4);
-	[[maybe_unused]] uint32_t unalignedLoopStart = Ctx.ReadFixLen(pos, 4);
+	UnalignedLoopStart = Ctx.ReadFixLen(pos, 4);
 	uint16_t chanCount = Ctx.ReadFixLen(pos, 2);
 
 	if (!Ctx.Assert(pos, 0x0, Ctx.ReadFixLen(pos, 2))) { return false; }
 
-	// A malformed wave with zero channels would later index chans[0] on an empty
+	// A malformed wave with zero channels would later index channel 0 on an empty
 	// vector; reject it cleanly instead of over-reading.
 	if (chanCount == 0)
 	{
@@ -88,37 +94,43 @@ bool Cwav::Convert()
 		return false;
 	}
 
-	vector<CwavChan> chans;
+	ChannelInfo.clear();
+	ChannelInfo.reserve(chanCount);
 
 	for (uint16_t i = 0; i < chanCount; ++i)
 	{
 		if (!Ctx.Assert(pos, 0x7100, Ctx.ReadFixLen(pos, 4))) { return false; }
 
 		CwavChan chan{};
-		chan.Offset = Data + infoOffset + 28 + Ctx.ReadFixLen(pos, 4);
+		chan.InfoOffset = infoOffset + 28 + Ctx.ReadFixLen(pos, 4);
 
-		chans.push_back(chan);
+		ChannelInfo.push_back(chan);
 	}
+
+	// One decoded-PCM vector per channel; the decode writes straight into these.
+	Channels.assign(chanCount, {});
 
 	for (uint16_t i = 0; i < chanCount; ++i)
 	{
-		pos = chans[i].Offset;
+		pos = Data + ChannelInfo[i].InfoOffset;
 
 		if (!Ctx.Assert(pos, 0x1F00, Ctx.ReadFixLen(pos, 4))) { return false; }
 
-		chans[i].SampOffset = Data + dataOffset + 8 + Ctx.ReadFixLen(pos, 4);
-		chans[i].AdpcmType = Ctx.ReadFixLen(pos, 4);
+		ChannelInfo[i].SampOffset = dataOffset + 8 + Ctx.ReadFixLen(pos, 4);
+		ChannelInfo[i].AdpcmType = Ctx.ReadFixLen(pos, 4);
 		uint32_t adpcmOffset = Ctx.ReadFixLen(pos, 4);
 
-		switch (codec)
+		vector<int16_t>& pcm = Channels[i];
+
+		switch (Codec)
 		{
 			case 0:
 			{
-				pos = chans[i].SampOffset;
+				pos = Data + ChannelInfo[i].SampOffset;
 
 				for (uint32_t j = 0; j < loopEnd; ++j)
 				{
-					chans[i].PcmSamples.push_back(Ctx.ReadFixLen(pos, 1) << 8);
+					pcm.push_back(Ctx.ReadFixLen(pos, 1) << 8);
 				}
 
 				break;
@@ -126,11 +138,11 @@ bool Cwav::Convert()
 
 			case 1:
 			{
-				pos = chans[i].SampOffset;
+				pos = Data + ChannelInfo[i].SampOffset;
 
 				for (uint32_t j = 0; j < loopEnd; ++j)
 				{
-					chans[i].PcmSamples.push_back(Ctx.ReadFixLen(pos, 2, true, true));
+					pcm.push_back(Ctx.ReadFixLen(pos, 2, true, true));
 				}
 
 				break;
@@ -138,13 +150,13 @@ bool Cwav::Convert()
 
 			case 2:
 			{
-				chans[i].AdpcmOffset = chans[i].Offset + adpcmOffset;
+				ChannelInfo[i].AdpcmOffset = ChannelInfo[i].InfoOffset + adpcmOffset;
 
-				pos = chans[i].AdpcmOffset;
+				pos = Data + ChannelInfo[i].AdpcmOffset;
 
 				for (uint8_t j = 0; j < 16; ++j)
 				{
-					chans[i].DspCoeffs[j] = Ctx.ReadFixLen(pos, 2, true, true);
+					ChannelInfo[i].DspCoeffs[j] = Ctx.ReadFixLen(pos, 2, true, true);
 				}
 
 				DspContext dspCntx{};
@@ -163,14 +175,14 @@ bool Cwav::Convert()
 				dspLoopCntx.SampHist1 = Ctx.ReadFixLen(pos, 2, true, true);
 				dspLoopCntx.SampHist2 = Ctx.ReadFixLen(pos, 2, true, true);
 
-				chans[i].DspCntx = dspCntx;
-				chans[i].DspLoopCntx = dspLoopCntx;
+				ChannelInfo[i].DspCntx = dspCntx;
+				ChannelInfo[i].DspLoopCntx = dspLoopCntx;
 
-				pos = chans[i].SampOffset;
+				pos = Data + ChannelInfo[i].SampOffset;
 
-				int8_t predScal = chans[i].DspCntx.PredScal;
-				int16_t hist1 = chans[i].DspCntx.SampHist1;
-				int16_t hist2 = chans[i].DspCntx.SampHist2;
+				int8_t predScal = ChannelInfo[i].DspCntx.PredScal;
+				int16_t hist1 = ChannelInfo[i].DspCntx.SampHist1;
+				int16_t hist2 = ChannelInfo[i].DspCntx.SampHist2;
 
 				for (uint32_t j = 0; j < ceil(loopEnd / 14.0f); ++j)
 				{
@@ -181,10 +193,10 @@ bool Cwav::Convert()
 					// (16 entries) out of bounds at pred*2+1.
 					int32_t pred = (predScal >> 4) & 0x7;
 					int32_t scal = 1 << (predScal & 0xF);
-					int16_t coef1 = chans[i].DspCoeffs[pred * 2];
-					int16_t coef2 = chans[i].DspCoeffs[(pred * 2) + 1];
+					int16_t coef1 = ChannelInfo[i].DspCoeffs[pred * 2];
+					int16_t coef2 = ChannelInfo[i].DspCoeffs[(pred * 2) + 1];
 
-					uint32_t samplesToRead = min<uint32_t>(14, static_cast<uint32_t>(loopEnd - chans[i].PcmSamples.size()));
+					uint32_t samplesToRead = min<uint32_t>(14, static_cast<uint32_t>(loopEnd - pcm.size()));
 
 					for (uint32_t k = 0; k < samplesToRead; ++k)
 					{
@@ -196,19 +208,19 @@ bool Cwav::Convert()
 
 						if (scaled < -32768)
 						{
-							chans[i].PcmSamples.push_back(-32768);
+							pcm.push_back(-32768);
 						}
 						else if (scaled > 32767)
 						{
-							chans[i].PcmSamples.push_back(32767);
+							pcm.push_back(32767);
 						}
 						else
 						{
-							chans[i].PcmSamples.push_back(scaled);
+							pcm.push_back(scaled);
 						}
 
 						hist2 = hist1;
-						hist1 = chans[i].PcmSamples.back();
+						hist1 = pcm.back();
 					}
 				}
 
@@ -224,19 +236,32 @@ bool Cwav::Convert()
 
 			default:
 			{
-				Ctx.Error(Data + infoOffset + 8, "A valid codec identifier", codec);
+				Ctx.Error(Data + infoOffset + 8, "A valid codec identifier", Codec);
 
 				return false;
 			}
 		}
 	}
 
+	// Publish the SF2-path fields the live object exposes (Cbnk reads these).
+	ChanCount = chanCount;
+	SampleRate = sampleRate;
+	LoopStart = loopStart;
+	LoopEnd = loopEnd;
+
+	Converted = true;
+
+	return true;
+}
+
+void Cwav::ExportWav()
+{
 	uint32_t fmtLength = 16;
 	uint16_t waveCodec = 1;
 	uint16_t bitsPerSample = 16;
-	uint32_t byteRate = (sampleRate * chanCount) * (bitsPerSample / 8);
-	uint16_t blockAlign = chanCount * (bitsPerSample / 8);
-	uint32_t waveDataLength = static_cast<uint32_t>((chans[0].PcmSamples.size() * chanCount) * (bitsPerSample / 8));
+	uint32_t byteRate = (SampleRate * ChanCount) * (bitsPerSample / 8);
+	uint16_t blockAlign = ChanCount * (bitsPerSample / 8);
+	uint32_t waveDataLength = static_cast<uint32_t>((Channels[0].size() * ChanCount) * (bitsPerSample / 8));
 	uint32_t length = 36 + waveDataLength;
 
 	uint32_t smplLength = 60;
@@ -257,19 +282,19 @@ bool Cwav::Convert()
 	ofs.write("fmt ", 4);
 	ofs.write(reinterpret_cast<const char*>(&fmtLength), 4);
 	ofs.write(reinterpret_cast<const char*>(&waveCodec), 2);
-	ofs.write(reinterpret_cast<const char*>(&chanCount), 2);
-	ofs.write(reinterpret_cast<const char*>(&sampleRate), 4);
+	ofs.write(reinterpret_cast<const char*>(&ChanCount), 2);
+	ofs.write(reinterpret_cast<const char*>(&SampleRate), 4);
 	ofs.write(reinterpret_cast<const char*>(&byteRate), 4);
 	ofs.write(reinterpret_cast<const char*>(&blockAlign), 2);
 	ofs.write(reinterpret_cast<const char*>(&bitsPerSample), 2);
 	ofs.write("data", 4);
 	ofs.write(reinterpret_cast<const char*>(&waveDataLength), 4);
 
-	for (size_t i = 0; i < chans[0].PcmSamples.size(); ++i)
+	for (size_t i = 0; i < Channels[0].size(); ++i)
 	{
-		for (uint16_t j = 0; j < chanCount; ++j)
+		for (uint16_t j = 0; j < ChanCount; ++j)
 		{
-			ofs.write(reinterpret_cast<const char*>(&chans[j].PcmSamples[i]), 2);
+			ofs.write(reinterpret_cast<const char*>(&Channels[j][i]), 2);
 		}
 	}
 
@@ -290,8 +315,8 @@ bool Cwav::Convert()
 			ofs.write(reinterpret_cast<const char*>(&zero), 4);
 		}
 
-		ofs.write(reinterpret_cast<const char*>(&loopStart), 4);
-		ofs.write(reinterpret_cast<const char*>(&loopEnd), 4);
+		ofs.write(reinterpret_cast<const char*>(&LoopStart), 4);
+		ofs.write(reinterpret_cast<const char*>(&LoopEnd), 4);
 
 		for (uint8_t i = 0; i < 2; ++i)
 		{
@@ -307,22 +332,4 @@ bool Cwav::Convert()
 	{
 		throw runtime_error("could not write file (write failed or incomplete): " + wavName);
 	}
-
-	// Retain the decoded data so Cbnk can read it from the live object instead of
-	// re-opening the .wav. Move the per-channel PCM out now that the .wav is written.
-	ChanCount = chanCount;
-	SampleRate = sampleRate;
-	LoopStart = loopStart;
-	LoopEnd = loopEnd;
-
-	Channels.reserve(chanCount);
-
-	for (uint16_t i = 0; i < chanCount; ++i)
-	{
-		Channels.push_back(std::move(chans[i].PcmSamples));
-	}
-
-	Converted = true;
-
-	return true;
 }
