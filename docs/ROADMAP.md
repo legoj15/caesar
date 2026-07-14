@@ -150,7 +150,9 @@ per stage. Status:
       then the per-file parser/exporter split (which also absorbs the
       Csar/Cgrp child write-then-reopen family the plan never named), library
       split last — and identified the `ReadArgs` Rnd-midpoint collapse as the
-      one lossless-model blocker. Full findings in
+      one lossless-model blocker (resolved 2026-07-13: the parsed model retains
+      the raw `Rnd` bounds and the midpoint decision moved to the emit walk,
+      output-identical). Full findings in
       [HISTORY.md](HISTORY.md#2026-07-13--suite-stage-0-kickoff-survey).
       First sub-step shipped 2026-07-13: the `.wav` in-memory handoff
       (257,125-file A/B byte-identical; write-up in HISTORY). Next up: the

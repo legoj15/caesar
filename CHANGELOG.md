@@ -57,6 +57,19 @@ House rules:
   selector, named by its read-before-write notice; no `.sf2`/`.wav`/raw dump
   differs and no file is added or removed)
 
+### Changed
+
+- **`Rnd` argument bounds now survive parse; the midpoint stand-in is computed
+  at emit** (`Cseq.cpp`/`Cseq.hpp`). `ReadArgs` used to collapse a random
+  range's two raw `s16` bounds to their `(lo + hi) / 2` midpoint at parse time,
+  welding an exporter policy into the parsed command model. The model now
+  retains the raw pair as read (`CseqCmd::Arg1Rnd`/`Arg2Rnd`, kept UNSORTED —
+  the hardware stores them unsorted and both orders occur), and the emit walk
+  (`resolveArg`) computes the identical midpoint at the same point every
+  consumer already saw it. Groundwork for the stage-1 lossless round-trip
+  serializer. (`output-identical` — 82-archive / 257,125-file corpus A/B
+  byte-identical with identical stdout/stderr, exit 0.)
+
 ### Fixed
 
 - **macOS build fixed** — the in-memory sample handoff used an unqualified

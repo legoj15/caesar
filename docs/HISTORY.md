@@ -2201,3 +2201,43 @@ collisions (pre-existing, unobserved, now heavier — filed in Known bugs).
 Pattern note: one Opus implementation agent working against the survey's
 quirk contract, then parallel Opus adversarial review — the tier-1-fixes
 pattern, holding up well.
+
+## Suite stage 0 — the `Rnd` parse/emit split: the one lossless-model blocker (2026-07-13)
+
+The kickoff survey named a single genuine lossless-model blocker in the
+codebase: `Cseq::ReadArgs` collapsed a random-range (`Rnd`) argument's two raw
+`s16` bounds to their `(lo + hi) / 2` midpoint *at parse time*, so the parsed
+command model (`map<offset, CseqCmd>`) never held the source bytes for a `Rnd`
+argument — an exporter policy welded into the model layer, and the one thing
+standing between Cseq and a raw-backed round-trip serializer.
+
+The fix keeps the raw pair and moves the midpoint decision to the emit walk,
+byte-for-byte. Parse: `ReadArgs` gained an optional out-parameter and now hands
+the two bounds (in file order, **UNSORTED** — the hardware stores them unsorted
+and both orders occur in the corpus; a v0.5.1 finding, never to be normalized)
+back to the caller, which parks them on the command as `CseqCmd::Arg1Rnd` (the
+Arg1-typed slot: a note length, rest, program, `0xB0`–`0xE4` parameter, or an
+extended op's operand) or `Arg2Rnd` (the trailing `_t` `TimeRnd` ramp). `Args`
+still carries exactly one value per argument — for a `Rnd` slot the first bound,
+an inert placeholder that keeps the positional slot count identical for every
+structural/velocity consumer — because no consumer reads a `Rnd` slot's `Args`
+value directly. Emit: the sole `Rnd`-value consumer, `resolveArg`, computes the
+same `(Arg1Rnd.first + Arg1Rnd.second) / 2` (identical C++ truncation toward
+zero) at the exact point it previously read the pre-collapsed midpoint, so every
+downstream path — MIDI emission, the convert-time VM's operand reads (including
+`randvar`'s further `op / 2`), the clamps, and the "Rnd argument approximated by
+its range midpoint" notice — sees the same number as before. The `_t` `Rnd`
+midpoint was never emitted (the ramp flattens to a notice), so `Arg2Rnd` is
+retained purely for the round-trip and consumed by nothing today.
+
+Verification: full-corpus A/B (`tools/ab-verify`, baseline built fresh from the
+survey commit `96aef7a` in an isolated detached worktree, so the baseline
+genuinely lacks the change) — 82 archives, **257,125 output files
+byte-identical, stdout/stderr identical**, exit 0. (The harness's
+vacuous-comparison guard mis-fires when the new exe is built in a git worktree
+whose uncommitted edits the main checkout can't see; `-AllowVacuousComparison`
+was the correct override — the compared binaries genuinely differ, which is the
+guard's own binary-hash test.) Warning-clean MSVC build (CI is warnings-as-
+errors). This clears the stage-1 round-trip's Cseq blocker; the survey's
+secondary stage-1 prerequisite — VM diagnostics rebuilding raw source pointers
+rather than storing offsets — remains open.
