@@ -202,10 +202,12 @@ per stage. Status:
       `-w` heap-nondeterminism Known bug together (an intentional, isolated
       `-w` golden change). Full blueprint in
       [HISTORY.md](HISTORY.md#suite-stage-0--the-modelexporter-split-blueprint-2026-07-13-survey).
-      **Commit 1 of 5 done (2026-07-14): `Cwav` split into `Parse` (decode into
-      a retained model — codec, per-channel DSP context as span-relative
-      offsets, raw DATA span, dropped header words) and `ExportWav`; four
-      commits remain (`Cwar`, `Cbnk`, `Cseq`, `Csar`+`Cgrp`).**
+      **Commits 1–3 of 5 done (2026-07-14): `Cwav` → `Parse`/`ExportWav`;
+      `Cwar` → `Parse` (cwav table + FILE span + `cwarVersion`)/`Export`; `Cbnk`
+      decoupled from the live `Cwav` — `CbnkCwav` shrinks to the raw sample ref,
+      resolution + the `<id>.wav` echo move into the SF2 emit phase, and the
+      logged-then-dropped note words are retained. Two commits remain (`Cseq`,
+      `Csar`+`Cgrp`).**
 - [ ] **Stage 1 — byte-identical round-trip** of BCSEQ/BCBNK/BCSAR from a
       raw-backed model (**the next milestone** — the cheapest complete proof
       the format is understood, and the serializer everything else sits on).

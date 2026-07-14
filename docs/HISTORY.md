@@ -2822,3 +2822,116 @@ commit 3 can migrate `CbnkCwav` without touching `Cwav`. `Converted` is now set
 at the end of `Parse` (decode succeeded) rather than after the write; on the only
 path where that differs — a write-failure throw — the process is already
 unwinding fatally, so it is unobservable and the A/B confirms it.
+
+## Suite stage 0 — model/exporter split, commits 2–3: Cwar + Cbnk (2026-07-14)
+
+The blueprint's next two per-class splits. Commit 2 (`14fb9b5`) is the small one
+(`Cwar`); commit 3 is the boundary-violation fix (`Cbnk`). Both are
+output-identical; both cleared the full gate. Commit order was Cwar → Cbnk
+because Cwar is the leaf-of-the-two and Cbnk depends on `Cwar::Cwavs` staying
+exactly as before.
+
+**Commit 2 — Cwar: model = cwav table + FILE span.** `Cwar::Extract` did two
+jobs in one method: parse the CWAR/INFO/FILE headers, then in a second loop write
+each `.bcwav` blob and drive the child `Cwav`'s `Parse`/`ExportWav`. It is now
+`Parse` (headers → model) and `Export` (dump + recurse), with `Csar`/`Cgrp`
+calling them back to back per wave archive. The retained model gained three
+members: `Version` (the previously `[[maybe_unused]]` `cwarVersion`),
+`FileSpanOffset`/`FileSpanLength` (the FILE section as an offset+length window
+into `Data`), and `CwavRecords` (the INFO cwav table, previously the
+function-local `vector<CwarCwav> cwavs`). `CwarCwav::Offset` changed from a raw
+`uint8_t*` to a **span-relative `uint32_t`** (against `Data`), matching commit
+1's convention — the record carries no raw-pointer state for the stage-1 buffer
+drop. `Export` reconstructs `Data + Offset`, which is arithmetically the exact
+value the old `Data + fileOffset + 8 + …` pointer held, so every
+`CheckBounds`/blob-write/child-construct sees the same address and the `.bcwav`
+bytes, stdout echoes, and diagnostics are unchanged. The per-file interleave
+(blob write → child echo → child `Parse` → child `ExportWav`) is preserved inside
+the one `Export` loop — never hoisted into two loops — so the stdout echo order
+is byte-for-byte what it was.
+
+**Commit 3 — Cbnk: the parser stops reaching into live Cwav objects.** The
+violation the blueprint flagged: the CWAV-table walk (parse) filled `CbnkCwav`
+with exporter-resolved data (`ChanCount`, `SampleRate`, `LeftSamples`,
+`RightSamples`, `Loop`, `LoopStart`, `LoopEnd`) by dereferencing live `Cwav`
+objects through the `Cwars` map, and emitted the per-sample `<id>.wav` stdout
+echo there via a balanced empty-range `Push`/`Pop`. Restructure:
+  - **`CbnkCwav` shrank to the raw record** — `{ Cwar, Id, Key }` (war id,
+    sample id, and the note's root key, filled by the instrument walk). The seven
+    resolved fields are gone from the model.
+  - **Live-`Cwav` resolution moved into the SF2 sample-creation loop** (the
+    exporter): the positional wave-archive lookup, the missing/absent/unconverted
+    **guard-throw**, the `<id>.wav` **echo**, the PCM read (mono / stereo / the
+    >2-channel frame-interleave reproduction), and the odd-`SampleMode` loop-point
+    recovery all now run there, into locals, feeding `NewSample` (with
+    `std::move` of the decoded PCM, since `SFSample`'s ctor takes the vector by
+    value). The instrument-zone build reads `ChanCount` from the same live `Cwav`
+    it already resolves for `SampleMode`, rather than from the (now-absent) model
+    field.
+  - **The logged-then-dropped note words are retained as typed `CbnkNote`
+    fields** — `Word08`, `Word0C`, the 0x6001 quartet
+    (`Word6001_10/14/18/1C`), the `Flags` word at 0x14, `Word28`, and the ADSHR
+    `DataRef2C/30/34` chain. Each is read into a local, then `Analyse`d (the
+    `.log` calls are byte-unchanged — same read order, same value), then stored.
+    They are round-trip state, unused by today's exporter.
+
+**The echo-relocation verification story (the one risk in commit 3).** Moving the
+`<id>.wav` echo out of the parse walk (before the instrument walk) into the SF2
+sample-creation loop (after it) relocates the *only* observable output inside a
+single `Cbnk` conversion. Verified byte-safe three ways from the code, then
+confirmed by the A/B:
+  - **stdout:** `Push` is the only thing that writes stdout (`cout <<
+    FileNames.top()`), and the sole `Push` inside `Cbnk::Convert` is this echo
+    (Cbnk's own frame is pushed in the *constructor*, not `Convert`). So the echo
+    is the only stdout in the whole conversion; relocating it keeps the same
+    cwav-index order (0…N−1, skipping `Id ≥ 0xF000` both before and after), and
+    with nothing else on stdout to interleave against, the stream is identical.
+  - **`.log` (Analyse):** `Analyse` tags each row with `FileNames.top()`. Because
+    the `<id>.wav` `Push`/`Pop` is balanced, the instrument walk's `Analyse` rows
+    saw the Cbnk frame on top *before* the move (echo already popped) and still
+    see it *after* (echo not yet pushed) — identical rows, identical order.
+  - **`-w` stderr (Warning):** the substitution warning (out-of-range note→cwav
+    ref) and the release-127 warning position via `pos - Offsets.top()`; the
+    balanced `Push`/`Pop` means `Offsets.top()` is the Cbnk `Data` at both
+    warning sites regardless of where the echo lives. Neither warning moved. The
+    corpus A/B reports **CONSOLE (stdout/stderr): identical**, which settles it.
+  - One deliberate, unobservable behaviour change: the missing-sample guard-throw
+    now fires in the exporter (after the instrument walk) instead of the parse
+    walk. On healthy data it never fires (confirmed by the whole-corpus A/B); on
+    corrupt data the abort would surface a few parse warnings earlier than before,
+    but the process aborts either way and the corpus has no such archive.
+
+**Gate evidence (each commit independently).**
+  - *Commit 2 (`14fb9b5`)*: warning-clean MSVC Release build; diagnostics goldens
+    **17/17 byte-identical** (exit 0); corpus A/B vs `4dc3c12` (commit 1) **82
+    archives / 257,125 files byte-identical, stdout/stderr identical, exit 0**.
+  - *Commit 3 (this commit)*: warning-clean MSVC Release build (the `std::move`
+    handoffs and the new `<utility>` include compile clean under the three
+    compilers' `-Werror` discipline); diagnostics goldens **17/17 byte-identical**
+    (exit 0) — the `multi-bleed` fixture runs the F-Zero `caravel` bank, so the
+    `<id>.wav` echoes and the note-word `.log` rows are directly pinned; corpus
+    A/B vs `14fb9b5` (commit 2) **82 archives / 257,125 files byte-identical,
+    stdout/stderr identical, exit 0**.
+
+**For commit 4 (`Cseq`), the executor must know:**
+  - The `Cseq` model is already the most complete (the `Rnd` parse/emit split
+    resolved the one lossless-model blocker earlier in stage 0). What remains per
+    the blueprint: retain `cseqVersion`; store each command's own **source offset
+    + `dataOffset`**; and settle canonical re-encoding rules (suffix/prefix order,
+    VarLen args).
+  - **The stored-offset work is also the fix for the open `-w` heap-nondeterminism
+    Known bug.** The emit walk today reconstructs `here = Data + dataOffset + 8 +
+    i->first` at ~40 `Warning` sites (Cseq.cpp:913 and three siblings) — a
+    position-by-pointer-subtraction against the shared stack top. An
+    offset-taking `Warning` overload plus stored command offsets fixes both at
+    once. This is the one **intentional, isolated `-w` golden change** in the
+    five-commit plan: unlike commits 1–3 (which are golden-identical), commit 4
+    will change the `-w` positional goldens and must be re-pinned with
+    `diag-goldens -Capture -Force`, with the diff reviewed as expected. The
+    default-surface A/B (no `-w`) must stay byte-identical.
+  - Keep the phase boundary **per-file, never global** — `Cseq::Convert` splitting
+    into parse-then-emit must not let a global parse-all-then-emit-all reorder the
+    `-w` stderr across sequences.
+  - `Cwar::Parse`/`Export` and `Cwav::Parse`/`ExportWav` are the precedent for the
+    method split; `Cseq`'s public entry is `Convert` (single caller sites in
+    `Csar`/`Cgrp`, invoked back to back if split).

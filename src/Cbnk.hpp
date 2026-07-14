@@ -11,21 +11,17 @@
 
 struct ParseContext;
 
+// The raw sample reference the CWAV table parses: which wave-archive (Cwar) and
+// which sample within it (Id). Key is the note's root key, filled in by the
+// instrument walk when a note references this sample. The decoded PCM, sample
+// rate, channel count and loop points are NOT stored here -- they are resolved
+// live from the owning Cwav at SF2-emit time, so the parser never reaches into
+// live Cwav objects (see Cbnk::Convert's sample-creation loop).
 struct CbnkCwav
 {
 	uint32_t Cwar;
 	uint32_t Id;
 	uint32_t Key;
-	
-	uint16_t ChanCount;
-	uint32_t SampleRate;
-
-	std::vector<int16_t> LeftSamples;
-	std::vector<int16_t> RightSamples;
-
-	bool Loop = false;
-	uint32_t LoopStart;
-	uint32_t LoopEnd;
 };
 
 struct WaveSmpl
@@ -56,6 +52,23 @@ struct CbnkNote
 	uint8_t Sustain;
 	uint8_t Hold;
 	uint8_t Release;
+
+	// Note words the parse walk reads and logs (Ctx.Analyse) but does not yet act
+	// on, retained here so the model is lossless for the stage-1 round-trip. The
+	// 0x6001 quartet is only present on layered (0x6001) notes; Flags is the note
+	// flags word at 0x14 (0x21F on every observed bank); DataRef2C/30/34 are the
+	// self-referential ADSHR DataRef chain (see the tune history in HISTORY.md).
+	uint32_t Word08 = 0;
+	uint32_t Word0C = 0;
+	uint32_t Word6001_10 = 0;
+	uint32_t Word6001_14 = 0;
+	uint32_t Word6001_18 = 0;
+	uint32_t Word6001_1C = 0;
+	uint32_t Flags = 0;
+	uint16_t Word28 = 0;
+	uint32_t DataRef2C = 0;
+	uint32_t DataRef30 = 0;
+	uint32_t DataRef34 = 0;
 };
 
 struct CbnkInst

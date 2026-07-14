@@ -69,6 +69,16 @@ House rules:
   header words — groundwork for the round-trip serializer. (`output-identical` —
   82-archive / 257,125-file corpus A/B byte-identical with identical
   stdout/stderr, exit 0; 17-surface diagnostics goldens byte-identical.)
+- **`Cwar` and `Cbnk` likewise parse into a retained model, then export from
+  it** (stage-0 model/exporter split, commits 2–3 of 5). `Cwar::Extract` splits
+  into `Parse` (the cwav offset+length table, the FILE span, and `cwarVersion`)
+  and `Export` (dump each `.bcwav`, then construct + `Parse`/`ExportWav` the
+  child `Cwav`); `Cbnk`'s `CbnkCwav` shrinks to the raw sample reference, with
+  live-`Cwav` resolution (decoded PCM, sample rate, loop points, the per-sample
+  `<id>.wav` echo) moved out of the parse walk and into the SF2-emit phase, and
+  the note words it previously logged-then-dropped now retained on the model.
+  (`output-identical` — 82-archive / 257,125-file corpus A/B byte-identical with
+  identical stdout/stderr, exit 0; 17-surface diagnostics goldens byte-identical.)
 - **Embedded wave archives and waves are parsed from the parent's buffer
   instead of re-reading the file they were just written to** (stage-0 per-file
   split, first tranche: `Cwar`, then `Cwav`). `Csar`/`Cgrp` still write each

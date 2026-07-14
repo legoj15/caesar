@@ -14,6 +14,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 using namespace sf2cute;
@@ -209,87 +210,16 @@ bool Cbnk::Convert()
 	{
 		pos = Data + infoOffset + 8 + cwavOffset + 4 + (i * 8);
 
-		// Value-initialize: Key is only assigned when a note references this
-		// sample, but every sample with Id < 0xF000 is still emitted (with Key as
-		// its shdr byOriginalKey). Without this, an unreferenced sample wrote an
-		// uninitialized byte, making SF2 output non-deterministic.
+		// The parse -> model seam: this walk records only the raw sample reference
+		// (war id, sample id). Resolving the live Cwav -- decoded PCM, sample rate,
+		// loop points, existence -- is the SF2 exporter's job below, not the
+		// parser's. Value-initialize: Key is only assigned when a note references
+		// this sample, but every sample with Id < 0xF000 is still emitted (with Key
+		// as its shdr byOriginalKey). Without this, an unreferenced sample would
+		// emit an uninitialized byte, making SF2 output non-deterministic.
 		CbnkCwav cwav{};
 		cwav.Cwar = Ctx.ReadFixLen(pos, 4) - 0x5000000;
 		cwav.Id = Ctx.ReadFixLen(pos, 4);
-
-		size_t j = 0;
-		auto it = Cwars->begin();
-
-		for (; it != Cwars->end(); ++it, ++j)
-		{
-			if (j == cwav.Cwar)
-			{
-				break;
-			}
-		}
-
-		if (cwav.Id < 0xF000)
-		{
-			// The sample was already decoded in memory when its wave-archive was
-			// extracted; read it back from the live Cwav instead of re-opening the
-			// .wav. The positional lookup above located that wave-archive (advance
-			// begin() by Cwar). Guard the cases that were previously a missing-file
-			// throw or a crash: past the map's end, an absent wave-archive (nullptr),
-			// an out-of-range id, or a sample that never converted. On healthy data
-			// none of these fire, so this matches the old RequireOpen-throws contract.
-			if (it == Cwars->end() || it->second == nullptr || cwav.Id >= it->second->Cwavs.size() || !it->second->Cwavs[cwav.Id]->Converted)
-			{
-				throw runtime_error("could not open or read file (missing, empty, or unreadable): " + to_string(cwav.Id) + ".wav");
-			}
-
-			Cwav* src = it->second->Cwavs[cwav.Id];
-
-			// Keep the per-sample stdout echo (empty range: no reads happen here now).
-			Ctx.Push(to_string(cwav.Id) + ".wav", nullptr, 0);
-
-			cwav.ChanCount = src->ChanCount;
-			cwav.SampleRate = src->SampleRate;
-
-			if (src->ChanCount == 1)
-			{
-				cwav.LeftSamples = src->Channels[0];
-			}
-			else if (src->ChanCount == 2)
-			{
-				cwav.LeftSamples = src->Channels[0];
-				cwav.RightSamples = src->Channels[1];
-			}
-			else
-			{
-				// The old read-back pushed every 2-byte word into LeftSamples unless
-				// the wave had exactly two channels, so a >2-channel wave collapsed
-				// into one frame-interleaved LeftSamples stream. Reproduce that.
-				for (size_t s = 0; s < src->Channels[0].size(); ++s)
-				{
-					for (uint16_t c = 0; c < src->ChanCount; ++c)
-					{
-						cwav.LeftSamples.push_back(src->Channels[c][s]);
-					}
-				}
-			}
-
-			// A smpl chunk is written only when SampleMode is odd; it carried the raw
-			// loop points, which the old code recovered even when the decoded PCM was
-			// empty (the IMA-ADPCM case: a smpl chunk but zero samples).
-			if ((src->SampleMode % 2) != 0)
-			{
-				cwav.Loop = true;
-				cwav.LoopStart = src->LoopStart;
-				cwav.LoopEnd = src->LoopEnd;
-			}
-			else
-			{
-				cwav.LoopStart = 0;
-				cwav.LoopEnd = static_cast<uint32_t>(cwav.LeftSamples.size());
-			}
-
-			Ctx.Pop();
-		}
 
 		cwavs.push_back(cwav);
 	}
@@ -415,15 +345,35 @@ bool Cbnk::Convert()
 			uint32_t id = Ctx.ReadFixLen(pos, 4);
 
 			if (!Ctx.Assert(pos, 0x8, Ctx.ReadFixLen(pos, 4))) { return false; }
-			Ctx.Analyse("Note 0x08", Ctx.ReadFixLen(pos, 4));
-			Ctx.Analyse("Note 0x0C", Ctx.ReadFixLen(pos, 4));
+
+			// Read each retained word into a local, then Analyse (feeding .log,
+			// unchanged) and store it in the model. Reading into the local keeps the
+			// exact read order and value the inline Analyse argument had.
+			uint32_t note08 = Ctx.ReadFixLen(pos, 4);
+			Ctx.Analyse("Note 0x08", note08);
+			insts[i].Notes[j].Word08 = note08;
+
+			uint32_t note0C = Ctx.ReadFixLen(pos, 4);
+			Ctx.Analyse("Note 0x0C", note0C);
+			insts[i].Notes[j].Word0C = note0C;
 
 			if (id == 0x6001)
 			{
-				Ctx.Analyse("Note 0x6001 0x10", Ctx.ReadFixLen(pos, 4));
-				Ctx.Analyse("Note 0x6001 0x14", Ctx.ReadFixLen(pos, 4));
-				Ctx.Analyse("Note 0x6001 0x18", Ctx.ReadFixLen(pos, 4));
-				Ctx.Analyse("Note 0x6001 0x1C", Ctx.ReadFixLen(pos, 4));
+				uint32_t note6001_10 = Ctx.ReadFixLen(pos, 4);
+				Ctx.Analyse("Note 0x6001 0x10", note6001_10);
+				insts[i].Notes[j].Word6001_10 = note6001_10;
+
+				uint32_t note6001_14 = Ctx.ReadFixLen(pos, 4);
+				Ctx.Analyse("Note 0x6001 0x14", note6001_14);
+				insts[i].Notes[j].Word6001_14 = note6001_14;
+
+				uint32_t note6001_18 = Ctx.ReadFixLen(pos, 4);
+				Ctx.Analyse("Note 0x6001 0x18", note6001_18);
+				insts[i].Notes[j].Word6001_18 = note6001_18;
+
+				uint32_t note6001_1C = Ctx.ReadFixLen(pos, 4);
+				Ctx.Analyse("Note 0x6001 0x1C", note6001_1C);
+				insts[i].Notes[j].Word6001_1C = note6001_1C;
 			}
 
 			uint32_t cwav = Ctx.ReadFixLen(pos, 4);
@@ -450,6 +400,7 @@ bool Cbnk::Convert()
 
 			uint32_t noteFlags = Ctx.ReadFixLen(pos, 4);
 			Ctx.Analyse("Note 0x14", noteFlags);
+			insts[i].Notes[j].Flags = noteFlags;
 
 			// For ordinary (non-0x6001) notes this word is the note's flags, which
 			// is 0x21F across every observed bank; the field layout parsed below is
@@ -478,14 +429,25 @@ bool Cbnk::Convert()
 			memcpy(&tune, &tuneBits, sizeof(tune));
 			insts[i].Notes[j].Tune = tune;
 
-			Ctx.Analyse("Note 0x28", Ctx.ReadFixLen(pos, 2));
+			uint16_t note28 = static_cast<uint16_t>(Ctx.ReadFixLen(pos, 2));
+			Ctx.Analyse("Note 0x28", note28);
+			insts[i].Notes[j].Word28 = note28;
 
 			insts[i].Notes[j].Interpolation = Ctx.ReadFixLen(pos, 1);
 
 			if (!Ctx.Assert(pos, 0x0, Ctx.ReadFixLen(pos, 1))) { return false; }
-			Ctx.Analyse("Note 0x2C", Ctx.ReadFixLen(pos, 4));
-			Ctx.Analyse("Note 0x30", Ctx.ReadFixLen(pos, 4));
-			Ctx.Analyse("Note 0x34", Ctx.ReadFixLen(pos, 4));
+
+			uint32_t note2C = Ctx.ReadFixLen(pos, 4);
+			Ctx.Analyse("Note 0x2C", note2C);
+			insts[i].Notes[j].DataRef2C = note2C;
+
+			uint32_t note30 = Ctx.ReadFixLen(pos, 4);
+			Ctx.Analyse("Note 0x30", note30);
+			insts[i].Notes[j].DataRef30 = note30;
+
+			uint32_t note34 = Ctx.ReadFixLen(pos, 4);
+			Ctx.Analyse("Note 0x34", note34);
+			insts[i].Notes[j].DataRef34 = note34;
 
 			insts[i].Notes[j].Attack = Ctx.ReadFixLen(pos, 1);
 			insts[i].Notes[j].Decay = Ctx.ReadFixLen(pos, 1);
@@ -513,14 +475,93 @@ bool Cbnk::Convert()
 			continue;
 		}
 
-		if (cwavs[i].ChanCount == 1)
+		// Resolve the live Cwav here, in the exporter -- the parse walk above only
+		// recorded the raw reference. The sample was decoded in memory when its
+		// wave-archive was extracted; read it back from the live Cwav instead of
+		// re-opening the .wav. The positional lookup locates that wave-archive
+		// (advance begin() by Cwar). Guard the cases that were previously a
+		// missing-file throw or a crash: past the map's end, an absent wave-archive
+		// (nullptr), an out-of-range id, or a sample that never converted. On healthy
+		// data none of these fire, so this matches the old RequireOpen-throws contract.
+		size_t k = 0;
+		auto it = Cwars->begin();
+
+		for (; it != Cwars->end(); ++it, ++k)
 		{
-			leftSamples[cwavs[i].Id] = sf2.NewSample(to_string(cwavs[i].Id), cwavs[i].LeftSamples, cwavs[i].LoopStart, cwavs[i].LoopEnd, cwavs[i].SampleRate, cwavs[i].Key, 0);
+			if (k == cwavs[i].Cwar)
+			{
+				break;
+			}
+		}
+
+		if (it == Cwars->end() || it->second == nullptr || cwavs[i].Id >= it->second->Cwavs.size() || !it->second->Cwavs[cwavs[i].Id]->Converted)
+		{
+			throw runtime_error("could not open or read file (missing, empty, or unreadable): " + to_string(cwavs[i].Id) + ".wav");
+		}
+
+		Cwav* src = it->second->Cwavs[cwavs[i].Id];
+
+		// Keep the per-sample stdout echo (empty range: no reads happen here now).
+		// Relocated with the resolution from the parse-phase CWAV walk; the echo is
+		// the only stdout inside a Cbnk conversion, so its overall order is unchanged.
+		Ctx.Push(to_string(cwavs[i].Id) + ".wav", nullptr, 0);
+
+		uint16_t chanCount = src->ChanCount;
+		uint32_t sampleRate = src->SampleRate;
+
+		vector<int16_t> leftPcm;
+		vector<int16_t> rightPcm;
+
+		if (src->ChanCount == 1)
+		{
+			leftPcm = src->Channels[0];
+		}
+		else if (src->ChanCount == 2)
+		{
+			leftPcm = src->Channels[0];
+			rightPcm = src->Channels[1];
 		}
 		else
 		{
-			leftSamples[cwavs[i].Id] = sf2.NewSample(to_string(cwavs[i].Id) + "l", cwavs[i].LeftSamples, cwavs[i].LoopStart, cwavs[i].LoopEnd, cwavs[i].SampleRate, cwavs[i].Key, 0);
-			rightSamples[cwavs[i].Id] = sf2.NewSample(to_string(cwavs[i].Id) + "r", cwavs[i].RightSamples, cwavs[i].LoopStart, cwavs[i].LoopEnd, cwavs[i].SampleRate, cwavs[i].Key, 0);
+			// The old read-back pushed every 2-byte word into LeftSamples unless the
+			// wave had exactly two channels, so a >2-channel wave collapsed into one
+			// frame-interleaved LeftSamples stream. Reproduce that.
+			for (size_t s = 0; s < src->Channels[0].size(); ++s)
+			{
+				for (uint16_t c = 0; c < src->ChanCount; ++c)
+				{
+					leftPcm.push_back(src->Channels[c][s]);
+				}
+			}
+		}
+
+		// A smpl chunk is written only when SampleMode is odd; it carried the raw
+		// loop points, which the old code recovered even when the decoded PCM was
+		// empty (the IMA-ADPCM case: a smpl chunk but zero samples).
+		uint32_t loopStart;
+		uint32_t loopEnd;
+
+		if ((src->SampleMode % 2) != 0)
+		{
+			loopStart = src->LoopStart;
+			loopEnd = src->LoopEnd;
+		}
+		else
+		{
+			loopStart = 0;
+			loopEnd = static_cast<uint32_t>(leftPcm.size());
+		}
+
+		Ctx.Pop();
+
+		if (chanCount == 1)
+		{
+			leftSamples[cwavs[i].Id] = sf2.NewSample(to_string(cwavs[i].Id), move(leftPcm), loopStart, loopEnd, sampleRate, cwavs[i].Key, 0);
+		}
+		else
+		{
+			leftSamples[cwavs[i].Id] = sf2.NewSample(to_string(cwavs[i].Id) + "l", move(leftPcm), loopStart, loopEnd, sampleRate, cwavs[i].Key, 0);
+			rightSamples[cwavs[i].Id] = sf2.NewSample(to_string(cwavs[i].Id) + "r", move(rightPcm), loopStart, loopEnd, sampleRate, cwavs[i].Key, 0);
 
 			leftSamples[cwavs[i].Id]->set_link(rightSamples[cwavs[i].Id]);
 			rightSamples[cwavs[i].Id]->set_link(leftSamples[cwavs[i].Id]);
@@ -615,7 +656,9 @@ bool Cbnk::Convert()
 						return gens;
 					};
 
-					if (insts[i].Notes[j].Cwav->ChanCount == 1)
+					// Channel count comes from the live Cwav (resolved via the same
+					// positional lookup as sampleModes above), not the raw model record.
+					if (it->second->Cwavs[insts[i].Notes[j].Cwav->Id]->ChanCount == 1)
 					{
 						instrumentZones.push_back(SFInstrumentZone(leftSamples[insts[i].Notes[j].Cwav->Id], zoneGens(pan), vector<SFModulatorItem> { }));
 					}
