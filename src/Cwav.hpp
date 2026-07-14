@@ -48,7 +48,13 @@ struct Cwav
 
 	bool Converted = false;
 
-	Cwav(const char* fileName, ParseContext& ctx);
+	// The owning wave archive hands over the span its just-written .bcwav was
+	// serialised from (a pointer + length into the Cwar's buffer), so the child
+	// no longer re-reads the file it was just written from. FileName stays the
+	// full output path (the .wav is written beside it). Data is borrowed, never
+	// owned: the Cwar frees its Cwav children before its own buffer, so the span
+	// outlives this Cwav regardless of whether the Cwar owns or borrows it.
+	Cwav(const std::string& fileName, uint8_t* data, std::streamoff length, ParseContext& ctx);
 	~Cwav();
 	bool Convert();
 };

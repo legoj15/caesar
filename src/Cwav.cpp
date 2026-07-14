@@ -13,26 +13,30 @@ using namespace std;
 
 const int8_t nibbles[] = { 0, 1, 2, 3, 4, 5, 6, 7, -8, -7, -6, -5, -4, -3, -2, -1 };
 
-Cwav::Cwav(const char* fileName, ParseContext& ctx) : Ctx(ctx), FileName(fileName)
+Cwav::Cwav(const string& fileName, uint8_t* data, streamoff length, ParseContext& ctx) : Ctx(ctx), FileName(fileName)
 {
-	ifstream ifs(FileName, ios::binary | ios::ate);
+	Length = length;
 
-	Length = ifs.tellg();
-	Ctx.RequireOpen(ifs.good(), Length, FileName);
-	Data = new uint8_t[Length];
+	// The parent wave archive already holds these bytes -- the span its
+	// just-written .bcwav was serialised from -- so borrow them directly instead
+	// of re-opening the file we just wrote. A zero-length span is the same
+	// degenerate condition the old file-path constructor rejected on an empty
+	// re-read (RequireOpen on length <= 0); preserve that error identically, and
+	// fire it before the Push echo so the stdout stream stays byte-for-byte
+	// unchanged.
+	Ctx.RequireOpen(true, Length, FileName);
+
+	Data = data;
 
 	Ctx.Push(filesystem::path(FileName).filename().string(), Data, Length);
-
-	ifs.seekg(0, ios::beg);
-	ifs.read(reinterpret_cast<char*>(Data), Length);
-	ifs.close();
 }
 
 Cwav::~Cwav()
 {
 	Ctx.Pop();
 
-	delete[] Data;
+	// Data is borrowed from the parent wave archive's buffer (freed by the Cwar,
+	// after this child); do not delete it here.
 }
 
 bool Cwav::Convert()

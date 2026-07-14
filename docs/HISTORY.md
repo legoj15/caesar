@@ -2420,3 +2420,123 @@ fixed here: it is a heap-layout bug (positions subtracted across unrelated
 allocations), independent of context lifetime, and now stands as its own Known-
 bugs entry with the corrected broader scope (any wave/bank-decode warning, not
 only group-resident conversions).
+
+## Suite stage 0 — the per-file split, tranche 1: Cwar + Cwav span construction (2026-07-13)
+
+The first tranche of the per-file parser/exporter split (step 3), which the
+kickoff survey widened to also retire the *second* disk round-trip family the
+plan never named: `Csar`/`Cgrp` write every embedded child (`.bcwar`/`.bcwav`/…)
+to disk as user output and then immediately re-opened it through the child's
+file-path constructor (open → `tellg` → `new` buffer → `read` → `close`). This
+tranche gives the two easiest classes — `Cwar`, then `Cwav`, the settled order
+by measured difficulty — a **span-based** construction path: the parent hands the
+child its bytes directly (full output name + pointer + length into the parent's
+already-loaded buffer), so the child no longer re-reads the file it was just
+written from. The disk **write** stays untouched — the extracted `.bcwar`/
+`.bcwav` files (and `Cwav`'s decoded `.wav`) are the tool's output. One class per
+commit, each passing the full gate. The `FileName` member stays the full output
+path in both classes (it composes the child-write directory for `Cwar` and the
+`.bcwav`→`.wav` output name for `Cwav`), and the `Push` echo keeps deriving the
+bare filename from it, so the stdout name stream is untouched.
+
+**Borrow vs copy — decided per construction site by proven lifetime, not by
+class.** Borrowing the parent's span (rather than copying) preserves the
+diagnostic position arithmetic exactly (`pos − Offsets.top()` is relative, so it
+is identical whether the base is a heap copy or a window into the parent) and
+costs zero extra memory, but it is only sound if the parent buffer outlives the
+child. The three sites split two ways:
+
+- **`Cwav` (sole site, `Cwar::Extract`) — borrow.** Each `Cwav` is stored in
+  `Cwar::Cwavs` and `~Cwar` deletes every `Cwav` *before* releasing its own
+  `Data`, so the parent span outlives the child unconditionally — including when
+  that `Data` is itself a borrowed window (the borrow chains safely because the
+  destruction order is child-before-parent at every link). `Cwav::Data` is now
+  always borrowed and the destructor never frees it. (Confirmed harmless beyond
+  parse: `Cbnk` reads decoded `Channels`/`SampleMode`/`ChanCount`/`Converted`
+  off the live `Cwav`, never `Cwav::Data`, so the borrowed span is dereferenced
+  only during `Convert`, synchronously, while the parent buffer is alive.)
+- **`Cwar` @ `Csar` (`Cwars[id]`) — borrow.** The `Cwar` lives in `Csar`'s own
+  `Cwars` map and `~Csar` deletes each `Cwar` before freeing `Csar::Data`, so the
+  parent outlives the child. `ownsData = false`.
+- **`Cwar` @ `Cgrp` (`(*Cwars)[id]`) — owned copy.** This is the one site where
+  borrow is unsafe: the group-resident `Cwar` is inserted into the
+  **archive-lifetime shared** `Cwars` map (owned by `Csar`, read later by
+  `Cbnk`), but it is built from the **stack-local** `Cgrp`'s `Data`, which is
+  freed when that `Cgrp` is destroyed at the end of `Csar`'s group loop — so the
+  child outlives the buffer it was built from. `ownsData = true` takes a private
+  copy; `~Cwar` frees `Data` only when owned. (The copy is a `std::copy` of the
+  encoded `.bcwar` bytes, smaller than the decoded PCM already retained by the
+  in-memory handoff.) Correctness beats the copy: even though today the group
+  `Cwar`'s `Data` is dereferenced only inside `Cgrp::Extract` (while the buffer is
+  still alive) and so a borrow would not *currently* fault, leaving a dangling
+  `Data` pointer in a long-lived object is exactly the latent trap the next
+  tranche (Cgrp/Cbnk) would trip on, so it is copied now.
+
+**Error path.** The file-path constructor's `RequireOpen` throw ("could not open
+or read file (missing, empty, or unreadable): …") fired only if the just-written
+file could not be re-read — an I/O case the corpus never exercises — but it *also*
+covered a zero-length re-read (`length <= 0`). The span path reproduces that
+second, reachable-in-principle condition with an explicit
+`Ctx.RequireOpen(true, Length, FileName)` (stream-ok true, so only the
+`length <= 0` branch can fire), reusing the identical error text and the full
+output path, and placed **before** the `Push` echo exactly as the old order was —
+so a degenerate empty embedded child throws before echoing its name, keeping the
+stdout stream byte-identical. Not observed on the corpus.
+
+**File-path constructors removed.** After the migration no caller of either class
+uses the old `(const char*, ParseContext&)` constructor (the only sites were the
+three migrated here), so both were deleted; the compiler's clean build confirms
+no site was missed.
+
+**One disclosed, corpus-invisible edge in the bounds net.** A borrowed child now
+registers its `CheckBounds` range as a *sub-range* of the parent's still-registered
+range, where the old re-read gave the child an independent heap buffer. Because
+`CheckBounds` scans `Buffers` top-down and the child range is pushed last, every
+in-bounds read matches the child range first and behaves identically. The only
+divergence is a read whose `pos` lands entirely **past the child's declared
+length**: the old isolated buffer threw "a file offset points outside the loaded
+data"; the borrowed sub-range falls through to the parent range and, if `pos` is
+within the parent, returns OK. This can only happen on a malformed/truncated
+embedded file (a well-formed child never addresses past its own length), so it is
+absent from the whole A/B corpus — and the A/B itself is the guard: any corpus
+file that hit it would flip old-throw to new-succeed and show as a diff. It did
+not. Flagged here as the inherent flip-side of borrowing; if it ever matters, the
+fix is to copy that path too.
+
+**Per-commit verification (each commit passed all three gates).**
+
+- **Commit 1 — `Cwar` (`21e2e8c`).** Signature `Cwar(const std::string&, uint8_t*
+  data, std::streamoff length, bool ownsData, ParseContext&)`; `Csar` borrows,
+  `Cgrp` owns; `Cwav` construction inside `Cwar::Extract` left on the old path
+  this commit. Warning-clean MSVC Release build; diag-goldens **17/17 surfaces
+  byte-identical** (exit 0); corpus A/B (dirty tree, baseline `HEAD` = `ba4566b`)
+  **82 archives / 257,125 files byte-identical, stdout/stderr identical, exit 0**
+  (baseline extract 84 s, new 71 s).
+- **Commit 2 — `Cwav` (this commit).** Signature `Cwav(const std::string&,
+  uint8_t* data, std::streamoff length, ParseContext&)` (borrow-only); the sole
+  site in `Cwar::Extract` migrated; tranche docs. Warning-clean build;
+  diag-goldens **17/17 byte-identical** (exit 0); corpus A/B (baseline `HEAD` =
+  `21e2e8c`, the `Cwar` commit) **82 archives / 257,125 files byte-identical,
+  stdout/stderr identical, exit 0** (baseline 82 s, new 69 s).
+
+Runtime effect, observed not formally measured: dropping the per-child re-read
+makes extraction modestly faster (the A/B's own new-vs-baseline extract times ran
+~13 s / ~16 % quicker on the 82-archive corpus, though that A/B also rebuilds and
+caches so it is a soft signal, not a benchmark). No memory change of note — the
+only new allocation is the group-resident `Cwar` copy (encoded bytes, rare path).
+
+**For the next tranche's executor (Cgrp, then Cbnk).** The Cgrp→Cbnk→Csar→Cseq
+order continues. Two things this tranche surfaced that bear on Cgrp/Cbnk:
+(1) `Cgrp` is the lifetime-hazard class — it is a stack-local in `Csar::Extract`
+that populates the *archive-lifetime shared* `Cwars` map and defers its `Cbnk`
+conversions (constructs `Cbnk` heap objects into `Cgrp::Cbnks` during the file
+loop, converts them all later in the same `Extract`), so any child a migrated
+`Cgrp` hands a borrowed span must have the same own-vs-borrow analysis done
+against `Cgrp::Data`'s stack lifetime, not assumed safe. (2) The group `.bcbnk`/
+`.bcseq`/`.bcgrp` writes in `Cgrp::Extract` are the direct analogues of the
+`.bcwar` write migrated here (same `pos += 8; len = read; pos -= 16; write(pos,
+len)` shape), so the same span hand-off applies — and `Cbnk`/`Cseq` are
+constructed there too, which is why their migrations are entangled with `Cgrp`'s.
+The pre-existing `Cgrp` map-insert-by-assignment WARC-id leak (Known bugs) is
+untouched and now also copies on the group path, but the leak is the overwrite,
+not the copy.

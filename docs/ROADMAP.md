@@ -178,8 +178,16 @@ per stage. Status:
       A/B exit 0, and the goldens' sole change is the multi-input `.log`). The
       `-w` position nondeterminism turned out to be a heap-layout bug, not a
       lifetime one, so it was *not* fixed here — it stays open under Known bugs.
-      **Next up: the per-file parser/exporter split, then the `caesar_core`
-      library split.**
+      The per-file parser/exporter split then began 2026-07-13, retiring the
+      child write-then-reopen disk round-trip one class at a time (the parent
+      hands the child a span into its own already-loaded buffer; the `.bcwar`/
+      `.bcwav`/`.wav` writes stay as user output): **`Cwar` and `Cwav` done**
+      (borrow where the parent provably outlives the child, an owned copy for the
+      group-resident `Cwar` that outlives the stack-local `Cgrp` buffer;
+      output-identical, full gate green — write-up in HISTORY), remaining order
+      `Cgrp → Cbnk → Csar → Cseq`.
+      **Next up: continue the per-file split, then the `caesar_core` library
+      split.**
 - [ ] **Stage 1 — byte-identical round-trip** of BCSEQ/BCBNK/BCSAR from a
       raw-backed model (**the next milestone** — the cheapest complete proof
       the format is understood, and the serializer everything else sits on).

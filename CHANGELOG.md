@@ -59,6 +59,20 @@ House rules:
 
 ### Changed
 
+- **Embedded wave archives and waves are parsed from the parent's buffer
+  instead of re-reading the file they were just written to** (stage-0 per-file
+  split, first tranche: `Cwar`, then `Cwav`). `Csar`/`Cgrp` still write each
+  extracted `.bcwar`, and `Cwar` still writes each `.bcwav` (and `Cwav` its
+  `.wav`) — the user output is unchanged — but the child parser now receives the
+  exact bytes as a pointer + length into the parent's already-loaded buffer
+  rather than opening, seeking, and re-reading the file. The direct-`Csar` wave
+  archive and every wave borrow the parent span (their parent provably outlives
+  them); a group-resident wave archive, stored in the archive-lifetime shared
+  map but built from the stack-local `Cgrp` buffer, takes an owned copy. The old
+  file-path constructors are removed. (`output-identical` — 82-archive /
+  257,125-file corpus A/B byte-identical with identical stdout/stderr, exit 0;
+  17-surface diagnostics goldens byte-identical; extraction is modestly faster
+  from dropping the per-child re-read.)
 - **The global mutable parser state is now a `ParseContext` passed by
   reference** (stage-0 library-core fold). The six process-globals behind the
   old `Common::` facade (`ShowWarnings`, `FileNames`, `Offsets`, `Buffers`,

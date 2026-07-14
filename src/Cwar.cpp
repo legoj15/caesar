@@ -118,7 +118,11 @@ bool Cwar::Extract()
 		ofs.write(reinterpret_cast<const char*>(cwavs[i].Offset), cwavs[i].Length);
 		ofs.close();
 
-		Cwavs.push_back(new Cwav(cwavFile.c_str(), Ctx));
+		// The .bcwav was just written from [Offset, Offset + Length) into this
+		// wave archive's own buffer; hand that span to the child instead of
+		// re-reading the file. This Cwav lives in Cwavs, freed before Data in
+		// ~Cwar, so the borrow is safe.
+		Cwavs.push_back(new Cwav(cwavFile, cwavs[i].Offset, cwavs[i].Length, Ctx));
 
 		if (!Cwavs[i]->Convert())
 		{
