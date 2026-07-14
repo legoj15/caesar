@@ -152,81 +152,17 @@ strictly as an offline oracle) — is settled and recorded in
 [SUITE-DESIGN.md](SUITE-DESIGN.md), with effort estimates and proof criteria
 per stage. Status:
 
-- [ ] **Stage 0 — library-core refactor**: `ParseContext` over globals, kill
-      the disk round-trip, split parser/exporter, `caesar_core` library.
-      Kickoff survey (2026-07-13) reordered the sub-steps — `.wav` in-memory
-      handoff first, then the context fold (gated on new diagnostics goldens),
-      then the per-file parser/exporter split (which also absorbs the
-      Csar/Cgrp child write-then-reopen family the plan never named), library
-      split last — and identified the `ReadArgs` Rnd-midpoint collapse as the
-      one lossless-model blocker (resolved 2026-07-13: the parsed model retains
-      the raw `Rnd` bounds and the midpoint decision moved to the emit walk,
-      output-identical). Full findings in
-      [HISTORY.md](HISTORY.md#2026-07-13--suite-stage-0-kickoff-survey).
-      First sub-step shipped 2026-07-13: the `.wav` in-memory handoff
-      (257,125-file A/B byte-identical; write-up in HISTORY). Diagnostics
-      goldens shipped 2026-07-13 (`tools/diag-goldens/`, 17 diagnostic
-      surfaces pinned, self-test green; write-up in
-      [HISTORY.md](HISTORY.md#suite-stage-0--session-2-the-diagnostics-goldens-harness-2026-07-13)).
-      The `ParseContext` fold shipped 2026-07-13: the six `Common::` globals
-      and their helpers are now a `ParseContext` threaded by reference through
-      every reader (`Common` struct deleted); output-identical, guarded by the
-      goldens + the full A/B (write-up in HISTORY). Per-input context scoping
-      shipped 2026-07-13: each top-level input now gets a fresh `ParseContext`,
-      fixing the multi-input `.log` bleed (a multi-input run is now N
-      independent single-input runs; single-input output byte-identical, corpus
-      A/B exit 0, and the goldens' sole change is the multi-input `.log`). The
-      `-w` position nondeterminism turned out to be a heap-layout bug, not a
-      lifetime one, so it was *not* fixed here — it stays open under Known bugs.
-      The per-file parser/exporter split then retired the child
-      write-then-reopen disk round-trip one class at a time (the parent hands
-      the child a span into its own already-loaded buffer; the `.bcwar`/
-      `.bcwav`/`.wav`/`.bcbnk`/`.bcseq`/`.bcgrp` writes stay as user output):
-      **all five embedded children done** — `Cwar`/`Cwav` (tranche 1) and
-      `Cbnk`/`Cseq`/`Cgrp` (tranche 2, 2026-07-13). Every child borrows its
-      parent's span except the group-resident `Cwar`, which owns a copy because
-      it outlives the stack-local `Cgrp` buffer; the group itself borrows a
-      window into `Csar`'s buffer, and its `Cbnk`/`Cseq` children borrow into
-      that window. The root `Csar` deliberately stays a file reader — it opens
-      the actual CLI input, not a child it re-reads — so the "children no longer
-      re-read the file they were just written from" line item is now complete
-      (output-identical, full gate green each commit — write-up in HISTORY).
-      **Next up: the per-class model/exporter split (promote the parse structs
-      to a lossless model, separating the reader from the SF2/MIDI/WAV
-      emitters), then the `caesar_core` library split.** The split is surveyed
-      and blueprinted (2026-07-13): no output-file blocker exists (SF2/MIDI/WAV
-      are pure functions of a model + deterministic writers); the phase
-      boundary stays per-file (never global) to preserve the diagnostic
-      surfaces; execution order Cwav → Cwar → Cbnk → Cseq → Csar+Cgrp, with
-      the Cseq commit fixing the stored-offsets stage-1 prerequisite and the
-      `-w` heap-nondeterminism Known bug together (an intentional, isolated
-      `-w` golden change). Full blueprint in
-      [HISTORY.md](HISTORY.md#suite-stage-0--the-modelexporter-split-blueprint-2026-07-13-survey).
-      **Commits 1–4 of 5 done (2026-07-14): `Cwav` → `Parse`/`ExportWav`;
-      `Cwar` → `Parse` (cwav table + FILE span + `cwarVersion`)/`Export`; `Cbnk`
-      decoupled from the live `Cwav` — `CbnkCwav` shrinks to the raw sample ref,
-      resolution + the `<id>.wav` echo move into the SF2 emit phase, and the
-      logged-then-dropped note words are retained; `Cseq` → `Parse` (command map)
-      / `Export` (VM + control-flow + MIDI walk), with each `CseqCmd` carrying its
-      own source offset and `DataOffset`/`Version` retained, so the emit walk is
-      buffer-independent and its `-w` diagnostics locate via stored offsets (an
-      additive `ParseContext::Warning(uint32_t, …)` overload). This also fixes the
-      Cseq slice of the `-w` heap-nondeterminism Known bug, though it is latent
-      corpus-wide (no sequence is group-resident) — so the blueprint's "intentional
-      `-w` golden change" did not materialise; output-identical on every surface,
-      with a new `w-dlplay` golden added to cover the Cseq `-w` surface. **Commit
-      5 of 5 done (2026-07-14): `Csar` and `Cgrp` → `Parse` (whole archive → a
-      persistent record tree: `Strgs`/`Files`/`Cwar`/`Cbnk`/`Cseq`/`Cgrp` records,
-      the discarded header words, and the player/set/INFX regions as opaque spans)
-      / `Export` (the child-dump/recurse walk, ending in the `.log` dump). Record
-      offsets are span-relative; the internal/external file discriminator is
-      explicit; the logged-then-dropped INFO words are retained. The `.log`-tagging
-      finding forced the Analyse replay into the export walk (its rows are stamped
-      with `FileNames.top()`, a persistent child frame, so a pure parse pass would
-      retag them) — output-identical regardless. Step 3 (parser/exporter split) is
-      **complete across all six classes.****
-      What remains of stage 0 is only the **`caesar_core` library split** (step 4):
-      lift the parser/exporter model into a static library the CLI links against.
+- [x] **Stage 0 — library-core refactor: COMPLETE (2026-07-14).** All four
+      steps shipped, every one output-identical: the `.wav` in-memory handoff,
+      the `ParseContext` fold (globals → a reference-threaded context, plus
+      per-input scoping), the per-class parser/exporter model split across all
+      six classes, and the `caesar_core` static-library split — `caesar.cpp` is
+      now just the CLI entry point linking `caesar_core`, and the suite's
+      player/tracker/editor will link that same library. Flag parity across the
+      target split was verified by `compile_commands.json` diff; the final split
+      passed the full gate (warning-clean clean build, 18/18 diagnostics
+      goldens, 257,125-file corpus A/B byte-identical). Full write-up in
+      [HISTORY.md](HISTORY.md#suite-stage-0-complete--the-caesar_core-library-split-step-4-2026-07-14).
 - [ ] **Stage 1 — byte-identical round-trip** of BCSEQ/BCBNK/BCSAR from a
       raw-backed model (**the next milestone** — the cheapest complete proof
       the format is understood, and the serializer everything else sits on).

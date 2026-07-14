@@ -3177,3 +3177,100 @@ gap-spans; (3) an out-of-range `0x220C` file's raw offset/length are dropped (as
 before — they were nulled), a corrupt-only edge. Step 3 of stage 0 (parser/
 exporter split) is **complete across all six classes**; only the `caesar_core`
 library split (step 4) remains.
+
+## Suite stage 0 COMPLETE — the caesar_core library split (step 4, 2026-07-14)
+
+Stage 0's final step, and the cheapest by far: a pure CMake restructure with
+**no code changes at all** — `git diff` touches only `CMakeLists.txt` and docs.
+The one `caesar` executable target that compiled all eight first-party TUs is
+now two targets:
+
+- **`caesar_core`** (`add_library(… STATIC)`) — the six BCSAR format classes
+  (`Cbnk`/`Cgrp`/`Csar`/`Cseq`/`Cwar`/`Cwav`), their shared
+  `Common`/`ParseContext`, and the header-only `Options`. It `PUBLIC`-links the
+  two vendored writers, which stay their **own** static-lib targets with their
+  SYSTEM / `-external:W0` include treatment intact — so the vendored C/C++ never
+  inherits caesar's `-Werror`.
+- **`caesar`** (`add_executable`) — just `src/caesar.cpp` (the CLI entry, arg
+  parsing, `--version`), linking `caesar_core PRIVATE`.
+
+Sources stay under `src/` (the ab-verify stale-exe guard watches only that
+tree) and the exe still lands at `build/<config>/caesar.exe`.
+
+**Usage-requirement plumbing (why the split is output-identical).** The old
+single target received every usage requirement directly; the two new targets
+must reproduce each one on the correct scope:
+
+- **C++17** — `PUBLIC` compile-feature on `caesar_core`: the core TUs get it and
+  the exe inherits it.
+- **`CAESAR_VERSION`** — `PUBLIC` define on `caesar_core`. It is only *used* by
+  `caesar.cpp`, but the old build defined it on **every** first-party TU;
+  `PUBLIC` preserves that exact per-TU parity (core TUs directly, exe by
+  inheritance).
+- **`sf2cute` + `libsmfc`** — `PUBLIC` link on `caesar_core`. This re-exports
+  libsmfc's `PUBLIC src/` include dir (which is where the old target's `-I…\src`
+  actually came from — there was never an explicit include on caesar) and
+  sf2cute's SYSTEM include to the core sources, and transitively to the exe.
+- **`-Werror` / `/W3 /WX`** — `PRIVATE` on **each** of `caesar_core` and
+  `caesar`. This is the trap the task flagged: an `INTERFACE`/`PUBLIC` here would
+  leak `-Werror` onto every downstream consumer of the library (the whole
+  suite), and dropping it from the lib would rot silently. `PRIVATE` applies it
+  to every first-party TU exactly as before and to nobody else. `/utf-8` +
+  `_CRT_SECURE_NO_WARNINGS` are directory-scope (`add_compile_*`) and reach
+  `caesar_core` automatically.
+
+**Flag parity — verified, not assumed.** Captured `compile_commands.json`
+(RelWithDebInfo, `CMAKE_EXPORT_COMPILE_COMMANDS=ON`) **before and after** the
+split and diffed the per-TU command lines for all eight first-party TUs. After
+folding out the compiler path, `CMAKE_INTDIR`, and the `/Fd` PDB path, the flag
+sets are **identical**. Per-TU presence was independently confirmed for
+`-DCAESAR_VERSION`, `/W3`, `/WX`, `-std:c++17`, `_CRT_SECURE_NO_WARNINGS`,
+`/utf-8`, the `-I…\src` include, and the sf2cute SYSTEM include on all seven
+core TUs **and** `caesar.cpp`. The **only** difference is the PDB output
+directory (`caesar_core.dir\` for the core TUs vs `caesar.dir\` for the exe) — an
+inevitable, benign consequence of two targets owning separate object dirs; it
+cannot change `caesar.exe`'s runtime output. The corpus A/B independently proves
+this: any dropped optimization or define would have moved output bytes.
+
+**CI needed nothing.** `build.yml` and `release.yml` run only generic
+`cmake -S . -B build -DCMAKE_BUILD_TYPE=Release` + `cmake --build … --config
+Release --parallel`, and locate the binary purely by **path** (`build/caesar`
+single-config on Linux/macOS Unix Makefiles; `build/Release/caesar.exe` on the
+Windows Visual Studio multi-config default) — never by target name. The `caesar`
+exe keeps its name and output path; the new `caesar_core` archive is an
+intermediate (`libcaesar_core.a` / `caesar_core.lib`) that lands elsewhere and
+cannot shadow the exe path. Every CMake construct used is generator-agnostic, so
+the VS and Unix Makefiles CI paths behave the same as the local Ninja
+Multi-Config build.
+
+**Gate (full battery, all green).**
+
+- **Clean configure from scratch** (build dir deleted, reconfigured in place
+  with `-G "Ninja Multi-Config"`): warning-clean MSVC Release build — `/WX`
+  would have failed on any warning. Produced `caesar_core.lib` + `caesar.exe` at
+  `build/Release/`.
+- **Diagnostics goldens 18/18 byte-identical** (exit 0) — new exe vs goldens
+  captured from the pre-split exe.
+- **Corpus A/B vs `HEAD` (`fd831f7`)**: **82 archives / 257,125 files
+  byte-identical, stdout/stderr identical, exit 0** (baseline 75 s, new 63 s),
+  baseline built from HEAD's old single-target CMakeLists in a detached
+  worktree.
+
+**Stage 0 is complete.** All four steps shipped: the `.wav` in-memory handoff,
+the `ParseContext` fold (+ per-input scoping), the per-class parser/exporter
+model split across all six classes, and this `caesar_core` split. The parser is
+now a linkable static library; the CLI is merely its first consumer.
+
+**For stage 1's executor — the library boundary.** `caesar_core` is where the
+model→bytes serializer lands: it already owns the retained record tree
+(span-relative offsets, opaque blob spans, discarded header words) from step 3,
+with **no** public API beyond the class headers under `src/`. A consumer in a
+different directory cannot yet `#include "Csar.hpp"` by that bare name — the
+`src/` include dir reaches consumers today only because it rides in on
+**libsmfc**'s `PUBLIC` include, an accident of the vendored dep rather than an
+intentional API surface. When stage 1 (or the first real suite consumer) needs
+the headers, give `caesar_core` its own explicit
+`target_include_directories(caesar_core PUBLIC src)` instead of leaning on that
+libsmfc side effect. Nothing about the split constrains the writer; the stage-1
+gaps recorded in commit 5's handoff (player/set section lengths, alignment
+padding, the `0x220C` corrupt-input edge) are unchanged.

@@ -144,9 +144,14 @@ everything that isn't** (unimplemented opcodes, CWSD, INFX, the `0x6001` mystery
 IMA-ADPCM payloads). Serialize by walking the tree and **recomputing every offset and size table
 from scratch**, never copying them.
 
-_Status (2026-07-14): step 3 done — all six classes now parse into a retained model and export
-from it (`Cwav`/`Cwar`/`Cbnk`/`Cseq`, then `Csar`/`Cgrp`). Every record carries **span-relative
-offsets**, not raw pointers, so the tree survives a stage-1 buffer drop. Record offsets/lengths
+_Status (2026-07-14): **stage 0 is complete (all four steps).** Step 3 done — all six classes now
+parse into a retained model and export from it (`Cwav`/`Cwar`/`Cbnk`/`Cseq`, then `Csar`/`Cgrp`).
+Every record carries **span-relative offsets**, not raw pointers, so the tree survives a stage-1
+buffer drop. Step 4 done — a **`caesar_core` static library** now holds the six classes plus their
+shared `Common`/`ParseContext` and the header-only `Options` (PUBLIC-linking the vendored
+`sf2cute` + `libsmfc`); the `caesar` executable is just `src/caesar.cpp` linking it, and the
+suite's player/tracker/editor will link the same library directly. Build-only, output-identical
+(compile flags verified identical per translation unit). Record offsets/lengths
 are stored; the discarded header words are retained as typed fields; and the regions never parsed
 today are held as opaque spans — CWAV IMA-ADPCM/raw DATA, CBNK `0x6001`/`DataRef` words, CGRP
 **INFX** (a clean offset+length span from the chunk table), and CSAR's **player (`0x2102`)** and

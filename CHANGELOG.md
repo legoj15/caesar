@@ -164,6 +164,18 @@ House rules:
   typed fields. (`output-identical` — 82-archive / 257,125-file corpus A/B
   byte-identical with identical stdout/stderr, exit 0; 18-surface diagnostics
   goldens byte-identical, including the multi-input and `-w` surfaces.)
+- **A `caesar_core` static library is split out from the CLI** (stage-0 library
+  split — the final step; **stage 0 is now complete**). The six BCSAR format
+  classes, their shared `Common`/`ParseContext`, and the header-only `Options`
+  now build as a `caesar_core` static library (which links the vendored
+  `sf2cute` + `libsmfc`); the `caesar` executable is just `src/caesar.cpp`
+  linking it. This is the library the suite's player/tracker/editor will link
+  directly — the CLI is merely its first consumer. (`output-identical` — a
+  build-only restructure with no code changes; every first-party translation
+  unit's compile flags verified byte-identical before/after via a
+  `compile_commands.json` diff, 82-archive / 257,125-file corpus A/B
+  byte-identical with identical stdout/stderr, exit 0, 18-surface diagnostics
+  goldens byte-identical.)
 
 ### Fixed
 
