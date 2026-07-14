@@ -2201,3 +2201,63 @@ collisions (pre-existing, unobserved, now heavier — filed in Known bugs).
 Pattern note: one Opus implementation agent working against the survey's
 quirk contract, then parallel Opus adversarial review — the tier-1-fixes
 pattern, holding up well.
+
+## Suite stage 0 — session 2: the diagnostics-goldens harness (2026-07-13)
+
+The guard the kickoff survey required **before** the `ParseContext` fold, built
+as a tools+docs commit (no `src/` touched). `tools/diag-goldens/diag-goldens.ps1`
+(PowerShell 7, single file + README), modelled on `ab-verify`'s discipline
+(`Set-StrictMode`, a `Stop-DgHarness` funnel that says "nothing was verified", a
+`trap`, atomic writes, an AST-derived shadowed-helper guard, a `-SelfTest`).
+Two modes: `-Capture` builds fixtures + goldens from the current exe (refuses to
+overwrite without `-Force`); default compare regenerates the fixtures, runs the
+current exe, and byte-compares. Exit contract is `ab-verify`'s: 0 identical,
+1 diffs, 2 harness error. Fixtures **and** goldens stay under
+`%LOCALAPPDATA%\caesar-diag` (they embed corpus names / analysis rows), so only
+the script and README are in the repo — the same reason `ab-verify` is
+gitignored.
+
+**Inventory — 17 invocation surfaces over 10 fixtures / 3 source archives.**
+Sources chosen by property: `caravel` (`F-Zero`, version `0x02000000`, smallest
+Csar direct-path archive with real banks/seqs/wave-archives) is the base for the
+header/section mutations and the multi-input `a`; `pksnd` (`pokemon red`,
+version `0x02030100`) is required for the `assert-length` fixture because the
+stored-length `Assert` is *guarded out* for `0x02000000` — the survey
+anticipated exactly this "use a second tiny archive" case; `queenstream`
+(`Ocarina`) is a second deterministic `-w` archive. One mutation per
+**mechanism**: magic/BOM/length Asserts, the INFO enum-default `Error`,
+`CheckBounds` overrun (STRG string length → `0xFFFFFF00`, message pinned at the
+deterministic `4294967039`-byte / offset `0x1D0` form) and outside
+(`infoOffset` → `0x10000000`), and a zero-byte `RequireOpen`. Plus the five
+CLI-error paths, the two deterministic `-w` runs, the two `-w`-on-failure runs,
+and the multi-input `.log`-bleed run. Every corrupted fixture self-validates its
+family marker + exit at capture *and* compare — a fixture that stops firing is
+exit 2, not a pass. `require-open`'s stdout is pinned **empty** (the `Push` echo
+is never reached), and the multi-input golden pins the bleed as-is:
+`pksnd.log` = `caravel`'s 178 analysis rows **followed by** `pksnd`'s own (the
+fold must reproduce this; fixing it is a later commit).
+
+**Two survey claims corrected against the running exe.** (1) The survey said
+group-path `-w` is the nondeterministic case; empirically it is **broader** —
+any archive that warns during wave/bank decode subtracts a `pos` and a
+top-of-stack buffer base from **different heap allocations**. `caravel`
+(direct-path) prints `0xFFFFFFFF…`-class garbage; `pika` (direct-path) prints
+*plausible-looking* positions (`0x0000D860` vs `0x0000E590`, a constant per-run
+delta) that a "looks-like-garbage" heuristic would wrongly accept. So the `-w`
+set is selected by an **empirical twice-run byte-identity check** (in capture
+and compare; a mismatch is exit 2), which leaves only `pksnd` and `queenstream`
+among the small archives. (2) The CLI's bad-`--pad-sustain` path is `=`-form
+only (`--pad-sustain=x`); the space form `--pad-sustain x` would instead treat
+`x` as a missing input file, so the golden uses the `=` form to pin the intended
+argument-error path.
+
+**Verification.** Built exe present (`caesar 0.5.1`); `-Capture` then compare
+against the same exe → **exit 0, all 17 surfaces byte-identical**;
+no-`-Force` recapture correctly refused (exit 2); `-SelfTest` → exit 0
+(clean compare identical, an injected golden change reported and named as a
+`fix-error-enum stderr` diff, restored set clean again, and the fixture-firing
+guard proven to match a real family marker and reject empty stderr). `ab-verify`
+was **not** run (its lock is another agent's to take). For the fold executor:
+recapture from the pre-fold build, then compare after each rebuild; a
+`--version` bump or any deliberate diagnostic-text change requires
+`-Capture -Force`.

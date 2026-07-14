@@ -120,6 +120,15 @@ subsumed by suite stage 0. Rough priority order within each group.
 - **Linux/macOS CMake presets.** Only a Windows/MSVC preset exists; CI and
   the Linux verification configure with the raw two-command incantation. A
   preset per OS makes local builds one command.
+- **Synthetic corrupted-input fixtures for public CI** (idea, not started).
+  CI is build-only on all three OSes today because the verification corpus is
+  copyrighted and private. `tools/diag-goldens/` pins the failure-family
+  behaviour, but its fixtures are mutated from corpus archives and stay local.
+  A small set of **synthetic**, from-scratch (non-copyrighted) malformed
+  `.bcsar` files — one per mechanism (bad magic/BOM/length, enum-default,
+  bounds overrun/outside, empty file) — committed to the repo would let public
+  CI assert the exit codes and family markers on every push, giving the
+  diagnostics a behavioural smoke net without any corpus dependency.
 
 ### Longer horizon
 
@@ -153,8 +162,13 @@ per stage. Status:
       one lossless-model blocker. Full findings in
       [HISTORY.md](HISTORY.md#2026-07-13--suite-stage-0-kickoff-survey).
       First sub-step shipped 2026-07-13: the `.wav` in-memory handoff
-      (257,125-file A/B byte-identical; write-up in HISTORY). Next up: the
-      diagnostics goldens, then the `ParseContext` fold.
+      (257,125-file A/B byte-identical; write-up in HISTORY). Diagnostics
+      goldens shipped 2026-07-13 (`tools/diag-goldens/`, 17 diagnostic
+      surfaces pinned, self-test green; write-up in
+      [HISTORY.md](HISTORY.md#suite-stage-0--session-2-the-diagnostics-goldens-harness-2026-07-13)).
+      **Next up: the `ParseContext` fold** — recapture the goldens from the
+      pre-fold build, then run `tools/diag-goldens/diag-goldens.ps1` after each
+      rebuild (byte-identical guard for the ~600-site diff).
 - [ ] **Stage 1 — byte-identical round-trip** of BCSEQ/BCBNK/BCSAR from a
       raw-backed model (**the next milestone** — the cheapest complete proof
       the format is understood, and the serializer everything else sits on).
