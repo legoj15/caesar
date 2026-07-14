@@ -4596,3 +4596,85 @@ volume/expression/pan sets step `mgL`/`mgR` once per 160-sample frame with no
 intra-frame ramp — a full-scale step is possible in one sample (644 and 697
 instant sets executed in these renders; none audible here, and the 8.06 s
 event's sign-flip excludes gain-stepping as its cause).
+
+## Suite stage 2 COMPLETE — the two first-listen fixes, verified end to end (2026-07-14)
+
+Both defects from the first-listen diagnosis (previous entry) are fixed, and
+with them stage 2 closes against its design-doc proof criterion ("rendered
+sequence matches a console capture within tolerance, except the reverb tail",
+SUITE-DESIGN stage table).
+
+**Fix 1 — declick (d9f3703).** Two changes in `Dsp.cpp`, one defect family:
+`voiceEndSample` now counts the frame whose `advance()` reaches Done (the frame
+that renders the final sustain→0 ramp — excluding it cut every release-127
+note-off dead at sustain gain), and `renderVoice` renders ONE extra frame past
+a force-stop (`stopAt` steal / mono re-trigger / render cap), linearly faded to
+zero — the hardware DSP interpolates per-voice gain across each 160-sample
+frame, so a stolen voice fades ~4.9 ms on console. Verified on the diagnosed
+events: the EMPTY_LANDSCAPE 8.0616 s step collapsed 1,942 → 368 int16 counts
+(ordinary program-material slope) and the 16.3725 s sibling 504 → 313; render
+stats identical (62/357 steals, 0 refused — pool behaviour untouched); every
+render gains +160 native samples of final-ramp tail. A frame-alignment census
+re-check also retired one over-claim from the diagnosis: eShop's 59.198 s step
+is steep program material (82 aligned steps among 4,575 large ones ≈ the ~2%
+chance rate), not a steal cut.
+
+**Fix 2 — the per-sound volume stage (b124b65).** The CSAR INFO sound entry's
+volume byte is now a typed `CsarCseq::Volume` (`Word08 & 0xFF`, still
+round-tripped verbatim through the retained word), carried through
+`SequenceInfo`/`LoadedArchive` and folded into the static per-voice gain as a
+plain linear `vol/127` (bytes >127 exist in retail archives, so the law is
+linear-with-boost, not a table lookup). Measured against prediction: eShop
+(byte 101) shifted −1.98 dB vs −1.99 predicted and its clipped samples
+collapsed 2,367 → 166; EMPTY_LANDSCAPE (byte 120) shifted −0.49 dB vs −0.49.
+The 166 residual rail samples are the flagged absolute-level unknown — and the
+console itself hard-clips with no soft-clip, so exact parity there is defined
+by capture, not by zero rails.
+
+**The verification battery (all exit 0, one run, post-both-fixes):**
+
+- **ab-verify** (baseline 3a94c53): 257,125 files byte-identical corpus-wide,
+  console axis identical — the converter never consumed the byte.
+- **diag-goldens**: all 18 diagnostic surfaces byte-identical.
+- **roundtrip-verify**: 82/82 BCSAR archives, 20,791 BCSEQ + 11,136 BCBNK
+  children byte-identical, 0 mismatches — the typed field shadows, never
+  replaces, the serialized word.
+- **console-tolerance**: BOTH captures PASS all four metrics
+  (`BGM_MAIN_Mii_Only_One`: envelope residual 2.65 dB, onset slope 1.0000,
+  PSD 0.84/0.84 dB; `EMPTY_LANDSCAPE`: 2.33 dB, 1.0000, 3.34/3.11 dB; reverb
+  residuals −35.0 / −5.9 dB re-quantified for stage 3).
+- **play-goldens**: re-pinned on the deliberately-changed audio (7 renders,
+  determinism enforced), immediate compare clean.
+
+**The volume-law calibration closed.** The Phase IV "absolute output level"
+diagnostic moved from −19.8 dB (`Only_One`) / −12.9 dB (`EMPTY_LANDSCAPE`) to
+−13.95 / −12.43 — shifts of 5.85 and 0.47 dB against the bytes' predicted 5.95
+and 0.49 dB (≤0.1 dB error on both, two independent data points). The
+inter-track gap — the only recording-gain-independent quantity — collapsed
+6.9 → 1.5 dB, exactly the predicted 5.46 dB relative attenuation. This
+confirms the linear `vol/127` law against console captures and shrinks the
+absolute-level unknown to a 1.5 dB residual (runtime `SoundPlayer` volume /
+DSP master / capture-chain gain). Correction to the Phase IV entry's phrasing:
+the diagnostic is the gain to APPLY to the render (negative = render hotter
+than the line-in capture), so "render-below-console" there was a sign
+mislabel — the render always sat above the capture level.
+
+**Adversarial review + the byte-0 census.** An independent review of both
+diffs (overflow/edge cases, fade-frame interactions, pool-accounting
+consistency, serializer safety, the unqualified-move trap) confirmed zero
+defects. Its one modeling question — does volume byte 0 exist in retail, and
+is silence right? — was settled by a corpus census of all 92,135 INFO sound
+entries: 1,241 sequences carry byte 0, and their names are self-describing
+(`SE_SYS_SILENT`, `SE_SYS_WAITING_SILENT`, control/wait SEs, GardenSound's
+game-triggered family, runtime-managed `SEQ_ABM_BGM*`) — deliberately
+silent-at-rest sounds whose volume the game raises at runtime, the same
+honest-silence stance as the VM's trigger-seed ruling. The census also
+reinforced the law: 1,934 entries sit above 127 (max 255 = ×2.008), and the
+most common retail bytes are 96 and 90, not 127. Distribution head:
+96×19,611, 90×11,438, 127×10,873, 70×7,036, 100×5,743.
+
+Stage 2's box closes on the roadmap; what remains around the player is
+constant-refinement fed by the isolated-note captures (CAPTURE-REQUEST.md) and
+the stage-3 oracle work (reverb, the interpolation filter, Surround) — polish
+and successor-stage items, not stage-2 structure. The roadmap's stage-2 block
+is compressed to a completion line in the same commit, per the docs rule.

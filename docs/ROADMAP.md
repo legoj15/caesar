@@ -181,84 +181,19 @@ per stage. Status:
     - Permanently opaque (settled, not a gap): BCWAR/BCWAV/BCWSD/BCGRP never
       re-encode — CWAV's DSP-ADPCM cannot round-trip — so they stay copy-through
       spans in the container and SKIPPED (informational) in the verifier.
-- [x] **Stage 2 — dry player**: **proof criterion MET 2026-07-14** — both
-      console captures pass the tolerance net except the reverb tail; what
-      remains below is constant-refinement polish, not structure.
-      Native-rate voices, console interpolation,
-      solved envelopes, priority voice stealing (RE'd and confirmed), tempo
-      clock, single final upsample. Blueprinted 2026-07-14 (11 commits in four
-      phases; first audible `.wav` at C3; `caesar_play` lib + `caesar-play`
-      offline-render exe; golden-render net from the first `.wav`): full plan in
-      [HISTORY.md](HISTORY.md#suite-stage-2--the-dry-player-blueprint-2026-07-14-survey).
-      **Phase I done (C1–C3, 2026-07-14): first audible `.wav` achieved.**
-      **Phase II done (C4–C6, 2026-07-14): the "mostly right" milestone.** C4 ports
-      the NW4R `EnvGenerator` (tables read byte-for-byte from the console binary,
-      `CalcRelease` verbatim, release-127 = instant) in place of the declick gate;
-      C5 adds the single 24-voice priority pool (steal-lowest / refuse-if-front-
-      outranks, verbatim from the disasm) with `0xC6` priority and `0xB2` mono; C6
-      folds track/master/expression volume, additive equal-power pan, velocity, and
-      bend/range/coarse-tune natively into per-voice gain/pan/step (resolving the
-      dry-sum clipping). Full write-up in the HISTORY 2026-07-14 Phase II entry
-      (envelope constant provenance, the gain/pan model with evidence per choice,
-      the golden diff inventory, and the flagged Net-B unknowns).
-      **Phase III done (C7–C10, 2026-07-14): the fidelity mass.** C7 makes the
-      per-track volume/pan/pitch/expression LIVE (a reusable timeline-flattener +
-      per-frame `_t` ramps); C8 adds tie (one continuous voice, no re-attack),
-      sweep and portamento; C9 the persistent retargetable LFO (vibrato/tremolo/
-      auto-pan); C10 the mid-sequence bank switch (`0xB6`, loader builds target
-      banks on demand), velocity range, mute, damper, and an RBJ LPF biquad. Every
-      audible sequence command a `BGM`/`SE` render touches is now native. Full
-      write-up (per-feature evidence class, the ramp-domain finding, the golden
-      inventory) in the HISTORY 2026-07-14 Phase III entry.
-      **Phase IV — C11 the console-tolerance net: harness built + self-validated,
-      and the two existing BGM captures both PASS (2026-07-14).** The numpy-only
-      analyzer + PowerShell driver (`tools/console-tolerance/`) verdict a render
-      against a New 3DS line-in capture — match within tolerance EXCEPT the reverb
-      tail — over envelope / tempo / spectrum / loudness, report the
-      reverb-attributable residual separately (stage 3's target), and measure each
-      flagged constant. `--self-validate` proves it before any capture exists (a
-      realistic capture-chain fixture passes; wrong-tempo/padded-release/different-
-      sequence each fail their named metric). The 2026-07-08 captures
-      (`BGM_MAIN_Mii_Only_One_console.wav`, `EMPTY_LANDSCAPE_console.wav`,
-      192 kHz/16-bit) both PASS all four metrics on the first dry-player-vs-console
-      run; tempo slope is exactly 1.0000 on both (default-tempo + 160/32728 frame
-      period confirmed on hardware); reverb residual −36 dB (Only_One gap) / −6 dB
-      (dense pads). **Still open: the per-instrument isolated-note captures**
-      (`SE_NEW_DRUM01`, `SE_LEGEND_KEY_FLY`, +optional) that recalibrate the
-      envelope/level/pan/decay-table constants a busy BGM cannot isolate — see
-      [docs/CAPTURE-REQUEST.md](CAPTURE-REQUEST.md). The **flagged unknowns** the
-      captures recalibrate (none structurally blocking): the LFO rate→Hz constant
-      (a first reading is ~4.00 Hz in Only_One) + sine resolution; the portamento
-      time→duration mapping (needs a glide SE); the LPF/biquad topology (RBJ) + Q;
-      the velocity `(vel/127)²` law (needs ≥2 isolated notes); the pan
-      sqrt-polynomial vs equal-power; the envelope floor / attack-done threshold /
-      update cadence / amplitude `/40`-vs-`/20`; absolute output level; the pool
-      sorted-insert tie order; and the console **interpolation filter** (the capture
-      shows HF energy the band-limited render lacks; recover via the teakra oracle).
-      **Render defects from the first listening pass (diagnosed 2026-07-14, full
-      investigation in HISTORY):**
-    - [ ] **Voice-cut declick.** A stolen/force-stopped voice ends dead at
-      `stopAt` with no fade — confirmed as EMPTY_LANDSCAPE's 8.06 s click (steal
-      log matches the waveform step to one sample: two still-audible releasing
-      pads stolen at native 263,840, a frame boundary). Same missing-final-ramp
-      family: `voiceEndSample` breaks on `done()` before the final ramp frame
-      (so release-127 note-offs and mono re-triggers cut hard), and the
-      `--max-seconds`/renderCap cut. One fix covers all three: render one extra
-      frame past stopAt/env-Done with gain ramped to 0 (~4.9 ms — hardware
-      interpolates voice gain across each 160-sample frame, so console steals
-      fade). Latent same-area polish: instant (non-`_t`) volume/expression/pan
-      sets step per-voice gain once per frame with no intra-frame ramp.
-    - [ ] **Missing per-sound volume stage → clamp clipping.** The CSAR INFO
-      sound entry's volume byte (low byte of retained `Word08`, `Csar.cpp:401`)
-      never reaches the player, so the bus runs hot and `finalizeToPcm`'s clamp
-      flat-tops loud passages — the eShop bass distortion (SEQ_TIGER_TOP_EF,
-      byte 101 = −2.0 dB: 2,367 rail samples, pre-clamp peak +3.4 dB). Fix:
-      typed field → `SequenceInfo` → apply as linear `vol/127` per voice (bytes
-      >127 exist in the wild, so not via the 128-entry dB table). May not clear
-      all overshoot (residual = runtime SoundPlayer/DSP master, Net-B);
-      calibration: `BGM_MAIN_Mii_Only_One`'s byte is 64 (−5.95 dB) and its
-      console capture exists — the tolerance-net level offset should move ~6 dB
-      when this lands.
+- [x] **Stage 2 — dry player: COMPLETE (2026-07-14).** Native-rate voices, the
+      byte-provenanced NW4R envelope, the 24-voice priority pool, live track
+      params (`_t` ramps, tie/sweep/portamento, LFO, LPF, damper, mid-sequence
+      bank switch), one final sinc resample — and both New 3DS captures PASS
+      the console-tolerance net (`tools/console-tolerance/`; tempo slope
+      exactly 1.0000, reverb residual quantified as stage 3's target). The two
+      first-listen defects (steal-cut click; unapplied per-sound INFO volume
+      byte) were diagnosed, fixed and verified the same day — the volume fix
+      confirmed the linear `vol/127` law against both captures to ≤0.1 dB.
+      Full narratives: HISTORY 2026-07-14 (blueprint, Phases I–IV, artifact
+      diagnosis, completion entry). Constant refinement continues via the
+      isolated-note captures (hardware-RE queue below); latent polish noted
+      there too.
 - [ ] **Stage 3 — reverb + delay**: offline `teakra` impulse capture →
       comb/allpass fit → New 3DS hardware validation. The long pole.
       **Recon done (2026-07-14, write-up in HISTORY):** teakra builds and runs
@@ -304,6 +239,25 @@ Hardware-RE queue (New 3DS + CFW, feeds stages 2–3):
       the original repro track was release-127-sentinel and untouched by the
       fix. One A/B on a decay-table-using track closes the loop; also
       grounds stage 2's envelope solver.
+- [ ] **Stage-2 constant refinement — the isolated-note captures**
+      ([docs/CAPTURE-REQUEST.md](CAPTURE-REQUEST.md): `SE_NEW_DRUM01`,
+      `SE_LEGEND_KEY_FLY`, +optional; the tolerance net verdicts whatever is
+      present, so a partial set is immediately useful). They recalibrate the
+      flagged constants a busy BGM cannot isolate: the LFO rate→Hz constant
+      (~4.00 Hz first reading) + sine resolution; the portamento time→duration
+      mapping (needs a glide SE); the LPF topology (RBJ assumed) + Q; the
+      velocity `(vel/127)²` law (needs ≥2 isolated notes); pan sqrt-polynomial
+      vs equal-power; the envelope floor / attack-done threshold / update
+      cadence / amplitude `/40`-vs-`/20`; the pool sorted-insert tie order; and
+      the absolute-level residual — now just 1.5 dB after the volume-byte fix
+      (runtime `SoundPlayer` volume / DSP master). The console **interpolation
+      filter** (capture HF the band-limited render lacks) is recovered via the
+      stage-3 teakra oracle instead. Player polish, not stage structure. Latent
+      same-area polish: instant (non-`_t`) volume/expression/pan sets step
+      per-voice gain once per frame with no intra-frame ramp (zipper-class,
+      never yet audible). Settled by census (2026-07-14, HISTORY): volume
+      byte 0 = deliberate silence-at-rest (1,241 retail sequences, names like
+      `SE_SYS_SILENT` / runtime-managed BGMs) — do not add a floor.
 
 ## Settled decisions & standing rules
 
