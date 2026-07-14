@@ -12,19 +12,18 @@
 
     The exe re-serialises each child from the parsed model and compares against a
     copy of the source span (never the live buffer). A format with no Serialize()
-    yet reports SKIPPED. As of commit 3, BCSEQ and BCBNK re-serialise (their matched
-    counts are the proof); BCSAR follows in commit 4, and BCWAR/BCWAV/BCWSD/BCGRP are
-    permanently opaque (DSP-ADPCM can never round-trip), so they stay SKIPPED.
+    reports SKIPPED. The three stage-1 DEEP formats — BCSEQ, BCBNK and the BCSAR
+    container — all re-serialise (their matched counts are the proof); BCWAR/BCWAV/
+    BCWSD/BCGRP are permanently opaque (DSP-ADPCM can never round-trip), so they stay
+    SKIPPED, informationally.
 
-    Exit rule (the never-a-false-pass floor): an archive exits 0 only when every
-    child re-serialised AND matched (skipped == 0); a partial verify — some matched,
-    some still SKIPPED — is exit 2, NOT a pass. Because the BCSAR container is itself
-    a verify target and stays SKIPPED until commit 4 (as do the opaque BCWAR/BCWAV/
-    BCWSD/BCGRP children), every archive is partial today, so the whole corpus
-    aggregates to exit 2 with BCSEQ and BCBNK shown green at their full matched
-    counts. Exit 0 becomes reachable once commit 4 lands the BCSAR container
-    serializer and the opaque formats are the only remaining skips. A single
-    mismatch anywhere is exit 1.
+    Exit rule (the never-a-false-pass floor): an archive exits 0 when every DEEP
+    format present re-serialised AND matched; the opaque children's skips are
+    informational and never hold it short of a pass. With BCSEQ, BCBNK and the BCSAR
+    container all serialising, the whole corpus aggregates to exit 0 — the stage-1
+    byte-identical round-trip milestone. A deep format that fails to re-serialise, or
+    an archive with nothing verifiable, is exit 2; a single mismatch anywhere is
+    exit 1.
 
     Discipline mirrored from tools/ab-verify (see that script's notes): a single
     Stop-harness funnel, a trap so no unhandled error is mistaken for a clean run,
@@ -278,21 +277,22 @@ if ($SelfTest) {
     $failures = [System.Collections.Generic.List[string]]::new()
     $sample = @($corpus | Select-Object -First 2)
 
-    # 1. A real archive with no serializers must exit 2 (nothing verifiable) AND
-    #    still have walked something (skipped > 0) - the never-a-false-pass core.
+    # 1. A real archive now exits 0: every DEEP format (BCSEQ/BCBNK/BCSAR) present
+    #    re-serialised AND matched, the opaque children's skips do not hold it short
+    #    of a pass, and it walked and matched something with no mismatch.
     foreach ($a in $sample) {
         $out  = & $Exe --verify $a.Path
         $code = $LASTEXITCODE
         $rec  = ConvertTo-RtRecord -Key $a.Key -Exit $code -Lines @($out)
-        $walked = ($rec.Formats | Measure-Object -Property Matched -Sum).Sum +
-                  ($rec.Formats | Measure-Object -Property Mismatched -Sum).Sum +
-                  ($rec.Formats | Measure-Object -Property Skipped -Sum).Sum
-        if ($code -ne 2)  { $failures.Add("$($a.Key): expected exit 2 (nothing verifiable), got $code") }
-        if ($walked -le 0) { $failures.Add("$($a.Key): exe walked 0 children - the enumeration is empty") }
-        $mm = ($rec.Formats | Measure-Object -Property Mismatched -Sum).Sum
-        if ($mm -ne 0) { $failures.Add("$($a.Key): unexpected $mm mismatches with no serializers present") }
+        $matched = ($rec.Formats | Measure-Object -Property Matched -Sum).Sum
+        $mm      = ($rec.Formats | Measure-Object -Property Mismatched -Sum).Sum
+        $walked  = $matched + $mm + ($rec.Formats | Measure-Object -Property Skipped -Sum).Sum
+        if ($code -ne 0)    { $failures.Add("$($a.Key): expected exit 0 (all deep formats matched), got $code") }
+        if ($walked -le 0)  { $failures.Add("$($a.Key): exe walked 0 children - the enumeration is empty") }
+        if ($matched -le 0) { $failures.Add("$($a.Key): exe matched 0 children - nothing was re-serialised") }
+        if ($mm -ne 0)      { $failures.Add("$($a.Key): unexpected $mm mismatches") }
     }
-    Write-RtInfo "exe exit-2 contract: checked $($sample.Count) archive(s)"
+    Write-RtInfo "exe exit-0 contract: checked $($sample.Count) archive(s)"
 
     # 2. Failure plumbing: a missing archive must be a harness error (exit 2), not a pass.
     $bogus = Join-Path $OutDir 'does-not-exist.bcsar'
@@ -327,16 +327,17 @@ if ($SelfTest) {
     if ($vVacuous.Exit -ne 2) { $failures.Add("verdict for a vacuous (0 walked) record was $($vVacuous.Exit), expected 2") }
     Write-RtInfo 'aggregation contract: all-skip->2, mismatch->1, all-match->0, vacuous->2'
 
-    # 4. THE BYTE-FLIP PROOF (commit 1: BCSEQ; commit 3: BCBNK). A harness that has
-    #    never caught a planted diff must not be trusted with a clean verdict. The
-    #    exe's --selftest re-serialises the first serialisable child of each deep
-    #    format (BCSEQ, BCBNK), asserts it reproduces the source span byte-for-byte,
-    #    THEN flips one output byte and asserts the compare catches it - returning 0
-    #    only when every proven format holds both. Walk the corpus (smallest-first)
-    #    until BOTH formats have a passing proof (they may come from different
-    #    archives); exit 2 from --selftest means "no serialisable child here".
+    # 4. THE BYTE-FLIP PROOF (commit 1: BCSEQ; commit 3: BCBNK; commit 4: BCSAR). A
+    #    harness that has never caught a planted diff must not be trusted with a clean
+    #    verdict. The exe's --selftest re-serialises the BCSAR container plus the first
+    #    serialisable child of each deep child format (BCSEQ, BCBNK), asserts each
+    #    reproduces the source span byte-for-byte, THEN flips one output byte and
+    #    asserts the compare catches it - returning 0 only when every proven format
+    #    holds both. Walk the corpus (smallest-first) until ALL THREE formats have a
+    #    passing proof (they may come from different archives); exit 2 from --selftest
+    #    means "no serialisable child here" (BCSAR always proves on the first archive).
     $flipProven = @{}
-    $needFormats = @('BCSEQ', 'BCBNK')
+    $needFormats = @('BCSEQ', 'BCBNK', 'BCSAR')
     foreach ($a in $corpus) {
         $out   = & $Exe --selftest $a.Path
         $code  = $LASTEXITCODE
@@ -365,9 +366,9 @@ if ($SelfTest) {
         Write-Host '   SELF-TEST FAILED - do not trust this harness until it is fixed.' -ForegroundColor Red
         exit $ExitHarnessErr
     }
-    Write-Host '   SELF-TEST PASSED: the exe honours exit-2-when-not-fully-verifiable, a missing' -ForegroundColor Green
-    Write-Host '   archive is a harness error, the verdict maps 0/1/2 (and vacuous->2) exactly, and' -ForegroundColor Green
-    Write-Host '   the serializer round-trips a real BCSEQ AND BCBNK, each with its planted byte-flip caught.' -ForegroundColor Green
+    Write-Host '   SELF-TEST PASSED: a real archive exits 0 (deep formats matched, opaque skips do not' -ForegroundColor Green
+    Write-Host '   block it), a missing archive is a harness error, the verdict maps 0/1/2 (and vacuous->2)' -ForegroundColor Green
+    Write-Host '   exactly, and the serializer round-trips a real BCSAR, BCSEQ AND BCBNK, each with its planted byte-flip caught.' -ForegroundColor Green
     exit $ExitAllMatch
 }
 

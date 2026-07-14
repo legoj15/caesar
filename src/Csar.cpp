@@ -5,7 +5,9 @@
 #include "Cseq.hpp"
 #include "Cwar.hpp"
 
+#include <algorithm>
 #include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <map>
@@ -88,28 +90,37 @@ bool Csar::Parse()
 	if (!Ctx.Assert(pos, 0x40, Ctx.ReadFixLen(pos, 2))) { return false; }
 
 	Version = Ctx.ReadFixLen(pos, 4);
-	uint32_t declaredLength = Ctx.ReadFixLen(pos, 4);
+	DeclaredLength = Ctx.ReadFixLen(pos, 4);
 
 	if (Version != 0x02000000)
 	{
-		if (!Ctx.Assert<uint64_t>(pos, Length, declaredLength)) { return false; }
+		if (!Ctx.Assert<uint64_t>(pos, Length, DeclaredLength)) { return false; }
 	}
 
 	if (!Ctx.Assert(pos, 0x3, Ctx.ReadFixLen(pos, 4))) { return false; }
 	if (!Ctx.Assert(pos, 0x2000, Ctx.ReadFixLen(pos, 4))) { return false; }
 
-	uint32_t strgOffset = Ctx.ReadFixLen(pos, 4);
-	uint32_t strgLength = Ctx.ReadFixLen(pos, 4);
+	// Retain the three section placements for Serialize; keep the local aliases the
+	// downstream walk already reads by name. StrgOffset is 0xFFFFFFFF when the
+	// archive carries no symbol table (a few corpus archives), which the STRG guard
+	// below and Serialize both key on.
+	StrgOffset = Ctx.ReadFixLen(pos, 4);
+	StrgLength = Ctx.ReadFixLen(pos, 4);
+	uint32_t strgOffset = StrgOffset;
+	uint32_t strgLength = StrgLength;
 
 	if (!Ctx.Assert(pos, 0x2001, Ctx.ReadFixLen(pos, 4))) { return false; }
 
-	uint32_t infoOffset = Ctx.ReadFixLen(pos, 4);
-	uint32_t infoLength = Ctx.ReadFixLen(pos, 4);
+	InfoOffset = Ctx.ReadFixLen(pos, 4);
+	InfoLength = Ctx.ReadFixLen(pos, 4);
+	uint32_t infoOffset = InfoOffset;
+	uint32_t infoLength = InfoLength;
 
 	if (!Ctx.Assert(pos, 0x2002, Ctx.ReadFixLen(pos, 4))) { return false; }
 
-	uint32_t fileOffset = Ctx.ReadFixLen(pos, 4);
+	FileOffset = Ctx.ReadFixLen(pos, 4);
 	FileLength = Ctx.ReadFixLen(pos, 4);
+	uint32_t fileOffset = FileOffset;
 
 	if (strgOffset != 0xFFFFFFFF)
 	{
@@ -163,6 +174,11 @@ bool Csar::Parse()
 	{
 		uint32_t offsetId = Ctx.ReadFixLen(pos, 4);
 
+		// Retain the slot order so Serialize re-emits the reference block exactly (the
+		// seven sub-tables appear in a fixed order in the corpus, but the model does
+		// not depend on that -- it replays whatever order this archive used).
+		InfoRefIds.push_back(offsetId);
+
 		switch (offsetId)
 		{
 			case 0x2100:
@@ -196,6 +212,14 @@ bool Csar::Parse()
 		}
 	}
 
+	// Retain the sub-table start offsets (span-relative) for Serialize's framing
+	// recompute, alongside the PlayerTableOffset/SetTableOffset set later.
+	CseqTableOffset = infoOffset + 8 + infoCseqOffset;
+	CbnkTableOffset = infoOffset + 8 + infoCbnkOffset;
+	CwarTableOffset = infoOffset + 8 + infoCwarOffset;
+	CgrpTableOffset = infoOffset + 8 + infoCgrpOffset;
+	FileTableOffset = infoOffset + 8 + infoFileOffset;
+
 	pos = Data + infoOffset + 8 + infoFileOffset;
 
 	uint32_t fileCount = Ctx.ReadFixLen(pos, 4);
@@ -214,6 +238,7 @@ bool Csar::Parse()
 		pos = Data + fileOffsets[i];
 
 		CsarFile file;
+		file.RecordOffset = fileOffsets[i];
 		uint32_t fileId = Ctx.ReadFixLen(pos, 4);
 
 		switch (fileId)
@@ -776,4 +801,214 @@ bool Csar::Export(const string& archiveDir)
 	Ctx.Dump((baseDir / (path(FileName).stem().string() + ".log")).string());
 
 	return true;
+}
+
+// Reconstruct the exact source .bcsar bytes from the parsed model, the inverse of
+// Parse. Positional reconstruction into a Length-sized zero buffer (the Cbnk
+// pattern): the header, STRG, INFO and FILE sections are each written at their
+// retained placement, every offset/length is recomputed from the laid-out content,
+// and the genuinely opaque regions (the STRG lookup tree, each sub-table's record
+// tails, the 0x220B block, the child blobs) are copied through as spans of Data.
+// The only reads of Data are those copy-throughs -- no field is re-read.
+vector<uint8_t> Csar::Serialize()
+{
+	vector<uint8_t> out(static_cast<size_t>(Length), 0);
+
+	// Write the low `bytes` bytes of `value` at absolute offset `off` (little-endian
+	// by default, big-endian for the ASCII magics). Offsets come from the parsed
+	// model, so they are in range on any archive Parse accepted.
+	auto put = [&](size_t off, uint32_t value, size_t bytes, bool littleEndian = true)
+	{
+		for (size_t i = 0; i < bytes; ++i)
+		{
+			out[off + i] = static_cast<uint8_t>(value >> ((littleEndian ? i : bytes - i - 1) * 8));
+		}
+	};
+
+	// Copy a span of the source buffer straight through (an opaque region: a record
+	// tail, the STRG lookup tree, the 0x220B block, a child blob). Clamped to the
+	// physical buffer so a length that runs past the archive's own end -- the FILE
+	// section of an archive with external content declares exactly that -- copies
+	// only the in-file remainder rather than overrunning.
+	auto copyThrough = [&](size_t dstOff, size_t srcOff, size_t len)
+	{
+		if (srcOff >= static_cast<size_t>(Length)) { return; }
+		size_t n = min(len, static_cast<size_t>(Length) - srcOff);
+		memcpy(out.data() + dstOff, Data + srcOff, n);
+	};
+
+	// --- CSAR header (0x40; the trailing 0x38..0x3F stay zero) ---
+	put(0x00, 0x43534152, 4, false);   // 'CSAR'
+	put(0x04, 0xFEFF, 2);
+	put(0x06, 0x40, 2);
+	put(0x08, Version, 4);
+	put(0x0C, DeclaredLength, 4);      // the logical size (>= physical Length when external content is referenced)
+	put(0x10, 0x3, 4);                 // block count
+	put(0x14, 0x2000, 4); put(0x18, StrgOffset, 4); put(0x1C, StrgLength, 4);
+	put(0x20, 0x2001, 4); put(0x24, InfoOffset, 4); put(0x28, InfoLength, 4);
+	put(0x2C, 0x2002, 4); put(0x30, FileOffset, 4); put(0x34, FileLength, 4);
+
+	// --- STRG (skipped entirely when the archive has no symbol table) ---
+	if (StrgOffset != 0xFFFFFFFF)
+	{
+		size_t so = StrgOffset;
+		put(so + 0x00, 0x53545247, 4, false);   // 'STRG'
+		put(so + 0x04, StrgLength, 4);
+		put(so + 0x08, 0x2400, 4);
+		put(so + 0x0C, StrgStringsOffset, 4);
+		put(so + 0x10, 0x2401, 4);
+		put(so + 0x14, StrgUnknownOffset, 4);
+		put(so + 0x18, static_cast<uint32_t>(Strgs.size()), 4);   // string count
+
+		// String-offset table + string data. Each record offset is recomputed from
+		// the string's retained placement (relative to StrgOffset + 24, the base Parse
+		// read it against); the bytes are written positionally at that placement, with
+		// the null terminator left as the zero fill.
+		for (size_t i = 0; i < Strgs.size(); ++i)
+		{
+			put(so + 0x1C + i * 12 + 0, 0x1F01, 4);
+			put(so + 0x1C + i * 12 + 4, Strgs[i].Offset - (StrgOffset + 24), 4);
+			put(so + 0x1C + i * 12 + 8, Strgs[i].Length, 4);
+
+			memcpy(out.data() + Strgs[i].Offset, Strgs[i].String.data(), Strgs[i].String.size());
+		}
+
+		// The 0x2401 lookup tree: an unparsed region running from its start to the
+		// section end. Copy it through.
+		size_t lookupStart = StrgOffset + 8 + StrgUnknownOffset;
+		copyThrough(lookupStart, lookupStart, (StrgOffset + StrgLength) - lookupStart);
+	}
+
+	// --- INFO ---
+	size_t io = InfoOffset;
+	size_t base = io + 8;
+	put(io + 0, 0x494E464F, 4, false);   // 'INFO'
+	put(io + 4, InfoLength, 4);
+
+	// The seven sub-tables, each (id, retained start, record count, entry magic). The
+	// record region past the entry array is copied through opaquely (records carry
+	// unparsed tails); only the framing is recomputed. Player/set are two of these,
+	// treated identically to the rest.
+	struct Sub { uint32_t id; uint32_t start; size_t count; uint32_t magic; const vector<uint32_t>* entryOffsets; };
+
+	// Per-sub entry offsets: the record offsets each entry points at. For the record
+	// sub-tables these live on the record structs; assemble them once so the entry
+	// array recompute below is uniform.
+	vector<uint32_t> cseqEntry, cbnkEntry, cwarEntry, cgrpEntry, fileEntry;
+	for (const CsarCseq& r : CseqRecords) { cseqEntry.push_back(r.Offset); }
+	for (const CsarCbnk& r : CbnkRecords) { cbnkEntry.push_back(r.Offset); }
+	for (const CsarCwar& r : CwarRecords) { cwarEntry.push_back(r.Offset); }
+	for (const CsarCgrp& r : CgrpRecords) { cgrpEntry.push_back(r.Offset); }
+	for (const CsarFile& f : Files)       { fileEntry.push_back(f.RecordOffset); }
+
+	vector<Sub> subs = {
+		{ 0x2100, CseqTableOffset,   CseqRecords.size(),      0x2200, &cseqEntry },
+		{ 0x2101, CbnkTableOffset,   CbnkRecords.size(),      0x2206, &cbnkEntry },
+		{ 0x2103, CwarTableOffset,   CwarRecords.size(),      0x2207, &cwarEntry },
+		{ 0x2105, CgrpTableOffset,   CgrpRecords.size(),      0x2208, &cgrpEntry },
+		{ 0x2102, PlayerTableOffset, PlayerEntryOffsets.size(), 0x2209, &PlayerEntryOffsets },
+		{ 0x2104, SetTableOffset,    SetEntryOffsets.size(),  0x2204, &SetEntryOffsets },
+		{ 0x2106, FileTableOffset,   Files.size(),            0x220A, &fileEntry },
+	};
+
+	// Physical layout order (by start offset). Each sub-table's content ends where
+	// the next begins; the last ends at the 0x220B block, i.e. base + InfoEndOffset.
+	vector<const Sub*> order;
+	for (const Sub& s : subs) { order.push_back(&s); }
+	sort(order.begin(), order.end(), [](const Sub* a, const Sub* b) { return a->start < b->start; });
+
+	size_t endAbs220B = base + InfoEndOffset;
+
+	for (size_t k = 0; k < order.size(); ++k)
+	{
+		const Sub& s = *order[k];
+		size_t endAbs = (k + 1 < order.size()) ? order[k + 1]->start : endAbs220B;
+
+		put(s.start, static_cast<uint32_t>(s.count), 4);   // record count
+
+		for (size_t i = 0; i < s.count; ++i)
+		{
+			put(s.start + 4 + i * 8 + 0, s.magic, 4);
+			put(s.start + 4 + i * 8 + 4, (*s.entryOffsets)[i] - s.start, 4);   // record offset, recomputed
+		}
+
+		// The record region: everything past the entry array up to the next
+		// sub-table. Includes each record's unparsed tail and any inter-sub padding.
+		size_t regStart = s.start + 4 + s.count * 8;
+		if (endAbs > regStart) { copyThrough(regStart, regStart, endAbs - regStart); }
+	}
+
+	// The 0x220B trailing block (archive-wide player/counts metadata Parse never
+	// walks): from InfoEndOffset to the section end, copied through.
+	copyThrough(endAbs220B, endAbs220B, (io + InfoLength) - endAbs220B);
+
+	// The 8-entry reference block, in the retained slot order, offsets recomputed.
+	for (size_t i = 0; i < InfoRefIds.size(); ++i)
+	{
+		uint32_t id = InfoRefIds[i];
+		put(base + i * 8 + 0, id, 4);
+
+		uint32_t refOff = InfoEndOffset;   // the 0x220B marker points at the trailing block
+
+		if (id != 0x220B)
+		{
+			for (const Sub& s : subs)
+			{
+				if (s.id == id) { refOff = s.start - static_cast<uint32_t>(base); break; }
+			}
+		}
+
+		put(base + i * 8 + 4, refOff, 4);
+	}
+
+	// --- FILE ---
+	put(FileOffset + 0, 0x46494C45, 4, false);   // 'FILE'
+	put(FileOffset + 4, FileLength, 4);
+
+	// Lay out the MAXIMAL (top-level) blobs only. A grouped archive lists a CGRP
+	// container AND each file it holds as sibling FILE entries whose data lies inside
+	// the container -- so those nested entries must NOT be copied independently; their
+	// bytes come from the container copy, and their 0x220C data offset (re-pointed
+	// just below) already resolves inside it. Sorting by
+	// start ascending / length descending, a blob whose end does not exceed the
+	// running max-end of everything before it is contained in an earlier blob (the
+	// splitMaximal rule the gap scan proved); the rest tile the section and are
+	// copied at their retained offsets, with the inter-blob gaps left as the zero
+	// fill (the scan proved every gap byte is zero).
+	vector<pair<uint32_t, uint32_t>> extents;
+	for (const CsarFile& f : Files)
+	{
+		if (f.Internal) { extents.push_back({ f.Offset, f.Length }); }
+	}
+	sort(extents.begin(), extents.end(), [](const pair<uint32_t, uint32_t>& a, const pair<uint32_t, uint32_t>& b)
+		{ return a.first != b.first ? a.first < b.first : a.second > b.second; });
+
+	uint64_t runMax = 0;
+	for (const auto& e : extents)
+	{
+		uint64_t endHere = static_cast<uint64_t>(e.first) + e.second;
+		if (endHere > runMax)   // a maximal blob (an exact duplicate or a contained one does not exceed runMax)
+		{
+			copyThrough(e.first, e.first, e.second);
+		}
+		runMax = max(runMax, endHere);
+	}
+
+	// Re-point every internal 0x220C file entry's data offset + length into the
+	// laid-out FILE section. For a top-level blob this points at its own copied span;
+	// for a nested one it points inside the copied container -- both are the retained
+	// archive offset relative to the FILE section content start (FileOffset + 8),
+	// because commit 4 lays maximal blobs at their original positions (the deep
+	// re-layout that would move them is the commit-5 capstone). A 0x220D location
+	// record and an absent entry keep the bytes their record region carried.
+	for (const CsarFile& f : Files)
+	{
+		if (f.Is220C && f.Internal)
+		{
+			put(static_cast<size_t>(f.RecordOffset) + 0x10, f.Offset - (FileOffset + 8), 4);
+			put(static_cast<size_t>(f.RecordOffset) + 0x14, f.Length, 4);
+		}
+	}
+
+	return out;
 }

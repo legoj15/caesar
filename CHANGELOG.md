@@ -24,6 +24,35 @@ House rules:
 
 ### Added
 
+- **BCSAR container round-trip serialization (`Csar::Serialize()` in `caesar_core`)
+  — the stage-1 milestone reached: byte-identical BCSAR + BCSEQ + BCBNK round-trip,
+  proven corpus-wide.** The inverse of `Csar::Parse`, reading only model state
+  (child blobs, opaque tails, the STRG lookup tree and the `0x220B` block are the
+  only reads of the source, and those are pure copy-throughs). It rebuilds the CSAR
+  header, the STRG string table, the INFO section (8-entry reference block, each
+  sub-table's count + entry-offset array, and the FILE table's `0x220C` data
+  offsets) and the FILE section, recomputing every section and sub-table offset/
+  length from the laid-out content. Child blobs are copied through as spans (the
+  deep BCSEQ/BCBNK re-embed is an optional later capstone); the FILE section lays
+  out only the **maximal (top-level)** blobs and **re-points** a nested FILE entry
+  (a bank/sequence/wave-archive that lives inside a CGRP container blob) into that
+  copied container rather than emitting it twice. Layout facts pinned by a
+  standalone parser+serializer over all 82 corpus archives first: `declaredLength`
+  (the header file-length word) is larger than the physical file for archives that
+  reference external content and is retained separately; a few archives carry no
+  STRG symbol table (`StrgOffset == 0xFFFFFFFF`); the `0x220B` "end" reference is a
+  real trailing metadata block, not padding; FILE blobs are `0x20`-aligned with
+  all-zero gaps. The `caesar-roundtrip` dev tool's `--verify` now re-serialises the
+  container itself: **82 / 82 archives byte-identical, 0 mismatched** (BCSEQ stays
+  20,791 / 20,791, BCBNK 11,136 / 11,136). With all three deep formats serialising,
+  the per-archive and corpus exit contract reaches its final form — **exit 0 = every
+  deep format matched**, the permanently-opaque BCWAR/BCWAV/BCWSD/BCGRP children
+  reported SKIPPED informationally (they never block a pass). The exe's `--selftest`
+  and the wrapper's `-SelfTest` byte-flip proof now cover BCSAR as well as BCSEQ and
+  BCBNK. (`output-identical` for the shipped `caesar` — the added `Csar::Parse`
+  retention produces no output and `Serialize` is dev-tool-only; 82-archive /
+  257,125-file corpus A/B byte-identical with identical stdout/stderr, exit 0;
+  18-surface diagnostics goldens byte-identical.)
 - **BCBNK round-trip serialization (`Cbnk::Serialize()` in `caesar_core`) — the
   stage-1 milestone's second serializer, proven byte-identical over the whole
   corpus.** The inverse of `Cbnk::Parse`, reading only model state and never the

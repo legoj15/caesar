@@ -39,6 +39,13 @@ struct CsarFile
 	// stage-1 round-trip. Is220C marks the entries whose Analyse row Export replays.
 	bool Is220C = false;
 	uint32_t Word220C08 = 0;
+
+	// The entry's own record offset within the INFO file table (span-relative
+	// against Csar::Data): where this file's 0x220A-indexed record begins. Serialize
+	// re-points the 0x220C data offset/length words here from the laid-out FILE
+	// section (a 0x220D location record and an absent entry are copied through, so
+	// only 0x220C entries are patched).
+	uint32_t RecordOffset = 0;
 };
 
 struct CsarCwar
@@ -117,13 +124,44 @@ struct Csar
 	// --- Retained parse model (the persistent archive record tree) ---
 	//
 	// Header words read and discarded before the split, retained for the stage-1
-	// round-trip: Version (csarVersion); FileLength (the 0x2002 FILE-section length
+	// round-trip: Version (csarVersion); DeclaredLength (the 0x0C file-length word --
+	// equals the physical Length for a self-contained archive, but is LARGER when the
+	// archive references external content, e.g. Mario Kart 7's ctr_dash whose FILE
+	// section is declared past its own end); the three section placements
+	// (Strg/Info/File offset + length -- StrgOffset is 0xFFFFFFFF for the handful of
+	// archives with no symbol table); FileLength (the 0x2002 FILE-section length
 	// word, formerly [[maybe_unused]]); the STRG sub-offsets; the INFO end offset.
 	uint32_t Version = 0;
+	uint32_t DeclaredLength = 0;
+	uint32_t StrgOffset = 0;
+	uint32_t StrgLength = 0;
+	uint32_t InfoOffset = 0;
+	uint32_t InfoLength = 0;
+	uint32_t FileOffset = 0;
 	uint32_t FileLength = 0;
 	uint32_t StrgStringsOffset = 0;
 	uint32_t StrgUnknownOffset = 0;
 	uint32_t InfoEndOffset = 0;
+
+	// The INFO 8-entry reference block, in slot order (the seven sub-table ids plus
+	// the 0x220B end marker). Parse switches on each id into a named offset; Serialize
+	// re-emits the block in this exact slot order with recomputed offsets, so the
+	// container round-trips even though the format does not fix the slot order.
+	std::vector<uint32_t> InfoRefIds;
+
+	// The INFO sub-table start offsets (span-relative against Csar::Data), the
+	// Cseq/Cbnk/Cwar/Cgrp analogues of PlayerTableOffset/SetTableOffset below. Each
+	// sub-table's record region (everything past its count + 0x220A-style entry
+	// array) is copied through opaquely at Serialize -- the records carry unparsed
+	// tails (the CSEQ bank-reference sub-structure) and per-entry reserved words, so
+	// they are treated as spans, exactly like the player/set tables. Only the
+	// framing (count + entry-offset array + the FILE table's 0x220C data offsets) is
+	// recomputed.
+	uint32_t CseqTableOffset = 0;
+	uint32_t CbnkTableOffset = 0;
+	uint32_t CwarTableOffset = 0;
+	uint32_t CgrpTableOffset = 0;
+	uint32_t FileTableOffset = 0;
 
 	// The player (0x2102) and set (0x2104) tables are never parsed beyond their
 	// entry-offset arrays; kept as opaque spans (the section start, span-relative,
@@ -180,4 +218,18 @@ struct Csar
 	// live-buffer reads are the child blob length + bounds checks the blob writes
 	// need. Call only after a successful Parse.
 	bool Export(const std::string& archiveDir);
+
+	// Re-serialize the parsed container back to the exact source .bcsar bytes: the
+	// inverse of Parse and the stage-1 proof criterion (parse -> Serialize -> sha
+	// matches, corpus-wide). Rebuilds the CSAR header, the STRG string table, the
+	// INFO section and the FILE section from the retained model; every section and
+	// sub-table offset/length is recomputed from the laid-out content, child blobs
+	// are copied through as spans (the deep BCSEQ/BCBNK re-embed is the optional
+	// commit-5 capstone, not this), and a FILE entry whose data lies inside a CGRP
+	// container blob is re-pointed into that copied container rather than emitted
+	// twice. The only reads of Data are copy-through span reads (opaque record tails,
+	// the STRG lookup tree, the 0x220B block, the child blobs); the round-trip
+	// harness compares the result against a saved copy of the source. Call only after
+	// a successful Parse.
+	std::vector<uint8_t> Serialize();
 };

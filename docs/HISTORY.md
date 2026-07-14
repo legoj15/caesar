@@ -3681,3 +3681,120 @@ stage-1 proof criterion. One Cbnk-specific note: `Cbnk::Serialize` reconstructs 
 positionally from retained offsets, so the optional deep-re-embed capstone (commit 5) that
 re-lays-out children would need Cbnk to expose a relocation path — out of scope here, and
 not required for the container round-trip, which consumes the child blob verbatim.
+
+## Suite stage 1 commit 4 — `Csar::Serialize()`, the BCSAR container round-trip serializer (2026-07-14)
+
+The blueprint's commit 4 and **the stage-1 proof criterion**: `std::vector<uint8_t>
+Csar::Serialize()` on `caesar_core`, the inverse of `Csar::Parse`. It rebuilds the whole
+`.bcsar` container — CSAR header, STRG string table, INFO section, FILE section — from the
+retained model, reading the source buffer only through copy-through spans (opaque record
+tails, the STRG lookup tree, the `0x220B` block, the child blobs), and the round-trip harness
+proves it byte-identical over the entire corpus. With BCSEQ + BCBNK + BCSAR all serialising,
+the milestone is reached. Additive: nothing on the shipped export path calls it, so `caesar`
+stays output-identical.
+
+**Empirical method (the commit-1/3 discipline).** Before touching C++, a standalone Python
+parser + serializer of the CSAR/STRG/INFO/FILE layout was iterated against every corpus
+archive until it round-tripped **all 82 byte-for-byte**. That reference pinned every layout
+fact below and each of the four Finding-2-class surprises, and the C++ then mirrors it. (Kept
+in the session scratchpad, not committed.)
+
+**The byte layout.** A `.bcsar` is `[header 0x40][STRG][INFO][FILE]`, the three sections
+contiguous (each section's offset = the previous section's end; lengths are `0x20`-aligned).
+The header carries the version, the file-length word, and three `(id, offset, length)` section
+references. STRG is `[0x18 header][string-offset table: count + `0x1F01` records + string
+data][0x2401 lookup tree]`. INFO is `[8 header][8-entry reference block][seven sub-tables in
+physical order][0x220B block]`; each sub-table is `count + entry-offset array + record region`.
+FILE is `['FILE' + length][0x20-aligned blobs, zero-filled gaps]`.
+
+**Finding 1 — `declaredLength` ≠ physical `Length` for archives with external content.** The
+header's `0x0C` file-length word equals the physical file size for a self-contained archive,
+but is *larger* when the archive references external files (Mario Kart 7's `ctr_dash`: declared
+`0x19ECE3C`, physical `0x9B7C40` — the declared size is `FileOffset + FileLength`, counting the
+external region the FILE table points past the archive's own end at). Parse validated it against
+`Length` only for non-`0x02000000` versions and then discarded it; it is now retained
+(`DeclaredLength`) and re-emitted verbatim, while the output is exactly `Length` bytes.
+
+**Finding 2 — some archives carry no STRG symbol table.** Four corpus archives (safe,
+niji_sound ×3) set `StrgOffset == 0xFFFFFFFF`; their bank/sequence names are numeric. Parse
+already keyed the STRG walk and every symbol lookup on `strgOffset != 0xFFFFFFFF` (so the record
+symbol-index word is not even read), which is exactly why the serializer treats each sub-table's
+record region as an **opaque span** rather than re-emitting per-field: the record layout itself
+varies with STRG presence. Serialize emits the header section refs unconditionally (`0xFFFFFFFF`
+for the absent STRG) and skips the STRG body.
+
+**Finding 3 — the `0x220B` "end" reference is a real trailing metadata block, not padding.**
+Parse reads the 8th INFO reference (`0x220B`) as `InfoEndOffset` and treats it as the end of the
+enumerated content. But `[InfoEndOffset, InfoLength)` holds a real archive-wide block (max
+sequence/player counts and the like — `0x14` bytes in caravel, `0x2C` in ctr_dash), not zero
+pad. It is copied through opaquely, exactly like the STRG lookup tree; the initial serializer
+that zeroed it mismatched at `InfoEndOffset` on every archive.
+
+**Finding 4 — the record payloads are opaque, so only the framing is recomputed.** The INFO
+records carry structure Parse does not fully model: the CSEQ record has a large unparsed
+bank-reference tail (the `CbnkOffset` sub-structure), the CBNK record an 8-aligned trailing word,
+and the raw string index is folded into a `TypedName`. Rather than extend per-field retention for
+all of that, each sub-table's **record region** (everything past its count + entry-offset array,
+up to the next sub-table) is copied through as a span — the same treatment the player/set tables
+already got. What Serialize *recomputes* is the framing: every section and sub-table offset/
+length, each entry-offset array (from the retained record offsets), the STRG string-record
+offsets, and the FILE table's `0x220C` data offset/length words. So the container structure is
+provably understood while the not-yet-parsed record internals ride through losslessly — the
+honest state of the model, and the same "opaque span for the unparsed region" pattern used at
+every level.
+
+**The nesting re-point (the blueprint's flagged new work).** In the 11 grouped archives a CGRP
+container blob physically holds its CBNK/CSEQ/CWAR children, and each contained file *also*
+appears as its own top-level FILE entry whose data offset points inside the container (4,747 such
+nested entries corpus-wide). The FILE section lays out only the **maximal (top-level)** blobs —
+the `splitMaximal` rule the commit-0 gap scan proved: sort by start ascending / length
+descending, and a blob whose end does not exceed the running max-end of everything before it is
+contained in an earlier one. Those are copied at their retained offsets (inter-blob gaps left as
+the zero fill the scan proved). A nested entry is **not** copied independently — its bytes come
+from the container copy — and its `0x220C` data offset is re-pointed to `f.Offset - (FileOffset
++ 8)`, which resolves inside the copied container. For commit 4 (blobs copied verbatim at their
+original positions) that re-point equals the original word; it becomes non-trivial only when a
+container is re-laid-out, which is the commit-5 capstone. The alignment rule (`0x20`) was
+cross-checked to reproduce every original blob position, but the layout is done **positionally**
+(from the retained offsets) so byte-identity does not depend on the rule holding.
+
+**Retention extensions to `Csar::Parse` (all additive, output-identical).** `DeclaredLength`;
+the three section placements `StrgOffset`/`StrgLength`/`InfoOffset`/`InfoLength`/`FileOffset`
+(FileLength already retained); the 8-entry reference block's slot order (`InfoRefIds`); the five
+sub-table start offsets (`Cseq/Cbnk/Cwar/Cgrp/FileTableOffset`, the analogues of the existing
+`PlayerTableOffset`/`SetTableOffset`); and `CsarFile::RecordOffset` (each file's INFO record
+position, for the `0x220C` re-point). No record-payload retention was needed — the opaque
+record-region spans cover the unparsed tails, the CBNK trailing word, and the corrupt-only
+out-of-range `0x220C` edge the blueprint noted.
+
+**Harness wiring + the exit contract's final form.** `--verify`'s `trySerialize` seam gained a
+`Csar*` parameter: for BCSAR it calls the already-parsed container's `Serialize()` directly (no
+span re-construction — there is no span ctor and re-parsing would be redundant). The per-archive
+exit rule reached its final stage-1 form: **exit 0 = every DEEP format present (BCSEQ/BCBNK/BCSAR)
+matched (`deep_skipped == 0`)**; the permanently-opaque BCWAR/BCWAV/BCWSD/BCGRP children report
+SKIPPED informationally and no longer hold an archive short of a pass (the old `skipped == 0`
+gate could never be met, since those never re-encode). The exe's `--selftest` and the wrapper's
+`-SelfTest` byte-flip proof were generalised to cover the container (a `proveOne` helper over
+BCSAR + the first serialisable BCSEQ/BCBNK child); the wrapper's exit-2-contract self-test was
+flipped to the exit-0 contract, and its `.DESCRIPTION`/README updated. The `tools/roundtrip-verify`
+`README.md` "Status" section moved from "commit 0, everything SKIPPED, exit 2" to "stage-1
+complete, exit 0".
+
+**Result + gate (all green).** `--verify` corpus-wide: **BCSAR 82 / 82 whole archives
+byte-identical, 0 mismatched** (BCSEQ 20,791 / 20,791, BCBNK 11,136 / 11,136; every archive exit
+0; corpus aggregate exit 0 — the milestone). Warning-clean MSVC Release build (`/W3 /WX`). Corpus
+A/B vs `HEAD` (`77437b0`, commit 3): **82 archives / 257,125 files byte-identical, stdout/stderr
+identical, exit 0** (baseline 76 s, new 60 s) — the added `Parse` retention emits nothing and
+`Serialize` is dev-tool-only. Diagnostics goldens **18/18 byte-identical** (exit 0).
+`roundtrip-verify -SelfTest` green, including the byte-flip proof on real BCSAR (QueenStream),
+BCSEQ and BCBNK children (`roundtrip=1 byteflip_caught=1` each).
+
+**What still separates the model from stage 2's consumer.** The container now round-trips, but
+the record payloads (CSEQ bank-reference tails, player/set entries, the `0x220B` block) are
+opaque spans, not typed fields — a future stage that *edits* those (re-assigning a sequence's
+bank, adding a player) must parse them, not just copy them. And child blobs are copied verbatim
+at their original offsets: growing a child (stage 6 write-back) needs the commit-5 deep re-embed,
+which re-lays-out children and consumes *computed* lengths — for which `Cbnk` (positional body
+reconstruction) would need a relocation path. Neither is required for the byte-identical
+round-trip that is the stage-1 proof; both are the natural next parses when a consumer needs to
+change bytes rather than reproduce them.

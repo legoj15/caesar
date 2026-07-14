@@ -10,16 +10,16 @@ This is the companion to ab-verify, not a replacement:
 - **ab-verify** proves the *export* path (BCSAR -> MIDI/SF2/WAV) is byte-identical
   old-vs-new. It is the shipped tool's regression net.
 - **roundtrip-verify** proves the *serializer* (model -> bytes) reproduces the
-  original archive bytes. It is the stage-1 milestone's proof net, and it grows
-  teeth one format at a time as `Serialize()` lands.
+  original archive bytes. It is the stage-1 milestone's proof net.
 
-## Status (stage-1 commit 0)
+## Status (stage-1 complete)
 
-No `Serialize()` exists yet, so **every format reports SKIPPED and every archive
-exits 2 ("nothing verifiable")** - and so does this wrapper. That is deliberate:
-the harness must never print a green pass before there is something to verify. As
-each serializer ships (commit 1 = BCSEQ, commit 3 = BCBNK, commit 4 = BCSAR), its
-format flips from SKIPPED toward matched and the verdict tightens toward exit 0.
+All three deep formats serialise byte-identically over the whole corpus: **BCSEQ
+20,791 / 20,791, BCBNK 11,136 / 11,136, BCSAR 82 / 82** (the container). The
+permanently-opaque children (BCWAR / BCWAV / BCWSD / BCGRP) can never re-encode -
+CWAV's DSP-ADPCM does not round-trip - so they report SKIPPED **informationally**,
+and their skips do not hold an archive short of a pass. The whole corpus now
+aggregates to **exit 0** - the stage-1 byte-identical round-trip milestone.
 
 ## Usage
 
@@ -46,9 +46,9 @@ through).
 
 | code | meaning |
 |------|---------|
-| 0 | every enumerated child re-serialised byte-identically |
+| 0 | every DEEP format present (BCSEQ/BCBNK/BCSAR) re-serialised byte-identically; opaque skips do not block it |
 | 1 | at least one child mismatched (see `mismatches.tsv`) |
-| 2 | harness error, or nothing was verifiable - **never read as a pass** |
+| 2 | a deep format failed to re-serialise, or nothing was verifiable - **never read as a pass** |
 
 ## What the exe does per archive
 
@@ -57,9 +57,10 @@ files, no directories), enumerates every embedded child - BCSEQ / BCBNK (deep
 targets), BCWAR / BCWAV / BCWSD / BCGRP (opaque), plus the BCSAR container itself,
 recursing into embedded groups and de-duplicating by archive offset. For each it
 **copies the source span out** and compares a re-serialisation against that copy
-(never the live buffer - the buffer-drop honesty guard is structural). A format
-with no serializer reports SKIPPED. Its own exit is `0` all-match / `1` mismatch /
-`2` nothing-verifiable-or-error.
+(never the live buffer - the buffer-drop honesty guard is structural). An opaque
+format reports SKIPPED. Its own exit is `0` (every deep format matched, opaque
+skips informational) / `1` mismatch / `2` a deep format failed or nothing
+verifiable.
 
 The exe also carries the two one-time stage-1 gate scans, run per archive:
 
@@ -79,8 +80,11 @@ whose corpus verdicts are recorded in `docs/HISTORY.md` (stage-1 commit 0).
   stops the run - a stale exe is a false result waiting to happen.
 - A zero-children guard: if the corpus walked nothing, the enumeration is broken
   and a "0 mismatches" verdict is meaningless.
-- `-SelfTest`: checks the exe's exit-2-when-nothing-verifiable contract, that a
-  missing archive is a harness error, and that the verdict aggregation maps
-  0/1/2 (and a vacuous "0 walked" run -> 2) exactly. Once a serializer lands, the
-  self-test should also mutate one source byte of a verified child and require
-  exactly one mismatch (the byte-flip proof ab-verify already has).
+- `-SelfTest`: checks that a real archive exits 0 (deep formats matched, opaque
+  skips do not block it), that a missing archive is a harness error, and that the
+  verdict aggregation maps 0/1/2 (and a vacuous "0 walked" run -> 2) exactly. It
+  also carries the **byte-flip proof**: the exe's `--selftest` re-serialises the
+  BCSAR container plus the first serialisable BCSEQ and BCBNK child, asserts each
+  reproduces the source span, then flips one output byte and requires the compare
+  to catch it - a harness that has never caught a planted diff must not be trusted
+  with a clean verdict.

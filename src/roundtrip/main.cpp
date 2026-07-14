@@ -232,7 +232,14 @@ namespace
 	// not read the file, so there is nothing faithful to re-serialise. Cbnk::Parse
 	// touches neither its Cwars map nor Opts (those are Export-only), so a scratch
 	// empty map + default Options suffice for the round-trip.
-	optional<vector<uint8_t>> trySerialize(const string& format, uint8_t* data, uint32_t length, ParseContext& ctx)
+	// The three stage-1 deep formats: each re-serialises from its parsed model, and
+	// exit 0 requires every one PRESENT to match (opaque children never block it).
+	bool isDeepFormat(const string& format)
+	{
+		return format == "BCSEQ" || format == "BCBNK" || format == "BCSAR";
+	}
+
+	optional<vector<uint8_t>> trySerialize(const string& format, uint8_t* data, uint32_t length, ParseContext& ctx, Csar* container = nullptr)
 	{
 		if (format == "BCSEQ")
 		{
@@ -256,6 +263,18 @@ namespace
 				return nullopt;
 			}
 			return bank.Serialize();
+		}
+
+		if (format == "BCSAR")
+		{
+			// The container is already parsed (main parsed it once); re-serialise
+			// that model directly. Unlike the deep children it is not re-constructed
+			// from a span -- there is no span ctor, and re-parsing would be redundant.
+			if (container == nullptr)
+			{
+				return nullopt;
+			}
+			return container->Serialize();
 		}
 
 		return nullopt;
@@ -289,7 +308,7 @@ namespace
 		auto verifyOne = [&](const string& format, uint8_t* data, uint32_t length)
 		{
 			vector<uint8_t> saved(data, data + length);
-			optional<vector<uint8_t>> produced = trySerialize(format, data, length, csar.Ctx);
+			optional<vector<uint8_t>> produced = trySerialize(format, data, length, csar.Ctx, &csar);
 
 			FormatTally& t = tallies[format];
 			if (!produced.has_value())
@@ -334,13 +353,14 @@ namespace
 			verifyOne(child.format, child.data, child.length);
 		}
 
-		int matched = 0, mismatched = 0, skipped = 0;
+		int matched = 0, mismatched = 0, deepSkipped = 0, opaqueSkipped = 0;
 		for (const auto& kv : tallies)
 		{
 			const FormatTally& t = kv.second;
 			matched += t.matched;
 			mismatched += t.mismatched;
-			skipped += t.skipped;
+			if (isDeepFormat(kv.first)) { deepSkipped += t.skipped; }
+			else                        { opaqueSkipped += t.skipped; }
 			cout << "VERIFY\t" << archivePath << "\t" << kv.first
 				<< "\tmatched=" << t.matched
 				<< "\tmismatched=" << t.mismatched
@@ -350,31 +370,32 @@ namespace
 		cout << "SUMMARY\t" << archivePath
 			<< "\tmatched=" << matched
 			<< "\tmismatched=" << mismatched
-			<< "\tskipped=" << skipped << "\n";
+			<< "\tdeep_skipped=" << deepSkipped
+			<< "\topaque_skipped=" << opaqueSkipped << "\n";
 
-		// Exit contract (per archive), tightened as serializers land:
+		// Exit contract (per archive), in its final stage-1 form now that BCSEQ, BCBNK
+		// AND the BCSAR container all serialise:
 		//   1  any child mismatched — a real regression, the loudest signal.
-		//   0  every child re-serialised AND matched (skipped == 0).
-		//   2  otherwise: nothing was verifiable, OR some matched but some are still
-		//      SKIPPED (a partial verify is NOT a pass). This is the never-a-false-
-		//      pass floor: with only BCSEQ serialising, the BCSAR container and the
-		//      opaque BCWAR/BCWAV children are always SKIPPED, so every archive
-		//      exits 2 today — the BCSEQ matched-count is the commit-1 proof, not
-		//      the exit code. Exit 0 becomes reachable once commits 3-4 land the
-		//      BCBNK + BCSAR serializers and the opaque formats are the only skips.
+		//   0  every DEEP format present (BCSEQ/BCBNK/BCSAR) re-serialised AND matched
+		//      (deep_skipped == 0). The permanently-opaque BCWAR/BCWAV/BCWSD/BCGRP
+		//      children can never re-encode (CWAV's DSP-ADPCM does not round-trip), so
+		//      their skips are informational and do NOT hold the archive short of a
+		//      pass — that is the whole point of the stage-1 milestone.
+		//   2  a deep format could not be re-serialised (a parse failure on a child),
+		//      or nothing verifiable at all: still never a false pass.
 		if (mismatched > 0)
 		{
 			return ExitMismatch;
 		}
-		if ((matched > 0) && (skipped == 0))
+		if (deepSkipped > 0)
 		{
-			return ExitAllMatch;
+			cout << "HARNESS\t" << archivePath << "\tpartial: " << deepSkipped
+				<< " deep child(ren) SKIPPED (a deep format failed to re-serialise)\n";
+			return ExitHarness;
 		}
 		if (matched > 0)
 		{
-			cout << "HARNESS\t" << archivePath << "\tpartial: " << matched
-				<< " matched but " << skipped << " still SKIPPED (not a full verify)\n";
-			return ExitHarness;
+			return ExitAllMatch;
 		}
 
 		// Nothing was re-serialised at all: not a pass.
@@ -406,10 +427,53 @@ namespace
 			return ExitHarness;
 		}
 
-		const char* deepFormats[] = { "BCSEQ", "BCBNK" };
 		int proven = 0;
 		bool allOk = true;
 
+		// The two halves of the round-trip contract, on one saved source span: (a)
+		// Serialize reproduces it byte-for-byte, and (b) a single planted byte-flip in
+		// the output is DETECTED by the compare. Prints one SELFTEST line and folds
+		// its result into proven/allOk.
+		auto proveOne = [&](const string& format, uint8_t* data, uint32_t length)
+		{
+			vector<uint8_t> saved(data, data + length);
+			optional<vector<uint8_t>> produced = trySerialize(format, data, length, csar.Ctx, &csar);
+			if (!produced.has_value())
+			{
+				return; // would not parse: try the next candidate of this format
+			}
+
+			bool roundtrip = (produced.value() == saved);
+
+			// Plant one flipped byte and confirm the compare catches it. Mid-buffer so
+			// it lands in the body, XOR so it is provably a new value.
+			vector<uint8_t> tampered = produced.value();
+			bool caught = false;
+			if (!tampered.empty())
+			{
+				size_t at = tampered.size() / 2;
+				tampered[at] ^= 0xFF;
+				caught = (tampered != saved);
+			}
+
+			cout << "SELFTEST\t" << archivePath << "\t" << format
+				<< "\tlen=" << saved.size()
+				<< "\troundtrip=" << (roundtrip ? 1 : 0)
+				<< "\tbyteflip_caught=" << (caught ? 1 : 0) << "\n";
+
+			++proven;
+			if (!(roundtrip && caught))
+			{
+				allOk = false;
+			}
+		};
+
+		// The container itself is a deep format (stage-1 commit 4): prove it on this
+		// archive's own bytes.
+		proveOne("BCSAR", csar.Data, static_cast<uint32_t>(csar.Length));
+
+		// ...and the first serialisable embedded child of each deep child format.
+		const char* deepFormats[] = { "BCSEQ", "BCBNK" };
 		for (const char* fmt : deepFormats)
 		{
 			for (const Embedded& child : children)
@@ -419,38 +483,12 @@ namespace
 					continue;
 				}
 
-				vector<uint8_t> saved(child.data, child.data + child.length);
-				optional<vector<uint8_t>> produced = trySerialize(child.format, child.data, child.length, csar.Ctx);
-				if (!produced.has_value())
+				size_t before = proven;
+				proveOne(child.format, child.data, child.length);
+				if (proven != before)
 				{
-					continue; // a child that would not parse: try the next of this format
+					break; // only the first serialisable child of this format
 				}
-
-				bool roundtrip = (produced.value() == saved);
-
-				// Plant one flipped byte and confirm the compare catches it. Mid-buffer
-				// so it lands in the body, XOR so it is provably a new value.
-				vector<uint8_t> tampered = produced.value();
-				bool caught = false;
-				if (!tampered.empty())
-				{
-					size_t at = tampered.size() / 2;
-					tampered[at] ^= 0xFF;
-					caught = (tampered != saved);
-				}
-
-				cout << "SELFTEST\t" << archivePath << "\t" << child.format
-					<< "\tlen=" << saved.size()
-					<< "\troundtrip=" << (roundtrip ? 1 : 0)
-					<< "\tbyteflip_caught=" << (caught ? 1 : 0) << "\n";
-
-				++proven;
-				if (!(roundtrip && caught))
-				{
-					allOk = false;
-				}
-
-				break; // only the first serialisable child of this format
 			}
 		}
 

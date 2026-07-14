@@ -163,66 +163,24 @@ per stage. Status:
       passed the full gate (warning-clean clean build, 18/18 diagnostics
       goldens, 257,125-file corpus A/B byte-identical). Full write-up in
       [HISTORY.md](HISTORY.md#suite-stage-0-complete--the-caesar_core-library-split-step-4-2026-07-14).
-- [ ] **Stage 1 — byte-identical round-trip** of BCSEQ/BCBNK/BCSAR from a
-      raw-backed model (**the next milestone** — the cheapest complete proof
-      the format is understood, and the serializer everything else sits on).
-      Surveyed and blueprinted 2026-07-14: `Serialize()` member per class,
-      additive; a `caesar-roundtrip` dev exe (caesar_core's first consumer) +
-      tools/ fan-out wrapper; six commits — scans/scaffold → BCSEQ → the Cbnk
-      retained-model split (the survey found Cbnk's model is still
-      function-local behind a one-pass `Convert()`, contrary to the stage-0
-      completion wording — it is the one class without the Parse/Export split,
-      folded in here) → BCBNK → BCSAR (the proof criterion) → optional deep
-      re-embed. VarLen canonicality is the one open risk (corpus scan first).
-      Full blueprint in
-      [HISTORY.md](HISTORY.md#suite-stage-1--the-round-trip-serializer-blueprint-2026-07-14-survey).
-    - [x] **Commit 0 — scans + harness scaffold (2026-07-14).** The
-      `caesar-roundtrip` dev exe (+ `tools/roundtrip-verify` wrapper, the
-      `caesar_core PUBLIC src` include) landed, `caesar` output-identical.
-      **VarLen verdict: canonical-only** (3,268,437 VarLen args over 20,791
-      sequences, 0 non-canonical) so commit 1 emits canonical, no `CseqCmd`
-      raw-length field. **Gap verdict: all gap bytes zero, reproduce-by-rule
-      viable** (top-level FILE inter-blob 11,050 gaps, section pads, and CGRP
-      inter-file 509 gaps all zero corpus-wide) — but the FILE section nests:
-      4,747 CBNK/CSEQ/CWAR live inside CGRP container blobs yet also appear as
-      their own FILE entries, so commit 4 must re-point a nested entry into the
-      copied container, never double-copy it. Write-up in
-      [HISTORY.md](HISTORY.md#suite-stage-1-commit-0--scans--round-trip-harness-scaffold-2026-07-14).
-    - [x] **Commit 1 — `Cseq::Serialize()`, the BCSEQ round-trip serializer
-      (2026-07-14).** `--verify` re-serialises every embedded `.bcseq` and
-      compares against a saved source span: **BCSEQ 20,791 / 20,791
-      byte-identical corpus-wide, 0 mismatched.** Emits canonical VarLen (no
-      `CseqCmd` change); the model gained the retained section-header words +
-      the full LABL table (duplicate-target labels the parse map collapses).
-      Two format facts pinned down: DATA `0x20`-pad parses as phantom notes
-      that spill into LABL (handled by truncating the emitted stream to the
-      stored length), and LABL records are null-terminated + 4-byte aligned in
-      file order. Exit contract stays 2 (PARTIAL) until commits 3-4 land —
-      every archive still has SKIPPED opaque/container children; the BCSEQ
-      matched-count is the proof, and `-SelfTest` now carries the byte-flip
-      check. `caesar` output-identical. Shared `WriteFixLen`/`WriteVarLen` emit
-      helpers in `Common` for commit 3 to reuse. Write-up in
-      [HISTORY.md](HISTORY.md#suite-stage-1-commit-1--cseqserialize-the-bcseq-round-trip-serializer-2026-07-14).
-    - [x] **Commit 2 — the Cbnk retained-model + Parse/Export split
-      (2026-07-14).** The one class still parsing and emitting in a single
-      `Convert()`; now split into `Parse` (walk → retained model) and `Export`
-      (SF2 build), called back to back per bank, `caesar` output-identical. The
-      last two raw-pointer model fields become span-relative `uint32_t`, and the
-      model gains the blueprint §4 retention (`cbnkVersion`, the instrument-type
-      discriminator, the note `id`, the raw cwav index, the raw offset-table
-      words). 257,125-file A/B byte-identical, 18-surface goldens clean. Write-up
-      in [HISTORY.md](HISTORY.md#suite-stage-1-commit-2--the-cbnk-retained-model--parseexport-split-2026-07-14).
-    - [x] **Commit 3 — `Cbnk::Serialize()`, the BCBNK round-trip serializer
-      (2026-07-14).** `--verify` re-serialises every embedded `.bcbnk`:
-      **11,136 / 11,136 banks byte-identical corpus-wide, 0 mismatched** (BCSEQ
-      stays 20,791 / 20,791). The Cbnk-internal trap: instrument/note bodies are
-      placed out of index order with gaps, so the region is rebuilt
-      **positionally** (each body at its retained offset) with a retained
-      unread-gap overlay for the ~1.5 KB across 5 banks the read fields do not
-      cover. `caesar` output-identical (the `Parse` gap-capture emits nothing);
-      `-SelfTest` byte-flip proof now covers BCBNK. Overall harness exit stays
-      2 (PARTIAL) until the commit-4 BCSAR container. Write-up in
-      [HISTORY.md](HISTORY.md#suite-stage-1-commit-3--cbnkserialize-the-bcbnk-round-trip-serializer-2026-07-14).
+- [x] **Stage 1 — byte-identical round-trip of BCSEQ/BCBNK/BCSAR (2026-07-14).**
+      All three deep formats re-serialise from the retained model byte-identically
+      corpus-wide — **BCSEQ 20,791/20,791, BCBNK 11,136/11,136, BCSAR 82/82 whole
+      archives** — so `caesar-roundtrip --verify` reaches exit 0 (opaque
+      BCWAR/BCWAV/BCWSD/BCGRP children skip informationally). Six commits
+      (scans/scaffold → BCSEQ → Cbnk split → BCBNK → the BCSAR container); `caesar`
+      output-identical throughout. Container write-up (nesting re-point, the STRG/
+      INFO/FILE layout facts, retention extensions) in
+      [HISTORY.md](HISTORY.md#suite-stage-1-commit-4--csarserialize-the-bcsar-container-round-trip-serializer-2026-07-14).
+    - [ ] **Optional capstone — deep child re-embed (commit 5):** re-lay-out
+      deep-serialized CBNK/CSEQ children so the container consumes *computed* child
+      lengths (the edit-safe property stage 6's write-back needs). Not required for
+      the round-trip (which copies child blobs through verbatim at their original
+      offsets); `Cbnk` would need to expose a relocation path, since it reconstructs
+      bodies positionally from retained offsets.
+    - Permanently opaque (settled, not a gap): BCWAR/BCWAV/BCWSD/BCGRP never
+      re-encode — CWAV's DSP-ADPCM cannot round-trip — so they stay copy-through
+      spans in the container and SKIPPED (informational) in the verifier.
 - [ ] **Stage 2 — dry player**: native-rate voices, console interpolation,
       solved envelopes, priority voice stealing (RE'd and confirmed), tempo
       clock, single final upsample.
