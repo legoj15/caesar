@@ -468,6 +468,27 @@ namespace play
 		return true;
 	}
 
+	// The additive semitone offset a per-note glide (sweep 0xE3 or portamento
+	// 0xC9/CE/CF) contributes at absolute sample `absPos`: it starts at `fromSemis`
+	// and ramps LINEARLY to 0 over `durSamples`, then stays 0. Sweep and portamento
+	// are independent and additive (2026-07-11 research).
+	float glideOffset(float fromSemis, uint32_t durSamples, uint32_t noteOn, uint32_t absPos)
+	{
+		if (fromSemis == 0.0f || durSamples == 0 || absPos < noteOn)
+		{
+			return 0.0f;
+		}
+
+		uint32_t elapsed = absPos - noteOn;
+
+		if (elapsed >= durSamples)
+		{
+			return 0.0f;
+		}
+
+		return fromSemis * (1.0f - static_cast<float>(elapsed) / static_cast<float>(durSamples));
+	}
+
 	void renderVoice(StereoBus& bus, const VoiceSpec& v, uint32_t startSample, uint32_t gateSamples,
 		uint32_t stopSample, const VoiceMod* mod)
 	{
@@ -554,6 +575,17 @@ namespace play
 					{
 						volAmp *= decibelSquareAmp(mod->master->valueAt(absPos));
 					}
+
+					// Per-note pitch modifiers (C8): tie retune (a stepped offset), then
+					// sweep + portamento glides, all additive semitones on top of the
+					// track bend/transpose.
+					if (mod->voicePitch)
+					{
+						semis += mod->voicePitch->valueAt(absPos);
+					}
+
+					semis += glideOffset(mod->sweepFromSemis, mod->sweepDurSamples, mod->noteOnSample, absPos);
+					semis += glideOffset(mod->portaFromSemis, mod->portaDurSamples, mod->noteOnSample, absPos);
 
 					panPos = panPos < 0.0f ? 0.0f : (panPos > 127.0f ? 127.0f : panPos);
 

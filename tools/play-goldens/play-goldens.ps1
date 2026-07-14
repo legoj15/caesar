@@ -188,6 +188,12 @@ $Invocations = @(
     # glides smoothly to silence — a fade that did NOT exist at C6 (volume latched at
     # note-on). The reusable timeline-flattener drives it.
     @{ Name = 'ramp-kaen';      Mode = '--render'; Source = 'torte';     Seq = 'SE_BossVo_KaenAttack';     Rate = 48000; MaxSeconds = 30;  ExpectExit = 0 }
+
+    # C8 — the tie witness. SE_Map_WarpstarUp2 is a no-rest tied sweep: ~246 tied
+    # notes that at C7 each re-attacked and stole a voice (peak 24/24, ~222 steals)
+    # now collapse into 3 CONTINUOUS voices whose pitch retunes 243x with no
+    # re-attack and zero steals — the both-edges-release tie semantics.
+    @{ Name = 'tie-warpstar';   Mode = '--render'; Source = 'torte';     Seq = 'SE_Map_WarpstarUp2';       Rate = 48000; MaxSeconds = 15;  ExpectExit = 0 }
 )
 
 # ---------------------------------------------------------------------------

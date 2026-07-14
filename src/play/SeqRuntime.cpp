@@ -50,6 +50,17 @@ namespace play
 			// timeline (volume/pan/pitch/LFO/LPF) and the master-volume curve from
 			// `startSample` onward -- no per-note latch of volume/pan/pitch anymore.
 			// noteOnSample == startSample; kept explicit for the LFO delay reference.
+
+			// C8 per-note pitch modifiers, captured at note-on. sweep (0xE3) and
+			// portamento (0xC9/CE/CF) are additive semitone offsets that glide to 0
+			// over their duration. tieRegion >= 0 marks this event as a tie region's
+			// ONE continuous voice; its pitch retune curve lives in Runtime::tieRegions
+			// and its gate is finalised when the region closes.
+			float sweepFromSemis = 0.0f;
+			uint32_t sweepDurSamples = 0;
+			float portaFromSemis = 0.0f;
+			uint32_t portaDurSamples = 0;
+			int tieRegion = -1;
 		};
 
 		// A 48-slot variable file with the converter's scoping: 0-31 are shared
@@ -88,6 +99,27 @@ namespace play
 			// than latching at onset. The LFO block + LPF (0xD8) extend the same struct.
 			TrackTimeline timeline;
 
+			// C8 tie (0xC8): one continuous voice across tied notes. tieOn latches the
+			// flag; while a region is open, tieRegion indexes Runtime::tieRegions and
+			// tieFirstKey is the base pitch each later tied note steps the region's
+			// pitch curve to (newKey - firstKey), retuning the LIVE voice with no
+			// re-attack. Both edges of 0xC8, a Fin, or the track end close the region.
+			bool tieOn = false;
+			int tieRegion = -1;
+			int tieFirstKey = 60;
+
+			// C8 sweep (0xE3): a signed pitch offset (semitones) pending for the NEXT
+			// note, gliding to 0 over that note's gate. 0 = none.
+			float pendingSweepSemis = 0.0f;
+
+			// C8 portamento (0xC9 set-start+enable / 0xCE on-off / 0xCF time). A note
+			// glides from the origin key (portaStartKey if set by 0xC9, else the
+			// previous note's key) to its own key over a portaTime-scaled duration.
+			bool portaOn = false;
+			int portaStartKey = -1;   // 0xC9 one-shot origin; -1 = use lastNoteKey
+			int portaTime = 0;        // 0xCF
+			int lastNoteKey = -1;     // previous note's key (default glide origin)
+
 			bool cmpFlag = true;
 			int16_t vars[16] = { 0 };        // slots 32-47 (track-local)
 			bool varWritten[16] = { false };
@@ -116,6 +148,18 @@ namespace play
 			uint64_t vmVersion = 0;
 
 			TrackState tracks[16];
+
+			// C8 tie regions: one continuous voice per region, keyed to a NoteEvent by
+			// index. `pitch` is the retune curve (a step per tied note, offset from the
+			// region's first key). Stored on the Runtime so a Phase-B VoiceMod can point
+			// at it for the whole render.
+			struct TieRegion
+			{
+				ParamCurve pitch;
+				size_t eventIndex = 0;
+			};
+
+			vector<TieRegion> tieRegions;
 
 			vector<NoteEvent> events;
 			RenderStats* stats = nullptr;
@@ -302,6 +346,36 @@ namespace play
 			}
 		}
 
+		// Close a track's open tie region (C8): finalise its ONE continuous voice's
+		// gate to end at `endSample`. Called on 0xC8 (both edges), Fin, and track end.
+		void closeTie(Runtime& rt, TrackState& t, uint32_t endSample)
+		{
+			if (t.tieRegion < 0)
+			{
+				return;
+			}
+
+			NoteEvent& ev = rt.events[rt.tieRegions[static_cast<size_t>(t.tieRegion)].eventIndex];
+			ev.gateSamples = (endSample > ev.startSample) ? (endSample - ev.startSample) : 0;
+			t.tieRegion = -1;
+		}
+
+		// The portamento glide duration for a 0xCF time value, in samples. The exact
+		// CTR portaTime -> duration mapping is not byte-confirmed in the disasm (the
+		// doc records no portamento address), so this uses the NW4R precedent that the
+		// time value scales the glide and treats it as a tick count at the current
+		// tempo (a distance-independent glide). FLAGGED for the console capture -- one
+		// constant to recalibrate.
+		uint32_t portaDurationSamples(Runtime& rt, int portaTime)
+		{
+			if (portaTime <= 0)
+			{
+				return 0;
+			}
+
+			return static_cast<uint32_t>(static_cast<double>(portaTime) * samplesPerTick(rt) + 0.5);
+		}
+
 		// The extended (0xF0) variable + comparison ops -- ported verbatim from
 		// Cseq::Export's convert-time VM so [If] gates resolve exactly. All instant
 		// (no time), so a track never desyncs on them.
@@ -434,12 +508,14 @@ namespace play
 			{
 				if (++t.execs > kTrackExecBudget)
 				{
+					closeTie(rt, t, currentSample);
 					t.active = false;
 					return;
 				}
 
 				if (t.cursor == rt.commands.end())
 				{
+					closeTie(rt, t, currentSample);
 					t.active = false;   // ran off the end of the bank
 					return;
 				}
@@ -502,31 +578,94 @@ namespace play
 							gate = (capEnd > currentSample) ? (capEnd - currentSample) : 0;
 						}
 
-						NoteEvent ev;
-						ev.startSample = currentSample;
-						ev.gateSamples = static_cast<uint32_t>(gate);
-						ev.program = t.program;
-						ev.key = static_cast<int>(c);
-						ev.velocity = velocity;
+						int key = static_cast<int>(c);
 
-						for (int e = 0; e < 5; ++e)
+						if (t.tieOn && t.tieRegion >= 0)
 						{
-							ev.envOverride[e] = t.envOverride[e];
+							// C8 tie retune: step the region's ONE voice to the new key
+							// (no re-attack). The note-length still advances track time
+							// below; it plays no audio role here.
+							rt.tieRegions[static_cast<size_t>(t.tieRegion)].pitch.set(
+								currentSample, static_cast<float>(key - t.tieFirstKey), 0);
+
+							if (rt.stats)
+							{
+								++rt.stats->tieRetunes;
+							}
+						}
+						else
+						{
+							NoteEvent ev;
+							ev.startSample = currentSample;
+							ev.gateSamples = static_cast<uint32_t>(gate);
+							ev.program = t.program;
+							ev.key = key;
+							ev.velocity = velocity;
+
+							for (int e = 0; e < 5; ++e)
+							{
+								ev.envOverride[e] = t.envOverride[e];
+							}
+
+							// The 24-voice pool inputs, latched at note-on. Volume/pan/pitch
+							// are NOT latched -- the voice follows track `track`'s live
+							// timeline each frame (C7), so a mid-note change reaches it.
+							ev.priority = clamp<int>(64 + t.trackPriority, 0, 255);
+							ev.track = track;
+							ev.mono = t.mono;
+
+							// C8 sweep (0xE3): a pending signed pitch offset gliding to 0
+							// over this note's gate.
+							if (t.pendingSweepSemis != 0.0f)
+							{
+								ev.sweepFromSemis = t.pendingSweepSemis;
+								ev.sweepDurSamples = static_cast<uint32_t>(gate);
+							}
+
+							// C8 portamento (0xC9/CE/CF): glide from the origin key (0xC9's
+							// key, else the previous note's) to this note's key.
+							if (t.portaOn)
+							{
+								int origin = (t.portaStartKey >= 0) ? t.portaStartKey : t.lastNoteKey;
+
+								if (origin >= 0 && origin != key)
+								{
+									ev.portaFromSemis = static_cast<float>(origin - key);
+									ev.portaDurSamples = portaDurationSamples(rt, t.portaTime);
+								}
+							}
+
+							// C8 tie OPEN: this note starts a continuous voice; later tied
+							// notes retune it. Its gate is finalised when the region closes.
+							if (t.tieOn)
+							{
+								Runtime::TieRegion region;
+								region.pitch.reset(0.0f);
+								region.eventIndex = rt.events.size();
+								rt.tieRegions.push_back(region);
+								t.tieRegion = static_cast<int>(rt.tieRegions.size() - 1);
+								t.tieFirstKey = key;
+								ev.tieRegion = t.tieRegion;
+
+								if (rt.stats)
+								{
+									++rt.stats->tieVoices;
+								}
+							}
+
+							rt.events.push_back(ev);
+
+							if (rt.stats)
+							{
+								++rt.stats->notesFired;
+							}
 						}
 
-						// The 24-voice pool inputs, latched at note-on. Volume/pan/pitch
-						// are NOT latched -- the voice follows track `track`'s live
-						// timeline each frame (C7), so a mid-note change reaches it.
-						ev.priority = clamp<int>(64 + t.trackPriority, 0, 255);
-						ev.track = track;
-						ev.mono = t.mono;
-
-						rt.events.push_back(ev);
-
-						if (rt.stats)
-						{
-							++rt.stats->notesFired;
-						}
+						// Sweep is consumed by the note; 0xC9's one-shot origin too; the
+						// previous-key origin for the next portamento is this note's key.
+						t.pendingSweepSemis = 0.0f;
+						t.portaStartKey = -1;
+						t.lastNoteKey = key;
 					}
 
 					++t.cursor;
@@ -649,6 +788,7 @@ namespace play
 							rt.stats->loopDetected = true;
 						}
 
+						closeTie(rt, t, currentSample);
 						t.active = false;
 						return;
 					}
@@ -698,6 +838,7 @@ namespace play
 						}
 					}
 
+					closeTie(rt, t, currentSample);
 					t.active = false;   // stray Return: end track (as Cseq::Export does)
 					return;
 				}
@@ -705,6 +846,7 @@ namespace play
 				// Fin.
 				if (c == 0xFF)
 				{
+					closeTie(rt, t, currentSample);
 					t.active = false;
 					return;
 				}
@@ -822,6 +964,85 @@ namespace play
 					if (!drop)
 					{
 						t.mono = (val != 0);
+					}
+
+					++t.cursor;
+					continue;
+				}
+
+				// Tie on/off (C8, 0xC8). Both edges release the sounding voice on
+				// hardware, so either edge closes an open region; a nonzero value arms
+				// the next note to start one continuous voice.
+				if (c == 0xC8)
+				{
+					bool drop = false;
+					int32_t v = cmd.Args.empty() ? 0 : resolveArg(rt, track, cmd, 0, drop);
+
+					if (!drop)
+					{
+						closeTie(rt, t, currentSample);
+						t.tieOn = (v != 0);
+					}
+
+					++t.cursor;
+					continue;
+				}
+
+				// Sweep pitch (C8, 0xE3): a signed intra-note ramp in 1/64-semitone
+				// units, pending for the next note (glides from the offset to nominal).
+				if (c == 0xE3)
+				{
+					bool drop = false;
+					int32_t v = cmd.Args.empty() ? 0 : resolveArg(rt, track, cmd, 0, drop);
+
+					if (!drop)
+					{
+						t.pendingSweepSemis = static_cast<float>(v) / 64.0f;
+					}
+
+					++t.cursor;
+					continue;
+				}
+
+				// Portamento (C8). 0xC9 sets the glide start key AND enables; 0xCE
+				// toggles on/off; 0xCF sets the glide time.
+				if (c == 0xC9)
+				{
+					bool drop = false;
+					int32_t v = cmd.Args.empty() ? 0 : resolveArg(rt, track, cmd, 0, drop);
+
+					if (!drop)
+					{
+						t.portaStartKey = clamp<int32_t>(v, 0, 127);
+						t.portaOn = true;
+					}
+
+					++t.cursor;
+					continue;
+				}
+
+				if (c == 0xCE)
+				{
+					bool drop = false;
+					int32_t v = cmd.Args.empty() ? 0 : resolveArg(rt, track, cmd, 0, drop);
+
+					if (!drop)
+					{
+						t.portaOn = (v != 0);
+					}
+
+					++t.cursor;
+					continue;
+				}
+
+				if (c == 0xCF)
+				{
+					bool drop = false;
+					int32_t v = cmd.Args.empty() ? 0 : resolveArg(rt, track, cmd, 0, drop);
+
+					if (!drop)
+					{
+						t.portaTime = clamp<int32_t>(v, 0, 127);
 					}
 
 					++t.cursor;
@@ -1133,6 +1354,13 @@ namespace play
 			p.track = ev.track;
 			p.mono = ev.mono;
 
+			// C8 pitch modifiers (sweep / portamento / tie region), for the VoiceMod.
+			p.sweepFromSemis = ev.sweepFromSemis;
+			p.sweepDurSamples = ev.sweepDurSamples;
+			p.portaFromSemis = ev.portaFromSemis;
+			p.portaDurSamples = ev.portaDurSamples;
+			p.tieRegion = ev.tieRegion;
+
 			voices.push_back(p);
 		}
 
@@ -1150,6 +1378,11 @@ namespace play
 			mod.track = &rt.tracks[p.track].timeline;
 			mod.master = &rt.masterVolume;
 			mod.noteOnSample = p.start;
+			mod.sweepFromSemis = p.sweepFromSemis;
+			mod.sweepDurSamples = p.sweepDurSamples;
+			mod.portaFromSemis = p.portaFromSemis;
+			mod.portaDurSamples = p.portaDurSamples;
+			if (p.tieRegion >= 0) { mod.voicePitch = &rt.tieRegions[static_cast<size_t>(p.tieRegion)].pitch; }
 
 			renderVoice(bus, p.v, p.start, p.gate, (p.stopAt < renderCap) ? p.stopAt : renderCap, &mod);
 		}

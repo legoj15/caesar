@@ -285,6 +285,13 @@ namespace play
 		// `portaDurSamples`.
 		float portaFromSemis = 0.0f;
 		uint32_t portaDurSamples = 0;
+
+		// 0xC8 tie: an additive semitone-offset curve for a tie region's ONE
+		// continuous voice. The first tied note sets the base pitch; each later tied
+		// note steps this curve to (newKey - firstKey), retuning the LIVE voice with
+		// no re-attack. Null for a non-tied voice. Owned by the sequencer for the
+		// render's lifetime.
+		const ParamCurve* voicePitch = nullptr;
 	};
 
 	// Convert a 0..127 volume/expression byte to a linear amplitude gain, through the
@@ -372,6 +379,12 @@ namespace play
 		uint32_t instantSets = 0;
 		uint32_t longestRampTicks = 0;
 
+		// C8: tieVoices = tie regions opened (each ONE continuous voice); tieRetunes =
+		// tied notes that retuned a live voice with no re-attack (folded into a region,
+		// so not counted in notesFired). A tie repro shows many retunes on few voices.
+		uint32_t tieVoices = 0;
+		uint32_t tieRetunes = 0;
+
 		// Opcodes the walk safe-skipped (never desyncing time): plain command byte,
 		// or 0x100 | ext for an extended (0xF0-prefixed) op. For the handoff report.
 		std::vector<uint32_t> skippedOps;
@@ -395,6 +408,14 @@ namespace play
 		int track = 0;
 		bool mono = false;
 		bool sounds = true;
+
+		// C8 per-note pitch modifiers carried to the render's VoiceMod (the allocator
+		// ignores them). tieRegion >= 0 selects the region pitch curve.
+		float sweepFromSemis = 0.0f;
+		uint32_t sweepDurSamples = 0;
+		float portaFromSemis = 0.0f;
+		uint32_t portaDurSamples = 0;
+		int tieRegion = -1;
 
 		uint32_t effectiveEnd() const { return (stopAt < naturalEnd) ? stopAt : naturalEnd; }
 	};

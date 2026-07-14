@@ -181,6 +181,12 @@ namespace
 			<< "  params: " << stats.rampsApplied << " _t ramps (longest " << stats.longestRampTicks
 			<< " ticks), " << stats.instantSets << " instant sets\n";
 
+		if (stats.tieVoices > 0)
+		{
+			cout << "  tie: " << stats.tieVoices << " continuous voice(s), "
+				<< stats.tieRetunes << " no-attack retunes\n";
+		}
+
 		if (stats.loopDetected)
 		{
 			cout << "  whole-song loop detected: body rendered once (a track's backward jump ended it)\n";
