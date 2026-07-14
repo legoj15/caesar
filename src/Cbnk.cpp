@@ -4,6 +4,7 @@
 
 #include <sf2cute.hpp>
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <filesystem>
@@ -171,6 +172,45 @@ Cbnk::~Cbnk()
 
 	// Data is borrowed from the parent's buffer (freed by the parent, after this
 	// child); do not delete it here.
+}
+
+// The two body-length rules the parse walk reads by, factored out so the gap
+// capture (which marks read bytes) and Serialize (which writes them) agree on
+// every extent -- a drift between them would break the round-trip. A note body is
+// 0x40 bytes, or 0x50 when its id is 0x6001 (the layered-note quartet inserts four
+// extra words). An instrument "header" runs from its body offset through the end
+// of its note-offset table: the 8-byte type+0x8 header, the type-specific block
+// (0x6000 none, 0x6001 the note count + one EndNote byte each + 4-byte-alignment
+// pad, 0x6002 the note-count-1 half-word + a zero half-word), then NoteCount 8-byte
+// note-table entries.
+static uint32_t NoteBodyLength(const CbnkNote& note)
+{
+	return note.Id == 0x6001 ? 0x50 : 0x40;
+}
+
+static uint32_t InstHeaderLength(const CbnkInst& inst)
+{
+	uint32_t length = 8;
+
+	if (inst.Type == 0x6001)
+	{
+		length += 4 + inst.NoteCount;
+
+		uint32_t padding = inst.NoteCount % 4;
+
+		if (padding)
+		{
+			length += 4 - padding;
+		}
+	}
+	else if (inst.Type == 0x6002)
+	{
+		length += 4;
+	}
+
+	length += inst.NoteCount * 8;
+
+	return length;
 }
 
 // Walk the CBNK/INFO headers, the CWAV reference table, and every instrument and
@@ -481,6 +521,78 @@ bool Cbnk::Parse()
 		}
 	}
 
+	// Capture the bytes the walk above never read. The instrument/note bodies are
+	// placed through the offset tables at arbitrary offsets with gaps between them
+	// (note-body tails where a record strides wider than the parser reads, and
+	// inter-body padding), so a lossless round-trip cannot re-emit the region
+	// linearly. Mark every read extent in a coverage map, then retain each maximal
+	// unread run that carries a non-zero byte (Serialize zero-fills the rest, and
+	// corpus-wide only ~1.5 KB across 5 banks is ever non-zero here). The extents
+	// use the same length rules Serialize writes by (NoteBodyLength /
+	// InstHeaderLength), so the two never disagree on where a body ends.
+	std::vector<uint8_t> covered(static_cast<size_t>(Length), 0);
+
+	auto mark = [&](size_t offset, size_t length)
+	{
+		for (size_t i = offset; i < offset + length && i < covered.size(); ++i)
+		{
+			covered[i] = 1;
+		}
+	};
+
+	mark(0, 0x20);
+	mark(InfoOffset, 24);
+	mark(static_cast<size_t>(InfoOffset) + 8 + CwavOffset, 4 + Cwavs.size() * 8);
+	mark(static_cast<size_t>(InfoOffset) + 8 + InstOffset, 4 + Insts.size() * 8);
+
+	for (const CbnkInst& inst : Insts)
+	{
+		if (!inst.Exists)
+		{
+			continue;
+		}
+
+		mark(inst.BodyOffset, InstHeaderLength(inst));
+
+		for (const CbnkNote& note : inst.Notes)
+		{
+			if (note.Exists)
+			{
+				mark(note.BodyOffset, NoteBodyLength(note));
+			}
+		}
+	}
+
+	for (size_t i = 0; i < covered.size(); )
+	{
+		if (covered[i] != 0)
+		{
+			++i;
+
+			continue;
+		}
+
+		size_t j = i;
+		bool nonZero = false;
+
+		while (j < covered.size() && covered[j] == 0)
+		{
+			if (Data[j] != 0)
+			{
+				nonZero = true;
+			}
+
+			++j;
+		}
+
+		if (nonZero)
+		{
+			GapSpans.emplace_back(static_cast<uint32_t>(i), std::vector<uint8_t>(Data + i, Data + j));
+		}
+
+		i = j;
+	}
+
 	return true;
 }
 
@@ -757,4 +869,171 @@ bool Cbnk::Export()
 	ofs.close();
 
 	return true;
+}
+
+// Reconstruct the exact source .bcbnk bytes from the parsed model, the inverse of
+// Parse. Reads only model state -- never Data. The header, INFO header, CWAV table
+// and instrument table are recomputed at their fixed positions; the instrument and
+// note bodies are written positionally at their retained offsets (the offset tables
+// place them out of order with gaps, so a linear re-emit is impossible), and the
+// retained GapSpans overlay the handful of unread runs the bodies do not cover.
+vector<uint8_t> Cbnk::Serialize()
+{
+	vector<uint8_t> out(static_cast<size_t>(Length), 0);
+
+	// Write the low `bytes` bytes of `value` at absolute offset `off` (little-endian
+	// by default, big-endian for the ASCII magics). Offsets come from the parsed
+	// model, so they are in range on any bank Parse accepted.
+	auto put = [&](size_t off, uint32_t value, size_t bytes, bool littleEndian = true)
+	{
+		for (size_t i = 0; i < bytes; ++i)
+		{
+			out[off + i] = static_cast<uint8_t>(value >> ((littleEndian ? i : bytes - i - 1) * 8));
+		}
+	};
+
+	// CBNK header.
+	put(0, 0x43424E4B, 4, false);   // 'CBNK'
+	put(4, 0xFEFF, 2);
+	put(6, 0x20, 2);
+	put(8, Version, 4);
+	put(12, static_cast<uint32_t>(Length), 4);
+	put(16, 0x1, 4);
+	put(20, 0x5800, 4);
+	put(24, InfoOffset, 4);
+	put(28, InfoLength, 4);
+
+	// INFO header: magic, length, then the two sub-table pointers.
+	put(InfoOffset, 0x494E464F, 4, false);   // 'INFO'
+	put(static_cast<size_t>(InfoOffset) + 4, InfoLength, 4);
+	put(static_cast<size_t>(InfoOffset) + 8, 0x100, 4);
+	put(static_cast<size_t>(InfoOffset) + 12, CwavOffset, 4);
+	put(static_cast<size_t>(InfoOffset) + 16, 0x101, 4);
+	put(static_cast<size_t>(InfoOffset) + 20, InstOffset, 4);
+
+	// CWAV reference table: count, then (war word, sample id) per record. Re-add the
+	// 0x5000000 Parse subtracted from the war word (exact under uint32 wrap).
+	size_t cwavBase = static_cast<size_t>(InfoOffset) + 8 + CwavOffset;
+	put(cwavBase, static_cast<uint32_t>(Cwavs.size()), 4);
+
+	for (size_t i = 0; i < Cwavs.size(); ++i)
+	{
+		put(cwavBase + 4 + i * 8, Cwavs[i].Cwar + 0x5000000, 4);
+		put(cwavBase + 4 + i * 8 + 4, Cwavs[i].Id, 4);
+	}
+
+	// Instrument offset table: count, then (raw table word, offset) per entry.
+	size_t instBase = static_cast<size_t>(InfoOffset) + 8 + InstOffset;
+	put(instBase, static_cast<uint32_t>(Insts.size()), 4);
+
+	for (size_t i = 0; i < Insts.size(); ++i)
+	{
+		put(instBase + 4 + i * 8, Insts[i].TableMagic, 4);
+		put(instBase + 4 + i * 8 + 4, Insts[i].TableOffset, 4);
+	}
+
+	// Instrument and note bodies, each at its retained BodyOffset.
+	for (const CbnkInst& inst : Insts)
+	{
+		if (!inst.Exists)
+		{
+			continue;
+		}
+
+		size_t bp = inst.BodyOffset;
+		put(bp, inst.Type, 4);
+		put(bp + 4, 0x8, 4);
+
+		size_t p = bp + 8;
+
+		if (inst.Type == 0x6001)
+		{
+			put(p, inst.NoteCount, 4);
+			p += 4;
+
+			for (uint32_t j = 0; j < inst.NoteCount; ++j)
+			{
+				out[p++] = inst.Notes[j].EndNote;
+			}
+
+			// The parser-proven zero pad to the next 4-byte boundary (already zero
+			// in the buffer, so just advance past it).
+			uint32_t padding = inst.NoteCount % 4;
+
+			if (padding)
+			{
+				p += 4 - padding;
+			}
+		}
+		else if (inst.Type == 0x6002)
+		{
+			put(p, inst.NoteCount - 1, 2, false);
+			p += 4;   // the half-word count plus a zero half-word
+		}
+
+		// Note offset table: (raw table word, offset) per note.
+		for (uint32_t j = 0; j < inst.NoteCount; ++j)
+		{
+			put(p, inst.Notes[j].TableMagic, 4);
+			put(p + 4, inst.Notes[j].TableOffset, 4);
+			p += 8;
+		}
+
+		for (const CbnkNote& note : inst.Notes)
+		{
+			if (!note.Exists)
+			{
+				continue;
+			}
+
+			size_t q = note.BodyOffset;
+			put(q, note.Id, 4);
+			put(q + 4, 0x8, 4);
+			put(q + 8, note.Word08, 4);
+			put(q + 12, note.Word0C, 4);
+
+			size_t k = q + 16;
+
+			if (note.Id == 0x6001)
+			{
+				put(k, note.Word6001_10, 4); k += 4;
+				put(k, note.Word6001_14, 4); k += 4;
+				put(k, note.Word6001_18, 4); k += 4;
+				put(k, note.Word6001_1C, 4); k += 4;
+			}
+
+			put(k, note.CwavIndex, 4); k += 4;
+			put(k, note.Flags, 4); k += 4;
+			put(k, note.RootKey, 4); k += 4;
+			put(k, note.Volume, 4); k += 4;
+			put(k, note.Pan, 4); k += 4;
+
+			// Tune is the f32 pitch ratio stored as raw bits; copy the bits back out
+			// (no float arithmetic, so it round-trips exactly).
+			uint32_t tuneBits;
+			memcpy(&tuneBits, &note.Tune, sizeof(tuneBits));
+			put(k, tuneBits, 4); k += 4;
+
+			put(k, note.Word28, 2); k += 2;
+			out[k] = note.Interpolation; k += 2;   // interp byte + a zero pad byte
+			put(k, note.DataRef2C, 4); k += 4;
+			put(k, note.DataRef30, 4); k += 4;
+			put(k, note.DataRef34, 4); k += 4;
+			out[k++] = note.Attack;
+			out[k++] = note.Decay;
+			out[k++] = note.Sustain;
+			out[k++] = note.Hold;
+			out[k++] = note.Release;
+			// three trailing zero-pad bytes are already zero.
+		}
+	}
+
+	// Overlay the unread runs the bodies do not cover (note-body tails, inter-body
+	// padding); all-zero runs were not retained and stay zero from the fill.
+	for (const auto& span : GapSpans)
+	{
+		copy(span.second.begin(), span.second.end(), out.begin() + span.first);
+	}
+
+	return out;
 }

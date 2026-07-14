@@ -143,10 +143,19 @@ struct Cbnk
 	uint32_t InstOffset = 0;
 
 	// The parsed model, promoted from Convert's function locals so it survives the
-	// Parse -> Export split (the offsets on CbnkInst/CbnkNote reference into Data,
-	// so this owner must outlive any use of them).
+	// Parse -> Export/Serialize split (the offsets on CbnkInst/CbnkNote reference
+	// into Data, so this owner must outlive any use of them).
 	std::vector<CbnkCwav> Cwavs;
 	std::vector<CbnkInst> Insts;
+
+	// Bytes the parser never reads -- note-body tails and inter-body padding the
+	// offset tables skip over -- captured verbatim (offset relative to Data) so
+	// Serialize reproduces the exact file layout. Only runs that contain a non-zero
+	// byte are stored (Serialize zero-fills the rest); empty for all but a handful
+	// of banks (corpus-wide only ~1.5 KB across 5 banks carry any unread byte), see
+	// the round-trip write-up. Positional reconstruction plus this overlay is what
+	// makes the region lossless despite the out-of-order, gapped body layout.
+	std::vector<std::pair<uint32_t, std::vector<uint8_t>>> GapSpans;
 
 	// The parent hands over the span its just-written .bcbnk was serialised from
 	// (a pointer + length into the parent's already-loaded buffer), so the child
@@ -159,12 +168,23 @@ struct Cbnk
 	~Cbnk();
 
 	// Parse the CBNK/INFO headers and build the model (cwav table, instrument and
-	// note bodies). No SF2 output; every parse-phase Assert/Error/Analyse/Warning
-	// fires here. Call once before Export.
+	// note bodies), then capture the unread-byte GapSpans. No SF2 output; every
+	// parse-phase Assert/Error/Analyse/Warning fires here. Call once before Export
+	// or Serialize.
 	bool Parse();
 
 	// Build and write the .sf2 from the parsed model, resolving live Cwav samples
 	// from the shared Cwars. The per-sample <id>.wav stdout echo, the release-127
 	// warning, and the missing-sample throw fire here. Call only after Parse().
 	bool Export();
+
+	// Re-serialize the parsed model back to the exact source .bcbnk bytes: the
+	// inverse of Parse, reading ONLY model state (never Data) -- so it proves the
+	// model is a lossless representation of the file. The body region is
+	// reconstructed positionally (each instrument/note body written at its retained
+	// offset into a Length-sized zero buffer) because the offset tables place bodies
+	// out of order with gaps; the retained GapSpans overlay the few unread runs. The
+	// stage-1 round-trip harness (caesar-roundtrip) compares the result against a
+	// saved copy of the source span. Call only after Parse().
+	std::vector<uint8_t> Serialize();
 };

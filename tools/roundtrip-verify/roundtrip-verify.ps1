@@ -12,17 +12,19 @@
 
     The exe re-serialises each child from the parsed model and compares against a
     copy of the source span (never the live buffer). A format with no Serialize()
-    yet reports SKIPPED. As of commit 1, BCSEQ re-serialises (its matched count is
-    the proof); BCBNK/BCSAR follow in commits 3/4, and BCWAR/BCWAV/BCWSD/BCGRP are
+    yet reports SKIPPED. As of commit 3, BCSEQ and BCBNK re-serialise (their matched
+    counts are the proof); BCSAR follows in commit 4, and BCWAR/BCWAV/BCWSD/BCGRP are
     permanently opaque (DSP-ADPCM can never round-trip), so they stay SKIPPED.
 
     Exit rule (the never-a-false-pass floor): an archive exits 0 only when every
     child re-serialised AND matched (skipped == 0); a partial verify — some matched,
     some still SKIPPED — is exit 2, NOT a pass. Because the BCSAR container is itself
-    a verify target and stays SKIPPED until commit 4, every archive is partial today,
-    so the whole corpus aggregates to exit 2 with BCSEQ shown green at its full
-    matched count. Exit 0 becomes reachable once commits 3-4 land and the opaque
-    formats are the only remaining skips. A single mismatch anywhere is exit 1.
+    a verify target and stays SKIPPED until commit 4 (as do the opaque BCWAR/BCWAV/
+    BCWSD/BCGRP children), every archive is partial today, so the whole corpus
+    aggregates to exit 2 with BCSEQ and BCBNK shown green at their full matched
+    counts. Exit 0 becomes reachable once commit 4 lands the BCSAR container
+    serializer and the opaque formats are the only remaining skips. A single
+    mismatch anywhere is exit 1.
 
     Discipline mirrored from tools/ab-verify (see that script's notes): a single
     Stop-harness funnel, a trap so no unhandled error is mistaken for a clean run,
@@ -325,28 +327,37 @@ if ($SelfTest) {
     if ($vVacuous.Exit -ne 2) { $failures.Add("verdict for a vacuous (0 walked) record was $($vVacuous.Exit), expected 2") }
     Write-RtInfo 'aggregation contract: all-skip->2, mismatch->1, all-match->0, vacuous->2'
 
-    # 4. THE BYTE-FLIP PROOF (commit 1: BCSEQ Serialize landed). A harness that has
+    # 4. THE BYTE-FLIP PROOF (commit 1: BCSEQ; commit 3: BCBNK). A harness that has
     #    never caught a planted diff must not be trusted with a clean verdict. The
-    #    exe's --selftest re-serialises the first BCSEQ child, asserts it reproduces
-    #    the source span byte-for-byte, THEN flips one output byte and asserts the
-    #    compare catches it - returning 0 only when BOTH hold. Walk the corpus
-    #    (smallest-first) to the first archive that carries a BCSEQ; exit 2 from
-    #    --selftest means "no serialisable child here, try the next".
-    $flipChecked = $false
+    #    exe's --selftest re-serialises the first serialisable child of each deep
+    #    format (BCSEQ, BCBNK), asserts it reproduces the source span byte-for-byte,
+    #    THEN flips one output byte and asserts the compare catches it - returning 0
+    #    only when every proven format holds both. Walk the corpus (smallest-first)
+    #    until BOTH formats have a passing proof (they may come from different
+    #    archives); exit 2 from --selftest means "no serialisable child here".
+    $flipProven = @{}
+    $needFormats = @('BCSEQ', 'BCBNK')
     foreach ($a in $corpus) {
-        $out  = & $Exe --selftest $a.Path
-        $code = $LASTEXITCODE
-        $line = @($out) | Where-Object { $_ -like "SELFTEST`t*" } | Select-Object -First 1
-        if ($code -eq 2 -or -not $line -or $line -like '*no-serialisable-child*') { continue }
+        $out   = & $Exe --selftest $a.Path
+        $code  = $LASTEXITCODE
+        $lines = @($out) | Where-Object { $_ -like "SELFTEST`t*" -and $_ -notlike '*no-serialisable-child*' }
+        if (-not $lines) { continue }
+        if ($code -eq $ExitMismatch) { $failures.Add("$($a.Key): --selftest exit 1 (a format failed its round-trip or byte-flip)") }
 
-        $flipChecked = $true
-        if ($code -ne 0)                  { $failures.Add("$($a.Key): --selftest exit $code (expected 0: roundtrip + byteflip both hold)") }
-        if ($line -notlike '*roundtrip=1*')       { $failures.Add("$($a.Key): serializer did NOT round-trip the source ($line)") }
-        if ($line -notlike '*byteflip_caught=1*') { $failures.Add("$($a.Key): a planted byte-flip was NOT caught ($line)") }
-        Write-RtInfo "byte-flip proof: $($a.Key) -> $line"
-        break
+        foreach ($line in $lines) {
+            $fmt = ($line -split "`t")[2]
+            if ($line -notlike '*roundtrip=1*')            { $failures.Add("$($a.Key): $fmt did NOT round-trip the source ($line)") }
+            elseif ($line -notlike '*byteflip_caught=1*')  { $failures.Add("$($a.Key): $fmt planted byte-flip was NOT caught ($line)") }
+            elseif (-not $flipProven.ContainsKey($fmt)) {
+                $flipProven[$fmt] = $true
+                Write-RtInfo "byte-flip proof: $($a.Key) -> $line"
+            }
+        }
+        if (@($needFormats | Where-Object { -not $flipProven.ContainsKey($_) }).Count -eq 0) { break }
     }
-    if (-not $flipChecked) { $failures.Add('byte-flip proof: no corpus archive yielded a serialisable BCSEQ child') }
+    foreach ($need in $needFormats) {
+        if (-not $flipProven.ContainsKey($need)) { $failures.Add("byte-flip proof: no corpus archive yielded a serialisable $need child") }
+    }
 
     Write-Host ''
     if ($failures.Count -gt 0) {
@@ -356,7 +367,7 @@ if ($SelfTest) {
     }
     Write-Host '   SELF-TEST PASSED: the exe honours exit-2-when-not-fully-verifiable, a missing' -ForegroundColor Green
     Write-Host '   archive is a harness error, the verdict maps 0/1/2 (and vacuous->2) exactly, and' -ForegroundColor Green
-    Write-Host '   the serializer both round-trips a real BCSEQ and has its planted byte-flip caught.' -ForegroundColor Green
+    Write-Host '   the serializer round-trips a real BCSEQ AND BCBNK, each with its planted byte-flip caught.' -ForegroundColor Green
     exit $ExitAllMatch
 }
 

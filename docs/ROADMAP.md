@@ -203,6 +203,26 @@ per stage. Status:
       check. `caesar` output-identical. Shared `WriteFixLen`/`WriteVarLen` emit
       helpers in `Common` for commit 3 to reuse. Write-up in
       [HISTORY.md](HISTORY.md#suite-stage-1-commit-1--cseqserialize-the-bcseq-round-trip-serializer-2026-07-14).
+    - [x] **Commit 2 — the Cbnk retained-model + Parse/Export split
+      (2026-07-14).** The one class still parsing and emitting in a single
+      `Convert()`; now split into `Parse` (walk → retained model) and `Export`
+      (SF2 build), called back to back per bank, `caesar` output-identical. The
+      last two raw-pointer model fields become span-relative `uint32_t`, and the
+      model gains the blueprint §4 retention (`cbnkVersion`, the instrument-type
+      discriminator, the note `id`, the raw cwav index, the raw offset-table
+      words). 257,125-file A/B byte-identical, 18-surface goldens clean. Write-up
+      in [HISTORY.md](HISTORY.md#suite-stage-1-commit-2--the-cbnk-retained-model--parseexport-split-2026-07-14).
+    - [x] **Commit 3 — `Cbnk::Serialize()`, the BCBNK round-trip serializer
+      (2026-07-14).** `--verify` re-serialises every embedded `.bcbnk`:
+      **11,136 / 11,136 banks byte-identical corpus-wide, 0 mismatched** (BCSEQ
+      stays 20,791 / 20,791). The Cbnk-internal trap: instrument/note bodies are
+      placed out of index order with gaps, so the region is rebuilt
+      **positionally** (each body at its retained offset) with a retained
+      unread-gap overlay for the ~1.5 KB across 5 banks the read fields do not
+      cover. `caesar` output-identical (the `Parse` gap-capture emits nothing);
+      `-SelfTest` byte-flip proof now covers BCBNK. Overall harness exit stays
+      2 (PARTIAL) until the commit-4 BCSAR container. Write-up in
+      [HISTORY.md](HISTORY.md#suite-stage-1-commit-3--cbnkserialize-the-bcbnk-round-trip-serializer-2026-07-14).
 - [ ] **Stage 2 — dry player**: native-rate voices, console interpolation,
       solved envelopes, priority voice stealing (RE'd and confirmed), tempo
       clock, single final upsample.

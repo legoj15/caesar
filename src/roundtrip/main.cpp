@@ -24,10 +24,12 @@
 // Read-only: it calls Parse() (which does no I/O and creates no directories),
 // never Extract()/Export(). The archive bytes stay in memory for the whole run.
 
+#include "Cbnk.hpp"
 #include "Cgrp.hpp"
 #include "Common.hpp"
 #include "Cseq.hpp"
 #include "Csar.hpp"
+#include "Cwar.hpp"
 #include "Options.hpp"
 
 #include <algorithm>
@@ -223,11 +225,13 @@ namespace
 	// SKIPPED to verified. The permanently-opaque formats (BCWAR/BCWAV/BCWSD/BCGRP)
 	// never re-encode (CWAV cannot round-trip its DSP-ADPCM), so they stay nullopt.
 	//
-	// The Cseq ctor/Parse borrow the span read-only and never mutate it (the caller
-	// has already copied the source bytes out for the compare regardless); the cast
+	// The ctor/Parse borrow the span read-only and never mutate it (the caller has
+	// already copied the source bytes out for the compare regardless); the cast
 	// hands the borrowed buffer to the reader, which types Data as mutable. Parse's
 	// name echo is hushed. A parse failure is a genuine SKIP: caesar itself could
-	// not read the file, so there is nothing faithful to re-serialise.
+	// not read the file, so there is nothing faithful to re-serialise. Cbnk::Parse
+	// touches neither its Cwars map nor Opts (those are Export-only), so a scratch
+	// empty map + default Options suffice for the round-trip.
 	optional<vector<uint8_t>> trySerialize(const string& format, uint8_t* data, uint32_t length, ParseContext& ctx)
 	{
 		if (format == "BCSEQ")
@@ -239,6 +243,19 @@ namespace
 				return nullopt;
 			}
 			return seq.Serialize();
+		}
+
+		if (format == "BCBNK")
+		{
+			CoutSilencer hush;
+			map<int, Cwar*> noCwars;
+			Options opts;
+			Cbnk bank("<roundtrip-bnk>", data, length, &noCwars, opts, ctx);
+			if (!bank.Parse())
+			{
+				return nullopt;
+			}
+			return bank.Serialize();
 		}
 
 		return nullopt;
@@ -369,12 +386,13 @@ namespace
 	// SELF-TEST: the byte-flip proof (scheduled by commit 0)
 	// -----------------------------------------------------------------------
 
-	// Prove, on the first serialisable child of this archive, BOTH halves of the
-	// round-trip contract: (a) Serialize() reproduces the source span byte-for-byte,
-	// and (b) a single planted byte-flip in the output is DETECTED by the compare —
-	// a harness that cannot catch a planted diff must never be trusted with a clean
-	// verdict. Prints one SELFTEST line and returns 0 only when both hold. If the
-	// archive carries no serialisable child, returns 2 so the wrapper moves on.
+	// Prove, on the first serialisable child of EACH deep format present (BCSEQ,
+	// BCBNK), BOTH halves of the round-trip contract: (a) Serialize() reproduces the
+	// source span byte-for-byte, and (b) a single planted byte-flip in the output is
+	// DETECTED by the compare — a harness that cannot catch a planted diff must never
+	// be trusted with a clean verdict. Prints one SELFTEST line per proven format and
+	// returns 0 only when every one holds both halves. If the archive carries no
+	// serialisable deep child, returns 2 so the wrapper moves on.
 	int runSelfTest(Csar& csar, const string& archivePath)
 	{
 		vector<Embedded> children;
@@ -388,43 +406,61 @@ namespace
 			return ExitHarness;
 		}
 
-		for (const Embedded& child : children)
+		const char* deepFormats[] = { "BCSEQ", "BCBNK" };
+		int proven = 0;
+		bool allOk = true;
+
+		for (const char* fmt : deepFormats)
 		{
-			if (child.format != "BCSEQ")
+			for (const Embedded& child : children)
 			{
-				continue;
+				if (child.format != fmt)
+				{
+					continue;
+				}
+
+				vector<uint8_t> saved(child.data, child.data + child.length);
+				optional<vector<uint8_t>> produced = trySerialize(child.format, child.data, child.length, csar.Ctx);
+				if (!produced.has_value())
+				{
+					continue; // a child that would not parse: try the next of this format
+				}
+
+				bool roundtrip = (produced.value() == saved);
+
+				// Plant one flipped byte and confirm the compare catches it. Mid-buffer
+				// so it lands in the body, XOR so it is provably a new value.
+				vector<uint8_t> tampered = produced.value();
+				bool caught = false;
+				if (!tampered.empty())
+				{
+					size_t at = tampered.size() / 2;
+					tampered[at] ^= 0xFF;
+					caught = (tampered != saved);
+				}
+
+				cout << "SELFTEST\t" << archivePath << "\t" << child.format
+					<< "\tlen=" << saved.size()
+					<< "\troundtrip=" << (roundtrip ? 1 : 0)
+					<< "\tbyteflip_caught=" << (caught ? 1 : 0) << "\n";
+
+				++proven;
+				if (!(roundtrip && caught))
+				{
+					allOk = false;
+				}
+
+				break; // only the first serialisable child of this format
 			}
-
-			vector<uint8_t> saved(child.data, child.data + child.length);
-			optional<vector<uint8_t>> produced = trySerialize(child.format, child.data, child.length, csar.Ctx);
-			if (!produced.has_value())
-			{
-				continue; // a child that would not parse: try the next
-			}
-
-			bool roundtrip = (produced.value() == saved);
-
-			// Plant one flipped byte and confirm the compare catches it. Mid-buffer
-			// so it lands in the command stream, XOR so it is provably a new value.
-			vector<uint8_t> tampered = produced.value();
-			bool caught = false;
-			if (!tampered.empty())
-			{
-				size_t at = tampered.size() / 2;
-				tampered[at] ^= 0xFF;
-				caught = (tampered != saved);
-			}
-
-			cout << "SELFTEST\t" << archivePath << "\t" << child.format
-				<< "\tbcseq_len=" << saved.size()
-				<< "\troundtrip=" << (roundtrip ? 1 : 0)
-				<< "\tbyteflip_caught=" << (caught ? 1 : 0) << "\n";
-
-			return (roundtrip && caught) ? ExitAllMatch : ExitMismatch;
 		}
 
-		cout << "SELFTEST\t" << archivePath << "\tno-serialisable-child\n";
-		return ExitHarness;
+		if (proven == 0)
+		{
+			cout << "SELFTEST\t" << archivePath << "\tno-serialisable-child\n";
+			return ExitHarness;
+		}
+
+		return allOk ? ExitAllMatch : ExitMismatch;
 	}
 
 	// -----------------------------------------------------------------------

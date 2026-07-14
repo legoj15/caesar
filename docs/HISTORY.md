@@ -3597,3 +3597,87 @@ the split + the lossless scalar model.
 `multi-bleed` (the caravel bank's Note `.log` rows + `<id>.wav` echoes) and the `-w`
 `w-pksnd`/`w-dlplay`/`w-queenstream` surfaces that carry Cbnk warnings, so the split's
 diagnostic output is proven unchanged.
+
+## Suite stage 1 commit 3 — `Cbnk::Serialize()`, the BCBNK round-trip serializer (2026-07-14)
+
+The blueprint's commit 3: `std::vector<uint8_t> Cbnk::Serialize()` on `caesar_core`, the
+inverse of `Cbnk::Parse`. It reconstructs the whole `.bcbnk` from model state alone, never
+re-reading `Data`, and the round-trip harness proves it byte-identical over the entire
+corpus. Additive: nothing on the shipped export path calls it, so `caesar` stays
+output-identical.
+
+**Empirical method (the commit-1 discipline).** Before touching C++, a standalone Python
+parser + serializer was iterated against every embedded CBNK blob pulled straight from the
+archives until it round-tripped **all 11,136 banks byte-for-byte**. That reference settled
+the layout facts below — in particular it was the tool that discovered the out-of-order,
+gapped body region and measured the exact unread-byte set — and the C++ then mirrors it.
+(Kept in the session scratchpad, not committed.)
+
+**The byte layout.** A `.bcbnk` is `[header 0x20][INFO …]`, with the INFO section spanning
+the rest of the file. INFO is `magic + length + two sub-table pointers (0x100 CWAV, 0x101
+inst)`, then the CWAV reference table (count + `(war word, sample id)` records), the
+instrument offset table (count + `(0x5900 magic, offset)` entries), and the instrument and
+note **bodies**. The header/tables are recomputed at their fixed positions; the war word is
+the retained resolved index plus `0x5000000` (exact under uint32 wrap).
+
+**Finding 1 — the body region is placed out of order, with gaps, so it cannot be re-emitted
+linearly.** Every instrument body (located via the inst table, offset relative to
+`InfoOffset + 24`) and every note body (via that instrument's note-offset table, offset
+relative to the inst body + 8) sits at an offset the table dictates — and the corpus lays
+them **out of index order**, interleaved across instruments, with padding between. The
+serializer therefore writes the whole region **positionally**: allocate a `Length`-sized
+zero buffer and write each instrument/note body at its retained `BodyOffset`. The three
+instrument types serialize with different body headers (0x6000 implicit single note; 0x6001
+note count + one `EndNote` byte per note + the parser-proven 4-byte-alignment zero pad;
+0x6002 a big-endian note-count-1 half-word + a zero half-word); a note body is 0x40 bytes,
+or 0x50 when its `id` is 0x6001 (the layered-note quartet). The `NoteBodyLength` /
+`InstHeaderLength` rules are factored into one place so the parse-side gap capture and the
+serialize-side write agree on every extent.
+
+**Finding 2 — a few note-body tails and inter-body pads are never read; they must be
+retained.** The read fields tile each bank almost perfectly, but a coverage scan (rebuilt
+in the C++ `Parse` from the model extents) shows **1,584 bytes are never read corpus-wide,
+all in 5 banks** (`MeetSound`, `SoundData1`): note-body tails where a 0x6001 record strides
+0x80 while the parser reads only 0x50. The other **11,131 banks have zero unread bytes**.
+So `Parse` now walks a coverage bitmap after building the model and retains each maximal
+unread run that carries a non-zero byte (`Cbnk::GapSpans`, offset + bytes); `Serialize`
+zero-fills the buffer and overlays those runs (all-zero runs are not stored — the fill
+reproduces them). This is the CBNK analogue of the BCSEQ commit's two layout traps, and it
+is why "reconstruct every field" alone is not lossless here.
+
+**No table collapse.** Checked for the Finding-2-class pointer/dedup collapse the commit-1
+write-up warned about: the CWAV table is a flat file-order list (no dedup), and each note
+carries its own raw index (retained beside the resolved `Cwav*` the substitution path would
+otherwise clobber), so a rebuild from the resolved model is faithful — no separate
+file-order retention needed, unlike LABL.
+
+**Harness wiring + the exit contract.** `--verify`'s `trySerialize` seam now parses a BCBNK
+span (read-only borrow, name echo hushed, a scratch empty `Cwars` map + default `Options`
+since `Parse` touches neither) and returns `Serialize()`. The exe's `--selftest` and the
+wrapper's `-SelfTest` byte-flip proof were generalised from "the first BCSEQ child" to "the
+first serialisable child of each deep format", so both BCSEQ and BCBNK are round-tripped and
+have a planted one-byte diff caught (the wrapper walks the corpus until both formats are
+proven). The per-archive exit rule is unchanged: BCBNK matching lifts `matched` but the
+BCSAR container and the opaque BCWAR/BCWAV/BCWSD/BCGRP children stay SKIPPED, so every
+archive is still PARTIAL → the corpus aggregates to exit 2, with BCSEQ and BCBNK both shown
+green at their full matched counts. Exit 0 becomes reachable at commit 4.
+
+**Result + gate (all green).** `--verify` corpus-wide: **BCBNK 11,136 / 11,136 byte-identical,
+0 mismatched, 0 skipped** (BCSEQ stays 20,791 / 20,791; 82 archives; overall run exit 2 =
+PARTIAL, by contract). Warning-clean MSVC Release build (`/W3 /WX`). Corpus A/B vs `HEAD`
+(`d2ccb25`, commit 2): **82 archives / 257,125 files byte-identical, stdout/stderr identical,
+exit 0** — the `Parse` gap-capture emits nothing and `Serialize` is dev-tool-only.
+Diagnostics goldens **18/18 byte-identical** (exit 0). `roundtrip-verify -SelfTest` green,
+including the byte-flip proof on `caravel.bcsar` for **both** BCSEQ (`roundtrip=1
+byteflip_caught=1`) and BCBNK (`roundtrip=1 byteflip_caught=1`).
+
+**For commit 4 (BCSAR container).** BCSEQ and BCBNK are now the two deep-serializable
+children; the container serializer copies child blobs through as spans (recomputing every
+offset AND length from the laid-out blob), and the commit-0 scan already settled the
+reproduce-by-rule padding + the container-nesting re-point (a nested FILE entry lands inside
+its CGRP container span, never re-copied). Once BCSAR lands and the opaque formats are the
+only skips, the per-archive exit reaches 0 and the corpus aggregate flips from 2 to 0 — the
+stage-1 proof criterion. One Cbnk-specific note: `Cbnk::Serialize` reconstructs bodies
+positionally from retained offsets, so the optional deep-re-embed capstone (commit 5) that
+re-lays-out children would need Cbnk to expose a relocation path — out of scope here, and
+not required for the container round-trip, which consumes the child blob verbatim.

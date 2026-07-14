@@ -24,6 +24,29 @@ House rules:
 
 ### Added
 
+- **BCBNK round-trip serialization (`Cbnk::Serialize()` in `caesar_core`) — the
+  stage-1 milestone's second serializer, proven byte-identical over the whole
+  corpus.** The inverse of `Cbnk::Parse`, reading only model state and never the
+  source buffer. The header, INFO header, CWAV table and instrument table are
+  recomputed at their fixed positions; the instrument and note bodies are written
+  **positionally** — each at its retained file offset into a zero-filled buffer —
+  because the offset tables place bodies out of index order with gaps between them,
+  so a linear re-emit is impossible. The one Cbnk-internal trap (found by a
+  standalone parser+serializer over all 11,136 corpus banks before the C++): the
+  read fields tile each bank almost perfectly, but a handful of note-body tails
+  and inter-body pads are never read — corpus-wide only ~1.5 KB across 5 banks —
+  so `Parse` now captures those unread runs (only the non-zero ones; the rest are
+  reproduced by the zero fill) and `Serialize` overlays them. The `caesar-roundtrip`
+  dev tool's `--verify` now re-serialises every embedded `.bcbnk` and compares
+  against a saved source span: **11,136 / 11,136 banks across 82 archives
+  byte-identical, 0 mismatched** (BCSEQ stays 20,791 / 20,791; the BCSAR container
+  and the opaque BCWAR/BCWAV/BCWSD/BCGRP children remain SKIPPED, so the run stays
+  exit 2 = PARTIAL by contract until the commit-4 container serializer). The exe's
+  `--selftest` and the wrapper's `-SelfTest` byte-flip proof now cover BCBNK as
+  well as BCSEQ. (`output-identical` for the shipped `caesar` — the `Parse`
+  gap-capture produces no output and `Serialize` is dev-tool-only; 82-archive /
+  257,125-file corpus A/B byte-identical with identical stdout/stderr, exit 0;
+  18-surface diagnostics goldens byte-identical.)
 - **BCSEQ round-trip serialization (`Cseq::Serialize()` in `caesar_core`) — the
   stage-1 milestone's first serializer, proven byte-identical over the whole
   corpus.** The exact inverse of `Cseq::Parse`: it walks the parsed command map
