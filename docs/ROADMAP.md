@@ -298,6 +298,15 @@ list is the known defect tail.
   the whole track walk** — the lookup misses, the loop exits, and every
   remaining track is skipped with no notice (the start-offset and jump-target
   fallbacks are noticed; this path is not). Malformed-input edge only.
+- **A borrowed span-child's out-of-bounds read can fall through to the parent
+  range.** Since the Cwar/Cwav span construction (2026-07-13), a borrowed
+  child's `CheckBounds` range is a sub-range of the parent's still-registered
+  range; a read landing entirely past the child's declared length — reachable
+  only on a malformed/truncated embedded file — used to throw "points outside
+  the loaded data" and now silently succeeds if it stays inside the parent's
+  buffer. Corpus-invisible (a well-formed child never addresses past its own
+  length; the A/B would have caught any flip). Fix, if it ever matters: give
+  `CheckBounds` per-child range scoping, or copy that path.
 - **Bank note fields are read at hardcoded offsets** (`Cbnk.cpp`, the
   note-parse loop). The format actually locates the ADSHR envelope through a
   `DataRef` chain (`note+0x10 + *(note+0x2C)`, then `+8`), and which optional
