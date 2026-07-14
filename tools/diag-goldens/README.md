@@ -37,7 +37,8 @@ the ones the fold most endangers, because every one of them is produced by the
 | **CheckBounds** throws | `bounds-overrun`, `bounds-outside` | the `archive damaged: …` text + main's `ERROR IN / MESSAGE` catch block |
 | **RequireOpen** | `require-open` (zero-byte file) | the missing/empty-file error; **stdout is empty** here (the `Push` echo never runs — pinned) |
 | **CLI errors** | `cli-noargs`, `cli-version`, `cli-padsustain`, `cli-missing-odir`, `cli-noinput` | usage text, version string, argument-error text, exit codes |
-| **`-w` per-item detail** | `w-queenstream`, `w-pksnd` | the positional `WARNING IN / AT POSITION` blocks + the run's `.log` bytes |
+| **`-w` per-item detail (Csar/Cbnk)** | `w-queenstream`, `w-pksnd` | the positional `WARNING IN / AT POSITION` blocks + the run's `.log` bytes |
+| **`-w` per-item detail (Cseq emit walk)** | `w-dlplay` | the ~40 sequence-command warning sites (Rnd midpoint, ramped `_t`, sustain level, span, LFO retarget, stray Return); direct-path, so positions are the true DATA-relative offsets. The one `-w` surface exercising Cseq. |
 | **Multi-input `.log` bleed** | `multi-bleed` (`caravel` then `pksnd`, one process) | `b.log` currently = `a`'s rows **followed by** `b`'s (`Common::Log` is cleared only on the exception path). This golden **pins the bleed as-is**; fixing it is a later, deliberate output-changing commit — the fold must *reproduce* it. |
 | **`-w` on a failure path** | `fix-assert-magic-w`, `fix-bounds-overrun-w` | pins that `-w` adds *nothing* before an early failure (no warning has fired yet) |
 
@@ -64,11 +65,21 @@ harness error (exit 2), never a pass — otherwise a golden could silently pin a
   `0x0000E590`, a constant per-run offset) that a "looks-like-garbage" filter
   would wrongly accept. So the `-w` golden set is chosen **empirically**: every
   `-w` success archive is run **twice** and must be byte-identical both times,
-  in capture *and* compare (a run-to-run mismatch is exit 2). Only `pksnd`
-  (metadata-only, 42 warning blocks) and `queenstream` (one Csar-level
-  external-stream warning) survive that filter among the small archives; the
-  multi-input and corrupted goldens run **without `-w`** so they stay
-  deterministic.
+  in capture *and* compare (a run-to-run mismatch is exit 2). Among the small
+  archives, `pksnd` (metadata-only, 42 warning blocks) and `queenstream` (one
+  Csar-level external-stream warning) survive that filter; the multi-input and
+  corrupted goldens run **without `-w`** so they stay deterministic.
+- **The Cseq emit walk is the exception — it is now deterministic under `-w`.**
+  Since the model/exporter split (2026-07-14), every Cseq warning locates its
+  `AT POSITION` from a stored command offset (`DataOffset + 8 + offset`), not
+  `pos - Offsets.top()`, so a sequence's `-w` positions are the true
+  DATA-relative offsets regardless of the stack top. `w-dlplay` pins that
+  surface — `dlplay` is the smallest archive whose whole `-w` run is
+  deterministic **and** exercises the ~40 sequence-command warning sites. A
+  whole-corpus scan found **no** archive that routes sequences through an
+  embedded group, so a *group-resident* Cseq `-w` case cannot be pinned from this
+  corpus (it would still be nondeterministic on the untouched `Cwav`/`Cbnk`/
+  `Cgrp`/`Csar` pointer-form sites that share the archive anyway).
 
 ## How it works
 
@@ -94,7 +105,7 @@ positions, hex, tabs, and blank lines are the payload being pinned.
 
 ### Fixtures & source archives
 
-Fixtures are mutated from three small corpus archives, chosen for exact
+Fixtures are mutated from four small corpus archives, chosen for exact
 properties:
 
 - **`caravel`** (`F-Zero\caravel.bcsar`, version `0x02000000`) — the smallest
@@ -107,6 +118,9 @@ properties:
   clean, deterministic `-w` archive and the multi-input `b`.
 - **`queenstream`** (`Ocarina\sound\QueenStream.bcsar`) — a tiny stream-only
   archive; a second deterministic `-w` archive.
+- **`dlplay`** (`3DSNand\sound\dlplay.bcsar`) — a small archive with real
+  direct-path sequences, so its Cseq `-w` warnings are deterministic; the only
+  golden that exercises the Cseq emit-walk warning sites (run verbatim, `-w`).
 
 One mutation per **mechanism**, not per call site (the header is a fixed layout;
 `error-enum`/`bounds-overrun` parse the archive's own header at generation time

@@ -76,6 +76,16 @@ struct ParseContext
 	}
 
 	void Warning(uint8_t* pos, std::string msg, const std::string& noticeCategory = "");
+
+	// Offset-taking overload: the caller supplies the AT POSITION value directly
+	// (a buffer-relative offset) instead of a raw pointer, so no `pos -
+	// Offsets.top()` subtraction is performed. The pointer form is only
+	// deterministic when the top-of-stack frame is the very buffer `pos` points
+	// into; where a reader locates a warning by a stored offset it already knows
+	// (e.g. Cseq's emit walk over a parsed command map), pass it here and the
+	// AT POSITION line is the true in-file offset regardless of what frame tops
+	// the shared stack. Identical output format to the pointer form.
+	void Warning(uint32_t position, std::string msg, const std::string& noticeCategory = "");
 	void FlushNotices(const std::string& inputName);
 	void Push(std::string fileName, uint8_t* data, std::streamoff length);
 	void Pop();

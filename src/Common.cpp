@@ -104,6 +104,31 @@ void ParseContext::Warning(uint8_t* pos, string msg, const string& noticeCategor
 	}
 }
 
+// Offset-taking overload (see the header). Identical to the pointer form except
+// that AT POSITION is the caller-supplied value verbatim -- no pointer
+// subtraction against Offsets.top(), so the position is correct even when the
+// stack top is a different buffer than the one the warning belongs to (the
+// heap-layout nondeterminism the pointer form suffers on deferred/borrowed
+// walks). The `hex << setfill('0') << uppercase << setw(8)` formatting matches
+// byte-for-byte, so a site that already resolved to its own buffer prints the
+// same bytes through either overload.
+void ParseContext::Warning(uint32_t position, string msg, const string& noticeCategory)
+{
+	if (!noticeCategory.empty())
+	{
+		++Notices[noticeCategory];
+	}
+
+	if (ShowWarnings)
+	{
+		cerr << hex << setfill('0') << uppercase << endl;
+		cerr << "WARNING IN\t" << FileNames.top() << endl;
+		cerr << "AT POSITION\t0x" << setw(8) << position << endl;
+		cerr << "MESSAGE\t\t" << msg << endl;
+		cerr << endl;
+	}
+}
+
 // Print the "content skipped or approximated" summary gathered while processing
 // one top-level input, then reset for the next. Shown by default (independent of
 // -w) so a normal run reports what it dropped; -w adds the per-item detail. A no

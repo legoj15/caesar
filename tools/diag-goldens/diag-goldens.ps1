@@ -217,10 +217,20 @@ function Remove-DgDir { param([string] $Path)
 #                clean, deterministic -w archive (metadata-only, no wave decode).
 #   queenstream  Ocarina -- tiny stream-only archive; a second deterministic -w
 #                archive (exercises the Csar-level external-stream warning).
+#   dlplay       3DSNand -- small archive whose sequences convert DIRECT off the
+#                Csar (not via an embedded group), so every Cseq warning resolves
+#                against its own frame and the whole -w run is deterministic
+#                (confirmed 5/5 byte-identical). The ONLY -w golden that exercises
+#                the ~40 Cseq emit-walk warning sites -- the biggest -w surface in
+#                the tool, and one the corpus A/B (which never passes -w) cannot
+#                see. Its warnings span the Rnd-midpoint, ramped-_t, sustain-level,
+#                span, LFO-retarget and stray-Return sites, so it guards the
+#                stored-offset diagnostics the model/exporter split introduced.
 $SourceArchives = @(
     @{ Key = 'caravel';     Rel = 'F-Zero\caravel.bcsar' }
     @{ Key = 'pksnd';       Rel = 'pokemon red\snd\PKSnd.bcsar' }
     @{ Key = 'queenstream'; Rel = 'Ocarina\sound\QueenStream.bcsar' }
+    @{ Key = 'dlplay';      Rel = '3DSNand\sound\dlplay.bcsar' }
 )
 
 # BCSAR fixed header words we need to locate mutation targets.
@@ -276,6 +286,7 @@ $Fixtures = @(
     @{ Name = 'caravel';        Source = 'caravel';     Recipe = 'verbatim' }
     @{ Name = 'pksnd';          Source = 'pksnd';       Recipe = 'verbatim' }
     @{ Name = 'queenstream';    Source = 'queenstream'; Recipe = 'verbatim' }
+    @{ Name = 'dlplay';         Source = 'dlplay';      Recipe = 'verbatim' }
 )
 
 # The family marker each corrupted fixture MUST still emit. If a fixture stops
@@ -322,6 +333,10 @@ $Invocations = @(
     # --- -w success goldens (deterministic; run twice) ---
     @{ Name = 'w-queenstream'; Fixtures = @('queenstream'); Flags = @('-w'); ExpectExit = 0; DetCheck = $true }
     @{ Name = 'w-pksnd';       Fixtures = @('pksnd');       Flags = @('-w'); ExpectExit = 0; DetCheck = $true }
+    # The only -w golden that exercises the Cseq emit-walk warning sites (the
+    # rest are Csar external-stream warnings). Direct-path sequences, so its -w
+    # positions are the true DATA-relative offsets and the run is deterministic.
+    @{ Name = 'w-dlplay';      Fixtures = @('dlplay');      Flags = @('-w'); ExpectExit = 0; DetCheck = $true }
 
     # --- multi-input .log bleed (one process, two inputs; pins b.log = a's rows + b's) ---
     @{ Name = 'multi-bleed'; Fixtures = @('caravel', 'pksnd'); Flags = @(); ExpectExit = 0 }

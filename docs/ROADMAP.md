@@ -202,12 +202,20 @@ per stage. Status:
       `-w` heap-nondeterminism Known bug together (an intentional, isolated
       `-w` golden change). Full blueprint in
       [HISTORY.md](HISTORY.md#suite-stage-0--the-modelexporter-split-blueprint-2026-07-13-survey).
-      **Commits 1–3 of 5 done (2026-07-14): `Cwav` → `Parse`/`ExportWav`;
+      **Commits 1–4 of 5 done (2026-07-14): `Cwav` → `Parse`/`ExportWav`;
       `Cwar` → `Parse` (cwav table + FILE span + `cwarVersion`)/`Export`; `Cbnk`
       decoupled from the live `Cwav` — `CbnkCwav` shrinks to the raw sample ref,
       resolution + the `<id>.wav` echo move into the SF2 emit phase, and the
-      logged-then-dropped note words are retained. Two commits remain (`Cseq`,
-      `Csar`+`Cgrp`).**
+      logged-then-dropped note words are retained; `Cseq` → `Parse` (command map)
+      / `Export` (VM + control-flow + MIDI walk), with each `CseqCmd` carrying its
+      own source offset and `DataOffset`/`Version` retained, so the emit walk is
+      buffer-independent and its `-w` diagnostics locate via stored offsets (an
+      additive `ParseContext::Warning(uint32_t, …)` overload). This also fixes the
+      Cseq slice of the `-w` heap-nondeterminism Known bug, though it is latent
+      corpus-wide (no sequence is group-resident) — so the blueprint's "intentional
+      `-w` golden change" did not materialise; output-identical on every surface,
+      with a new `w-dlplay` golden added to cover the Cseq `-w` surface. One commit
+      remains (`Csar`+`Cgrp`).**
 - [ ] **Stage 1 — byte-identical round-trip** of BCSEQ/BCBNK/BCSAR from a
       raw-backed model (**the next milestone** — the cheapest complete proof
       the format is understood, and the serializer everything else sits on).
@@ -350,21 +358,32 @@ list is the known defect tail.
   Surfaced by the 2026-07-11 `0xE3` research (sweep pitch and portamento are
   independent, additive mechanisms). Verify CC84 semantics across target
   players before changing anything.
-- **`-w` positional warning output is heap-layout nondeterministic.** caesar
-  computes a warning's `AT POSITION` as `pos - Offsets.top()`; when `pos` and
-  the top-of-stack buffer base come from *different* heap allocations (any
-  archive that warns during wave/bank decode — empirically **broader** than the
-  group-resident conversions first suspected), the subtraction is garbage that
-  shifts run-to-run with the heap layout. Affects only the `-w` per-item
-  `AT POSITION` line; the default-visible notice summary and every output file
-  are unaffected, so it is byte-level rather than audible. The real fix is to
-  carry each warning's offset relative to its own buffer instead of the shared
-  stack top — a stage-1 drop-the-buffer prerequisite that overlaps the Cseq
-  VM-diagnostics offset work. Pinned empirically by `tools/diag-goldens` (its
-  `-w` golden set is chosen by a twice-run byte-identity filter). *(Was filed
-  alongside the multi-input `.log` bleed, which was a lifetime bug and is now
-  fixed — 2026-07-13, HISTORY; this position bug is a separate heap-layout one
-  and remains open.)*
+- **`-w` positional warning output is heap-layout nondeterministic — `Cwav`/
+  `Cbnk`/`Cgrp`/`Csar` sites (the Cseq slice is fixed).** caesar computes a
+  warning's `AT POSITION` as `pos - Offsets.top()`; when `pos` and the
+  top-of-stack buffer base come from *different* heap allocations (any archive
+  that warns during wave/bank decode, or a group's `Skipping INFX`/`CWSD` and
+  external-group warnings — empirically **broader** than the group-resident
+  conversions first suspected), the subtraction is garbage that shifts run-to-run
+  with the heap layout. Affects only the `-w` per-item `AT POSITION` line; the
+  default-visible notice summary and every output file are unaffected, so it is
+  byte-level rather than audible. **The Cseq slice is fixed** (2026-07-14,
+  model/exporter commit 4): the emit walk now locates each warning from a stored
+  command offset via the new `ParseContext::Warning(uint32_t, …)` overload, so a
+  group-resident sequence would print the true in-file offset. That fix is
+  **latent on this corpus** — a whole-corpus scan found every sequence converts
+  direct off the `Csar` (none via an embedded group), where the stored offset
+  already equals the subtraction, so the corpus `-w` bytes are unchanged. The
+  real fix for the remaining sites is the same shape (carry each warning's offset
+  relative to its own buffer; the overload is ready to adopt) — a stage-1
+  drop-the-buffer prerequisite. A **separate residue this did NOT touch:** the
+  `WARNING IN <file>` line also reads the shared stack top (`FileNames.top()`),
+  so a deferred/group-path warning still names the wrong file — but
+  *deterministically* wrong, not heap-nondeterministic. Pinned empirically by
+  `tools/diag-goldens` (its `-w` golden set is chosen by a twice-run
+  byte-identity filter; `w-dlplay` now covers the direct-path Cseq `-w` surface).
+  *(Was filed alongside the multi-input `.log` bleed, which was a lifetime bug
+  and is now fixed — 2026-07-13, HISTORY.)*
 - **Group WARC id collisions leak the overwritten object.** `Cgrp` inserts its
   wave archives into the shared map by plain assignment; an id already present
   (a direct WARC's or another group's) is overwritten without being freed.

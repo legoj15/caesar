@@ -133,9 +133,43 @@ House rules:
   consumer already saw it. Groundwork for the stage-1 lossless round-trip
   serializer. (`output-identical` — 82-archive / 257,125-file corpus A/B
   byte-identical with identical stdout/stderr, exit 0.)
+- **`Cseq` now parses into a retained command model, then emits the `.mid` from
+  that model in a separate step** (stage-0 model/exporter split, commit 4 of 5 —
+  the last per-class split before `Csar`/`Cgrp`). The former one-pass `Convert`
+  splits into `Parse` (CSEQ/LABL/DATA headers → the command map; no file output,
+  every `Assert`/`Error` fires here) and `Export` (the convert-time VM +
+  control-flow interpreter + MIDI writer, reading only model state); `Csar`/`Cgrp`
+  call them back to back per sequence, so the per-file phase boundary — and the
+  `-w` warning ordering — is unchanged. The emit walk **no longer reads the
+  source buffer at all**: each command now carries its own DATA-relative source
+  offset, and `DataOffset`/`Version` (the `cseqVersion` word) are retained on the
+  object, so the walk locates every command and every diagnostic from a stored
+  offset (`DataOffset + 8 + offset`) rather than a raw pointer into the live
+  bytes. Groundwork for the stage-1 lossless round-trip serializer.
+  (`output-identical` — 82-archive / 257,125-file corpus A/B byte-identical with
+  identical stdout/stderr, exit 0; diagnostics goldens byte-identical, including
+  the `-w` surfaces corpus-wide.)
 
 ### Fixed
 
+- **Sequence `-w` warning positions now derive from a stored offset instead of a
+  pointer subtraction against the shared stack top** — the Cseq slice of the
+  heap-layout `-w` nondeterminism Known bug. A new
+  `ParseContext::Warning(uint32_t position, …)` overload takes the `AT POSITION`
+  value directly (same output format); the ~40 Cseq emit-walk warning sites pass
+  `DataOffset + 8 + <command offset>` rather than the old `pos - Offsets.top()`,
+  which is only correct when this sequence's own frame tops the stack. **Latent
+  on this corpus:** every corpus sequence converts direct off the `Csar` (a
+  whole-corpus scan found none routed through an embedded group), where the
+  stored offset equals what the subtraction already produced — so the `-w` bytes
+  are unchanged corpus-wide. A *group-resident* sequence, which this corpus
+  lacks, would previously have printed run-to-run-varying garbage
+  (`0xFFFFFFFFFF…`-class) and now prints the correct in-file offset. The Known
+  bug stays **open** for the `Cwav`/`Cbnk`/`Cgrp`/`Csar` warning sites (the ones
+  that do manifest run-to-run on the corpus), which keep the pointer form; the
+  new overload is theirs to adopt next. (`output-identical` — corpus-wide,
+  default *and* `-w`; a new `w-dlplay` diagnostics golden pins the direct-path
+  Cseq `-w` surface the corpus A/B never sees.)
 - **macOS build fixed (again)** — the Cbnk model/exporter split introduced
   three more unqualified `move(...)` calls, rejected by Apple Clang under
   `-Werror` (`-Wunqualified-std-cast-call`); qualified as `std::move`.

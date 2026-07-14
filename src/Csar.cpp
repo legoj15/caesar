@@ -555,7 +555,12 @@ bool Csar::Extract(const string& outputDir)
 					// unaffected by where the bytes came from.)
 					Cseq cseq(seqFile, pos, cseqLength, Ctx);
 
-					if (!cseq.Convert(startOffset))
+					// Parse the model, then walk it to the .mid, back to back per
+					// file (mirrors the Cwar/Cwav split): the emit walk locates its
+					// diagnostics via stored offsets, so the phase boundary stays
+					// per-file and the -w positions are the true DATA-relative
+					// offsets.
+					if (!cseq.Parse() || !cseq.Export(startOffset))
 					{
 						return false;
 					}

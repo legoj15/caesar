@@ -308,7 +308,14 @@ bool Cgrp::Extract()
 
 	for (uint32_t i = 0; i < Cseqs.size(); ++i)
 	{
-		if (!Cseqs[i]->Convert())
+		// Parse then emit, back to back per sequence (the Cwar/Cwav split
+		// convention). Deferred to this second loop exactly as the old single
+		// Convert() was, so the per-file interleave is unchanged; the emit walk
+		// now locates its diagnostics via stored offsets, so a group-resident
+		// sequence's -w AT POSITION is the true DATA-relative offset instead of a
+		// heap-layout-dependent subtraction against whatever child frame tops the
+		// shared stack.
+		if (!Cseqs[i]->Parse() || !Cseqs[i]->Export())
 		{
 			return false;
 		}

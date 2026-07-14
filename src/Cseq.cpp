@@ -57,22 +57,22 @@ static constexpr uint32_t kTrackExecBudget = 1u << 20;
 // emitCtrl covers the channel controllers plus the value-carrying master volume,
 // pitch bend and tempo events (all "parameter" writes), so its wording stays
 // general rather than claiming every one is a MIDI control-change message.
-static bool emitCtrl(ParseContext& Ctx, bool ok, uint8_t* pos)
+static bool emitCtrl(ParseContext& Ctx, bool ok, uint32_t position)
 {
 	if (!ok)
 	{
-		Ctx.Warning(pos, "control/parameter event out of MIDI range; dropped",
+		Ctx.Warning(position, "control/parameter event out of MIDI range; dropped",
 			"MIDI control/parameter events dropped (value out of range)");
 	}
 
 	return ok;
 }
 
-static bool emitProgram(ParseContext& Ctx, bool ok, uint8_t* pos)
+static bool emitProgram(ParseContext& Ctx, bool ok, uint32_t position)
 {
 	if (!ok)
 	{
-		Ctx.Warning(pos, "program number out of MIDI range; dropped",
+		Ctx.Warning(position, "program number out of MIDI range; dropped",
 			"MIDI program changes dropped (value out of range)");
 	}
 
@@ -88,11 +88,11 @@ static bool emitProgram(ParseContext& Ctx, bool ok, uint8_t* pos)
 // Suffix1 == None and let an unevaluated Rnd/Var stand-in drop through the
 // emitCtrl notice instead; the value now arrives evaluated, so both ends are
 // real and the caller no longer discriminates on the prefix.)
-static int32_t clampCtrl(ParseContext& Ctx, int32_t value, uint8_t* pos)
+static int32_t clampCtrl(ParseContext& Ctx, int32_t value, uint32_t position)
 {
 	if (value > 127)
 	{
-		Ctx.Warning(pos, "control/parameter value above MIDI range; clamped to 127",
+		Ctx.Warning(position, "control/parameter value above MIDI range; clamped to 127",
 			"MIDI control/parameter values clamped to 127 (above range)");
 
 		return 127;
@@ -100,7 +100,7 @@ static int32_t clampCtrl(ParseContext& Ctx, int32_t value, uint8_t* pos)
 
 	if (value < 0)
 	{
-		Ctx.Warning(pos, "control/parameter value below MIDI range; clamped to 0",
+		Ctx.Warning(position, "control/parameter value below MIDI range; clamped to 0",
 			"MIDI control/parameter values clamped to 0 (below range)");
 
 		return 0;
@@ -276,7 +276,7 @@ static void collectEntryTracks(const map<uint32_t, CseqCmd>& commands, uint32_t 
 	}
 }
 
-bool Cseq::Convert(uint32_t startOffset)
+bool Cseq::Parse()
 {
 	uint8_t* pos = Data;
 
@@ -284,7 +284,7 @@ bool Cseq::Convert(uint32_t startOffset)
 	if (!Ctx.Assert(pos, 0xFEFF, Ctx.ReadFixLen(pos, 2))) { return false; }
 	if (!Ctx.Assert(pos, 0x40, Ctx.ReadFixLen(pos, 2))) { return false; }
 
-	[[maybe_unused]] uint32_t cseqVersion = Ctx.ReadFixLen(pos, 4);
+	Version = Ctx.ReadFixLen(pos, 4);
 
 	if (!Ctx.Assert<uint64_t>(pos, Length, Ctx.ReadFixLen(pos, 4))) { return false; }
 	if (!Ctx.Assert(pos, 0x2, Ctx.ReadFixLen(pos, 4))) { return false; }
@@ -292,6 +292,10 @@ bool Cseq::Convert(uint32_t startOffset)
 
 	uint32_t dataOffset = Ctx.ReadFixLen(pos, 4);
 	uint32_t dataLength = Ctx.ReadFixLen(pos, 4);
+
+	// Retain the DATA-section offset on the model: Export derives every command
+	// position (and every diagnostic AT POSITION) from it, without touching Data.
+	DataOffset = dataOffset;
 
 	if (!Ctx.Assert(pos, 0x5001, Ctx.ReadFixLen(pos, 4))) { return false; }
 
@@ -336,12 +340,15 @@ bool Cseq::Convert(uint32_t startOffset)
 	if (!Ctx.Assert(pos, 0x44415441, Ctx.ReadFixLen(pos, 4, false))) { return false; }
 	if (!Ctx.Assert<uint32_t>(pos, dataLength, Ctx.ReadFixLen(pos, 4))) { return false; }
 
-	map<uint32_t, CseqCmd> commands;
+	// Build directly into the model's command map (keyed by DATA+8-relative
+	// offset). Export reads it back; nothing here reorders parse.
+	auto& commands = Commands;
 
 	while (pos < (Data + dataOffset + dataLength))
 	{
 		uint32_t offset = static_cast<uint32_t>(pos - 8 - dataOffset - Data);
 		CseqCmd cmd;
+		cmd.Offset = offset;
 
 		if (labls.count(pos))
 		{
@@ -619,6 +626,21 @@ bool Cseq::Convert(uint32_t startOffset)
 		commands[offset] = cmd;
 	}
 
+	return true;
+}
+
+bool Cseq::Export(uint32_t startOffset)
+{
+	// The parsed command map plus DataOffset are the whole input to the emit
+	// walk; Data is never read here. Every diagnostic below locates via stored
+	// offsets (DataOffset + 8 + the command's own offset), so its AT POSITION is
+	// the true DATA-relative offset even when this Cseq's frame is not the top of
+	// the shared stack (the group-resident/deferred case) -- the heap-layout
+	// nondeterminism the old `here = Data + ...` / `pos - Offsets.top()` form
+	// suffered.
+	auto& commands = Commands;
+	uint32_t dataOffset = DataOffset;
+
 	Smf* smf = smfCreate();
 	uint32_t absTime = 0;
 	uint8_t track = 0;
@@ -746,7 +768,7 @@ bool Cseq::Convert(uint32_t startOffset)
 	{
 		if (startOffset != 0)
 		{
-			Ctx.Warning(Data + dataOffset + 8, "sequence start offset is not a command boundary; starting from the top");
+			Ctx.Warning(dataOffset + 8, "sequence start offset is not a command boundary; starting from the top");
 		}
 
 		i = commands.begin();
@@ -830,7 +852,7 @@ bool Cseq::Convert(uint32_t startOffset)
 			&& !smfInsertNote(smf, tieStart, channelOf[track], track, tieKey, tieVel, end - tieStart)
 			&& (tieVel > 127))
 		{
-			Ctx.Warning(Data + dataOffset + 8 + tieCmdOffset, "note velocity out of MIDI range; note dropped",
+			Ctx.Warning(dataOffset + 8 + tieCmdOffset, "note velocity out of MIDI range; note dropped",
 				"MIDI notes dropped (velocity out of range)");
 		}
 	};
@@ -909,8 +931,11 @@ bool Cseq::Convert(uint32_t startOffset)
 		offsetTime[i->first] = absTime;
 		offsetVersion[i->first] = vmVersion;
 
-		// Position of the command now being emitted, for any dropped-event notice.
-		uint8_t* here = Data + dataOffset + 8 + i->first;
+		// DATA-relative position of the command now being emitted, for any
+		// dropped-event notice. A stored offset (DataOffset + 8 + the command's
+		// own offset), not a raw pointer -- so the diagnostic position is correct
+		// and deterministic no matter which frame tops the shared Offsets stack.
+		uint32_t here = dataOffset + 8 + i->first;
 
 		// MIDI channel for this track's channel-voice messages (see channelOf).
 		// The SMF track number stays == track, so only the channel nibble moves.
@@ -1922,7 +1947,7 @@ bool Cseq::Convert(uint32_t startOffset)
 					// discard the whole in-progress MIDI, treat the stray Return
 					// as end-of-track, exactly like Fin: close this track and
 					// move to the next so the sequence still yields a file.
-					Ctx.Warning(Data + dataOffset + 8 + i->first, "Return with empty call stack; ending track");
+					Ctx.Warning(here, "Return with empty call stack; ending track");
 
 					if (!advanceToNextTrack())
 					{

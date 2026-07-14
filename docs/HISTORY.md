@@ -2935,3 +2935,138 @@ confirmed by the A/B:
   - `Cwar::Parse`/`Export` and `Cwav::Parse`/`ExportWav` are the precedent for the
     method split; `Cseq`'s public entry is `Convert` (single caller sites in
     `Csar`/`Cgrp`, invoked back to back if split).
+
+## Suite stage 0 — model/exporter split, commit 4: Cseq (2026-07-14)
+
+The blueprint's fourth per-class split, and the one it flagged as *the* commit
+that would intentionally change the `-w` goldens (because it fixes the open `-w`
+heap-nondeterminism Known bug at its root). It splits `Cseq::Convert` into
+`Parse`/`Export`, stores each command's source offset on the model, and converts
+the emit walk's warning sites to an offset-taking `Warning` overload. **The
+headline correction: on this corpus the change is output-identical on *every*
+surface, `-w` included — the "intentional golden change" premise did not
+materialise, because an empirical whole-corpus scan proved no sequence is
+group-resident.** The fix is real and correct, but latent (see below).
+
+**The three strands (all one commit).**
+
+1. *Stored offsets on the model.* `CseqCmd` gains `uint32_t Offset` (its own
+   DATA+8-relative source offset — the value the command map is already keyed on,
+   now carried on the record so the model is self-locating for stage 1). `Cseq`
+   gains `DataOffset` and `Version` (the `cseqVersion` 0x40-block word, formerly
+   read-and-discarded), plus the command map itself as a retained member
+   (`Commands`). `Parse` fills all of them; nothing else about parse changed
+   (parse-phase pointer arithmetic is byte-for-byte the same, so the command map
+   and every `Assert`/`Error` are identical).
+
+2. *Offset-based diagnostics.* A new additive overload
+   `ParseContext::Warning(uint32_t position, …)` (Common.hpp/.cpp) prints the
+   `AT POSITION` value the caller hands it, with **no** `pos - Offsets.top()`
+   subtraction — same `hex / setfill('0') / uppercase / setw(8)` formatting, so a
+   site that already resolved against its own buffer prints identical bytes
+   through either overload. The pointer overload is untouched (other classes'
+   attribution quirks stay pinned, per the plan). The three static emit helpers
+   (`emitCtrl` / `emitProgram` / `clampCtrl`) took a `uint8_t* pos`; they now take
+   a `uint32_t position`.
+
+3. *The parse/emit seam.* `Convert` is gone; `Parse` (headers → command map, no
+   I/O, every `Assert`/`Error` fires here) and `Export(startOffset)` (the
+   convert-time VM + control-flow interpreter + MIDI writer + `smfWriteFile`) are
+   separate members. `Csar` (direct) and `Cgrp` (deferred second loop) call
+   `Parse()` then `Export()` back to back per sequence — the per-file phase
+   boundary, so `-w` ordering is unchanged. `startOffset` belongs to `Export`
+   (the parse phase never used it).
+
+**Every emit-walk `Data` read, and what it became.** The walk had exactly four
+reads of the live buffer, all warning-position computations; after the split the
+emit phase (`Export`, ~1,570 lines) reads `Data` **nowhere** (grep-verified —
+only comments name it), running purely off `Commands` + `DataOffset`:
+
+| Old (Cseq.cpp) | Site | New |
+|---|---|---|
+| `Ctx.Warning(Data + dataOffset + 8, …)` | start-offset-not-a-boundary | `Ctx.Warning(dataOffset + 8, …)` |
+| `Ctx.Warning(Data + dataOffset + 8 + tieCmdOffset, …)` | `finalizeTie` velocity drop | `Ctx.Warning(dataOffset + 8 + tieCmdOffset, …)` |
+| `uint8_t* here = Data + dataOffset + 8 + i->first;` | the ~40-site `here` cursor | `uint32_t here = dataOffset + 8 + i->first;` |
+| `Ctx.Warning(Data + dataOffset + 8 + i->first, …)` | stray-`Return` end-of-track | `Ctx.Warning(here, …)` |
+
+`here` becoming a `uint32_t` re-points all ~40 `Ctx.Warning(here, …)` /
+`emitCtrl(…, here)` / `clampCtrl(…, here)` calls at the new overload. No emit
+site re-parses args through `Data` (all values live in `i->second.Args`), so
+nothing else needed converting; `dataOffset` in `Export` is a local copy of the
+`DataOffset` member.
+
+**Why the intentional golden change did not happen — the empirical finding.**
+For a **direct-path** sequence (construct → push → `Parse` → `Export` → pop,
+nothing pushed between), `Offsets.top()` *is* this sequence's own `Data`, so the
+old `pos - Offsets.top()` already equalled `dataOffset + 8 + i->first` — exactly
+the value the stored offset now produces. Only a **group-resident** sequence (a
+CSEQ inside an embedded CGRP, whose `Parse`/`Export` is deferred to a second loop
+while sibling child frames sit on top of the stack) hit the bug. A whole-corpus
+scan (82 archives, old exe, run twice each, differing `AT POSITION` lines
+categorised by message) settled it:
+
+- **Zero** nondeterministic Cseq warnings exist anywhere in the corpus. Nine
+  archives are nondeterministic under `-w`, but every differing line is a `Cbnk`
+  (`instrument N note … release 127`), `Cgrp` (`Skipping INFX`/`CWSD`) or `Csar`
+  (`… external .bcgrp`) message — never a sequence-command message.
+- So **every** corpus sequence is direct-path. Confirmed the other way:
+  OLD-vs-NEW `-w` stderr on the seq-heavy `dlplay`/`safe`/`newslist`/`menu` is
+  byte-identical.
+
+Therefore the Cseq slice of the `-w` Known bug is fixed **at the code level** but
+is **latent** on this corpus (it would only change bytes for a group-resident
+sequence, of which there are none). The nondeterminism that actually manifests
+belongs to the `Cwav`/`Cbnk`/`Cgrp`/`Csar` sites this commit deliberately did not
+touch — the bug stays open for them (ROADMAP), and the new overload is theirs to
+adopt next. A **separate** residue also left untouched: the `WARNING IN <file>`
+line reads `FileNames.top()`, so a deferred/group warning still names the wrong
+file — but *deterministically* wrong, not heap-nondeterministic.
+
+**Determinism evidence.** The bug's mechanism, on `ctr_dash` (Mario Kart 7 — the
+corpus's one embedded-group archive, whose groups hold *banks*, not sequences):
+two old-exe runs differ on 408 lines, e.g. a `Cbnk` release-127 warning prints
+`AT POSITION 0xFFFFFFFFFF5021B0` then `0xFFFFFFFFFF534240` — a 64-bit
+`pos - Offsets.top()` across two heap allocations, shifting per run. The NEW exe
+run 3× is still nondeterministic on those *same 408* `Cbnk`/`Cgrp`/`Csar` lines
+(correctly — untouched) while every Cseq warning in the file (all direct-path)
+prints a stable, plausible in-file offset (e.g. `Rnd argument approximated …
+AT POSITION 0x00000485`). This is the before/after: garbage 64-bit value → true
+DATA-relative offset, for exactly the class of site the Cseq fix now covers.
+
+**Golden inventory.** The pre-existing 17-surface diagnostics goldens are
+**byte-identical** after the change (exit 0) — the two `-w` goldens `w-pksnd`
+(42 blocks) and `w-queenstream` (1 block) are Csar external-stream warnings, not
+Cseq, so the blueprint's expectation of a diff there was a misattribution. Since
+the corpus A/B runs **without** `-w` and the existing goldens never touch Cseq,
+the ~40 Cseq emit-walk warning sites this commit rewrote had **no** automated
+coverage at all. Closed that gap: added a fourth source archive `dlplay` and a
+`w-dlplay` `-w` golden (DetCheck, 5/5 byte-identical) — the smallest archive
+whose whole `-w` run is deterministic *and* exercises the Cseq sites (its
+warnings span Rnd-midpoint, ramped-`_t`, sustain-level, span, LFO-retarget and
+the stray-`Return` site — one of the four converted). The golden set is now 18
+surfaces; the harness self-test still passes. (Goldens are LOCAL only; the
+harness script + README carry the change.)
+
+**Gate (all green).** Warning-clean MSVC Release build. Corpus A/B vs `HEAD`
+(`c308412`): **82 archives / 257,125 files byte-identical, stdout/stderr
+identical, exit 0**. Diagnostics goldens: 18/18 byte-identical after
+re-`Capture` (`w-dlplay` added), self-test green. Direct-path Cseq `-w`
+byte-identical old-vs-new; whole-corpus scan confirms no group-resident sequence
+exists.
+
+**For commit 5 (`Csar` + `Cgrp`), the executor must know:**
+  - `Cseq`'s public entry is now `Parse()` + `Export(startOffset)` (both `bool`);
+    `Convert` is gone. Both call sites already use `if (!…Parse() || !…Export…)`.
+    Preserve `Cgrp`'s two-loop shape (construct all children in the file-table
+    walk, then `Parse`/`Export` per child in the second loop) — that deferral is
+    what makes group-path warnings fire with a sibling frame on top, so a `Csar`
+    persistent-record-tree refactor must keep the per-file phase boundary or it
+    will reorder `-w` stderr.
+  - The `WARNING IN <file>` misattribution (stale `FileNames.top()`) and the
+    `Cgrp`/`Csar`/`Cbnk`/`Cwav` `AT POSITION` nondeterminism are the *remaining*
+    slices of the `-w` Known bug. The `Warning(uint32_t, …)` overload exists and
+    is the tool to fix them; doing so **would** change `-w` goldens (unlike the
+    Cseq slice), and any such commit needs its own `-Capture -Force` + review.
+  - Stored offsets now exist on `CseqCmd`/`Cseq` (`Offset`, `DataOffset`,
+    `Version`) — the stage-1 round-trip serializer's Cseq inputs. `Csar`/`Cgrp`
+    still have no persistent record tree; that is commit 5's job.
