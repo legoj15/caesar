@@ -177,7 +177,9 @@ namespace
 			<< "  voices: peak " << stats.maxConcurrent << "/24"
 			<< "; " << stats.notesRefused << " refused (pool full)"
 			<< ", " << stats.voicesStolen << " stolen (" << stats.voicesStolenHeld << " still held)"
-			<< ", " << stats.monoRetriggers << " mono re-triggers\n";
+			<< ", " << stats.monoRetriggers << " mono re-triggers\n"
+			<< "  params: " << stats.rampsApplied << " _t ramps (longest " << stats.longestRampTicks
+			<< " ticks), " << stats.instantSets << " instant sets\n";
 
 		if (stats.loopDetected)
 		{

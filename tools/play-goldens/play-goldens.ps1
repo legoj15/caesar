@@ -154,9 +154,13 @@ function Remove-PgDir { param([string] $Path)
 #              discriminating track) and the MeetSound SE set (the caesar_AB
 #              FluidSynth comparison targets). Its sequences convert direct off the
 #              Csar, so the loader reaches them without group handling.
+#   torte      Kirby: Planet Robobot — a direct-path archive carrying the Phase III
+#              feature repros: a clean single long `_t` volume fade (the C7 ramp
+#              witness) and the tied no-rest WarpstarUp sweeps (the C8 tie repro).
 $SourceArchives = @(
-    @{ Key = 'caravel';   Rel = 'F-Zero\caravel.bcsar' }
-    @{ Key = 'meetsound'; Rel = 'MiiPlaza\sound\MeetSound.bcsar' }
+    @{ Key = 'caravel';    Rel = 'F-Zero\caravel.bcsar' }
+    @{ Key = 'meetsound';  Rel = 'MiiPlaza\sound\MeetSound.bcsar' }
+    @{ Key = 'torte';      Rel = 'Kirby Planet Robobot\snd\Torte.bcsar' }
 )
 
 # Every render invocation, in a fixed order. Fields:
@@ -178,6 +182,12 @@ $Invocations = @(
     # matches its FluidSynth render in caesar_AB_MiiPlaza (the structural check).
     @{ Name = 'bgm-den-result'; Mode = '--render'; Source = 'meetsound'; Seq = 'BGM_DEN_RESULT';           Rate = 48000; MaxSeconds = 120; ExpectExit = 0 }
     @{ Name = 'se-square';      Mode = '--render'; Source = 'meetsound'; Seq = 'SE_SQUARE_CONGRATULATION'; Rate = 48000; MaxSeconds = 30;  ExpectExit = 0 }
+
+    # C7 — the `_t` ramp witness. SE_BossVo_KaenAttack carries a single ~10 s (1000-
+    # tick) 0xC1 volume `_t` fade over a sustained voice, so its rendered RMS envelope
+    # glides smoothly to silence — a fade that did NOT exist at C6 (volume latched at
+    # note-on). The reusable timeline-flattener drives it.
+    @{ Name = 'ramp-kaen';      Mode = '--render'; Source = 'torte';     Seq = 'SE_BossVo_KaenAttack';     Rate = 48000; MaxSeconds = 30;  ExpectExit = 0 }
 )
 
 # ---------------------------------------------------------------------------

@@ -96,6 +96,136 @@ namespace play
 		size_t frames() const { return l.size(); }
 	};
 
+	// --- The per-track parameter timeline (C7 `_t` ramp synthesis) -----------
+	//
+	// The reusable timeline-flattener the blueprint says stage 5's `.it` export
+	// shares. A ParamCurve is a piecewise-linear function of ABSOLUTE bus sample
+	// position, in the engine's CONTROL-VALUE domain (a 0..127 volume/pan byte, a
+	// signed bend/transpose in semitones, an LFO parameter). NW4R ramps the STORED
+	// control value linearly and converts it to amplitude / pan angle / pitch ratio
+	// downstream each frame -- so a `_t` glide is linear in THIS domain, not in dB
+	// (documented + flagged in HISTORY; the engine's MoveValue precedent). A plain
+	// (non-`_t`) set is a zero-duration segment (an instant step). `set` chains a
+	// new ramp from the curve's CURRENT interpolated value, so an interrupted ramp
+	// re-anchors correctly. Segments are appended in non-decreasing `start` order
+	// (the frame clock only advances); the renderer samples valueAt per frame.
+	struct ParamCurve
+	{
+		struct Seg
+		{
+			uint32_t start;  // absolute bus sample the ramp begins
+			uint32_t dur;    // ramp length in samples (0 = instant step)
+			float from;      // value at `start`
+			float to;        // value at `start + dur` and after
+		};
+
+		std::vector<Seg> segs;
+		float initial = 0.0f;  // the value before the first segment
+
+		void reset(float v)
+		{
+			initial = v;
+			segs.clear();
+		}
+
+		// The control value at absolute sample `s`. Before the first segment it is
+		// `initial`; within a segment it interpolates linearly; after, it holds the
+		// segment's target. O(log n) over the segments.
+		float valueAt(uint32_t s) const
+		{
+			if (segs.empty() || s < segs.front().start)
+			{
+				return initial;
+			}
+
+			// The last segment whose start <= s (hand-rolled upper_bound - 1 so the
+			// header stays dependency-light; segments are start-sorted by construction).
+			size_t lo = 0;
+			size_t hi = segs.size();
+
+			while (lo < hi)
+			{
+				size_t mid = (lo + hi) / 2;
+
+				if (segs[mid].start <= s)
+				{
+					lo = mid + 1;
+				}
+				else
+				{
+					hi = mid;
+				}
+			}
+
+			const Seg& g = segs[lo - 1];
+
+			if (g.dur == 0 || s >= g.start + g.dur)
+			{
+				return g.to;
+			}
+
+			float t = static_cast<float>(s - g.start) / static_cast<float>(g.dur);
+
+			return g.from + (g.to - g.from) * t;
+		}
+
+		// Command the parameter to `target` over `durSamples` (0 = instant), gliding
+		// from wherever it sits NOW (the chained-ramp anchor).
+		void set(uint32_t s, float target, uint32_t durSamples)
+		{
+			segs.push_back({ s, durSamples, valueAt(s), target });
+		}
+
+		bool active() const { return !segs.empty(); }
+	};
+
+	// The live per-track parameters a voice follows each frame (C7+). Volumes/pans
+	// are 0..127 byte curves (127 = unity, 64 = centre); bend is the 0xC4 signed
+	// value, bendRange the 0xC5 semitone span (default 2), transpose the 0xC3 coarse
+	// tune. Each starts at the engine's SeqTrack::InitParam default and every `_t`
+	// command adds a ramp segment. The LFO block (C9) and biquad LPF (C10) extend it.
+	struct TrackTimeline
+	{
+		ParamCurve volume;      // 0xC1
+		ParamCurve expression;  // 0xD5
+		ParamCurve pan;         // 0xC0
+		ParamCurve initPan;     // 0xDC
+		ParamCurve bend;        // 0xC4 (signed)
+		ParamCurve bendRange;   // 0xC5 (semitones)
+		ParamCurve transpose;   // 0xC3 (semitones)
+
+		// The persistent LFO parameter block (C9). ONE block per track, retargetable
+		// via `lfoTarget` (0 = pitch, 1 = volume, 2 = pan). depth 0xCA / rate 0xCB /
+		// range 0xCD / delay 0xE0 (5 ms units). Retargeting preserves the block, so a
+		// value commanded on any target survives a target switch (the converter's
+		// wire/shadow model). Pitch LFO cents = depth x range.
+		ParamCurve lfoDepth;    // 0xCA (0..127)
+		ParamCurve lfoRate;     // 0xCB
+		ParamCurve lfoRange;    // 0xCD
+		ParamCurve lfoDelayMs;  // 0xE0 x 5 ms (stored as ms)
+		ParamCurve lfoTarget;   // 0xCC (0/1/2)
+
+		// The voice biquad low-pass cutoff (C10). 0xD8, 0..127; 64 = open (no cut).
+		ParamCurve lpfCutoff;   // 0xD8
+
+		void reset()
+		{
+			volume.reset(127.0f);
+			expression.reset(127.0f);
+			pan.reset(64.0f);
+			initPan.reset(64.0f);
+			bend.reset(0.0f);
+			bendRange.reset(2.0f);
+			transpose.reset(0.0f);
+			lfoDepth.reset(0.0f);
+			lfoRate.reset(0.0f);
+			lfoRange.reset(0.0f);
+			lfoDelayMs.reset(0.0f);
+			lfoTarget.reset(0.0f);
+			lpfCutoff.reset(64.0f);
+		}
+	};
+
 	// A resolved voice: the static synthesis parameters for one note, pointing at
 	// decoded PCM owned by a live Cwav (in Csar::Cwars). The read `step` folds the
 	// sample rate, the key-vs-root-key semitone ratio and the note's Tune together.
@@ -123,8 +253,38 @@ namespace play
 		uint8_t envRelease = 127;  // 127 = instant release
 
 		// The note zone's own pan (CbnkNote.Pan, 0..127, 64 = centre); the additive
-		// base the track's 0xC0/0xDC pans offset (C6, applied by applyMixParams).
+		// base the track's live 0xC0/0xDC pans offset each frame (C7, via VoiceMod).
 		uint8_t notePan = 64;
+
+		// The note's own root key vs its played key, in semitones (C8 portamento
+		// glides from the previous key TO this note's key, so the target pitch is
+		// this note's nominal). Retained so a live pitch modifier knows the nominal.
+		int key = 60;
+	};
+
+	// The live modulation a sounding voice follows per frame (C7+). `track` points
+	// at the voice's track timeline (volume/pan/pitch/LFO/LPF curves), `master` at
+	// the sequence-wide master-volume curve, `noteOnSample` anchors the LFO delay.
+	// When null, renderVoice runs the voice with static gain/pan/step (the C2
+	// single-note proof path). The per-note sweep/portamento fields are additive
+	// semitone offsets that glide to zero over their duration (C8).
+	struct VoiceMod
+	{
+		const TrackTimeline* track = nullptr;
+		const ParamCurve* master = nullptr;
+		uint32_t noteOnSample = 0;
+
+		// 0xE3 sweep: a signed intra-note ramp gliding from `sweepFromSemis` to the
+		// note's nominal pitch (0 offset) over `sweepDurSamples`. Independent of and
+		// additive with portamento.
+		float sweepFromSemis = 0.0f;
+		uint32_t sweepDurSamples = 0;
+
+		// 0xC9/0xCE/0xCF portamento: glide from the previous key (as an offset
+		// `portaFromSemis` relative to this note) to this note's key over
+		// `portaDurSamples`.
+		float portaFromSemis = 0.0f;
+		uint32_t portaDurSamples = 0;
 	};
 
 	// Convert a 0..127 volume/expression byte to a linear amplitude gain, through the
@@ -134,14 +294,12 @@ namespace play
 	// equals summing their decibel contributions -- the NW4R volume model. (C6)
 	float volumeByteToAmp(int byte);
 
-	// Apply the C6 native mix parameters to an already-resolved voice: `volAmp` (the
-	// product of the track/master/expression volume amplitudes) scales the gain;
-	// `panOffset` (the track 0xC0 + 0xDC pan, as offsets from centre) adds to the
-	// note's own pan and splits the gain into equal-power L/R; `pitchSemitones` (bend
-	// + transpose) multiplies the playback step by 2^(semitones/12). The engine's pan
-	// curve is a sqrt polynomial (disasm 0x14AFC8); this uses a standard equal-power
-	// cos/sin split, flagged for Net-B.
-	void applyMixParams(VoiceSpec& v, float volAmp, int panOffset, double pitchSemitones);
+	// Convert a control-value byte (0..127, fractional allowed for a mid-ramp value)
+	// to a linear amplitude gain, interpolating the DecibelSquareTable in its stored
+	// decibel domain then applying amp = 10^(value/400) -- the float-domain form of
+	// volumeByteToAmp a `_t` volume ramp needs. Integer bytes match volumeByteToAmp
+	// exactly. (C7)
+	float decibelSquareAmp(float byte);
 
 	// Resolve (program, key, velocity) against the loaded bank and its wave
 	// archives, the way Cbnk's SF2 emit walk resolves a note zone -> sample: pick
@@ -158,9 +316,11 @@ namespace play
 	// the envelope is silent. `stopSample` (absolute, on the bus) force-stops the
 	// voice early -- a C5 steal / mono re-trigger / the render cap; UINT32_MAX = no
 	// early stop. Deterministic; the caller drives the accumulation order by the
-	// order it renders voices.
+	// order it renders voices. `mod` (optional) makes the voice follow its track's
+	// live volume/pan/pitch/LFO/LPF each frame plus its per-note sweep/portamento
+	// (C7-C10); null renders the static voice (the C2 single-note proof path).
 	void renderVoice(StereoBus& bus, const VoiceSpec& v, uint32_t startSample, uint32_t gateSamples,
-		uint32_t stopSample = UINT32_MAX);
+		uint32_t stopSample = UINT32_MAX, const VoiceMod* mod = nullptr);
 
 	// The absolute sample at which this voice falls silent (note-on at `startSample`,
 	// note-off at `startSample + gateSamples`): the max of its envelope release tail
@@ -203,6 +363,14 @@ namespace play
 		uint32_t voicesStolenHeld = 0;  // of those, ones still held (audibly cut)
 		uint32_t monoRetriggers = 0;
 		uint32_t maxConcurrent = 0;
+
+		// C7: `_t` ramp segments applied (a volume/pan/pitch glide over a non-zero
+		// duration). instantSets counts the plain (0-duration) parameter steps.
+		// longestRampTicks is the biggest single ramp duration seen (a clean fade
+		// shows a large value on few ramps).
+		uint32_t rampsApplied = 0;
+		uint32_t instantSets = 0;
+		uint32_t longestRampTicks = 0;
 
 		// Opcodes the walk safe-skipped (never desyncing time): plain command byte,
 		// or 0x100 | ext for an extended (0xF0-prefixed) op. For the handoff report.

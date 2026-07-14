@@ -334,30 +334,21 @@ namespace play
 		return gainFromValue(static_cast<float>(DecibelSquareTable[b]));
 	}
 
-	void applyMixParams(VoiceSpec& v, float volAmp, int panOffset, double pitchSemitones)
+	float decibelSquareAmp(float byte)
 	{
-		// Command volumes (track / master / expression), pre-multiplied into volAmp.
-		v.gainL *= volAmp;
-		v.gainR *= volAmp;
+		float b = byte < 0.0f ? 0.0f : (byte > 127.0f ? 127.0f : byte);
 
-		// Additive pan: the note's own pan plus the track's 0xC0/0xDC offset, clamped
-		// to 0..127, then an equal-power cos/sin split (pan 0 = hard left, 127 = hard
-		// right, 64 ~ centre). The engine's actual curve is a sqrt polynomial
-		// (disasm 0x14AFC8); this standard equal-power law is flagged for Net-B.
-		int pan = static_cast<int>(v.notePan) + panOffset;
-		pan = pan < 0 ? 0 : (pan > 127 ? 127 : pan);
+		int lo = static_cast<int>(b);
+		int hi = (lo < 127) ? lo + 1 : 127;
+		float frac = b - static_cast<float>(lo);
 
-		double x = static_cast<double>(pan) / 127.0;   // 0..1
-		double angle = x * (kPi / 2.0);
-		v.gainL *= static_cast<float>(cos(angle));
-		v.gainR *= static_cast<float>(sin(angle));
+		// Interpolate in the table's stored decibel domain (NW4R CalcDecibelSquare
+		// lerps adjacent table entries), then convert. Integer bytes match
+		// volumeByteToAmp exactly (frac == 0).
+		float value = static_cast<float>(DecibelSquareTable[lo]) * (1.0f - frac)
+			+ static_cast<float>(DecibelSquareTable[hi]) * frac;
 
-		// Pitch: bend + transpose semitones fold into the playback step (a one-shot
-		// offset at note-on; continuous bend ramps are C7/C8).
-		if (pitchSemitones != 0.0)
-		{
-			v.step *= pow(2.0, pitchSemitones / 12.0);
-		}
+		return gainFromValue(value);
 	}
 
 	bool resolveVoice(const LoadedArchive& arch, uint32_t program, int key, int velocity, VoiceSpec& out)
@@ -463,6 +454,7 @@ namespace play
 		out.gainL = gain;
 		out.gainR = gain;
 		out.notePan = static_cast<uint8_t>(zone->Pan > 127 ? 64 : zone->Pan);
+		out.key = key;
 
 		// The note's ADSHR envelope bytes (the same fields Cbnk parses at note+0x38);
 		// the player runs the NW4R EnvGenerator over them. Per-track 0xB1/0xD0-0xD3
@@ -477,7 +469,7 @@ namespace play
 	}
 
 	void renderVoice(StereoBus& bus, const VoiceSpec& v, uint32_t startSample, uint32_t gateSamples,
-		uint32_t stopSample)
+		uint32_t stopSample, const VoiceMod* mod)
 	{
 		if (!v.chan0)
 		{
@@ -507,6 +499,13 @@ namespace play
 		// hard gate and no declick needed.
 		EnvGen env(v.envAttack, v.envHold, v.envDecay, v.envSustain, v.envRelease);
 
+		// The per-frame modulated gain / step (constant across a frame, matching the
+		// engine's per-frame parameter cadence). When `mod` is null they stay the
+		// voice's static values, so the C2 single-note path is byte-for-byte as before.
+		float mgL = v.gainL;
+		float mgR = v.gainR;
+		double effStep = v.step;
+
 		double pos = 0.0;
 		float gCur = env.gain();
 		float gStep = 0.0f;
@@ -526,6 +525,44 @@ namespace play
 
 				gCur = gPrev;
 				gStep = (gNext - gPrev) / static_cast<float>(kFrameSamples);
+
+				if (mod)
+				{
+					uint32_t absPos = startSample + s;
+
+					// Volume: track volume x expression x master, all in the
+					// control-value domain, converted per frame (a `_t` volume fade
+					// glides the byte linearly and lands in the dB table each frame).
+					float volAmp = 1.0f;
+					float panPos = static_cast<float>(v.notePan);
+					double semis = 0.0;
+
+					if (mod->track)
+					{
+						const TrackTimeline& tl = *mod->track;
+
+						volAmp = decibelSquareAmp(tl.volume.valueAt(absPos))
+							* decibelSquareAmp(tl.expression.valueAt(absPos));
+
+						panPos += (tl.pan.valueAt(absPos) - 64.0f) + (tl.initPan.valueAt(absPos) - 64.0f);
+
+						semis = (tl.bend.valueAt(absPos) / 128.0) * tl.bendRange.valueAt(absPos)
+							+ tl.transpose.valueAt(absPos);
+					}
+
+					if (mod->master)
+					{
+						volAmp *= decibelSquareAmp(mod->master->valueAt(absPos));
+					}
+
+					panPos = panPos < 0.0f ? 0.0f : (panPos > 127.0f ? 127.0f : panPos);
+
+					double angle = static_cast<double>(panPos) / 127.0 * (kPi / 2.0);
+					mgL = v.gainL * volAmp * static_cast<float>(cos(angle));
+					mgR = v.gainR * volAmp * static_cast<float>(sin(angle));
+
+					effStep = (semis != 0.0) ? v.step * pow(2.0, semis / 12.0) : v.step;
+				}
 			}
 
 			// One-shot that ends before the envelope (guarded by voiceEndSample, but
@@ -549,11 +586,11 @@ namespace play
 			float sR = interp(*v.chan1, pos, v);
 
 			size_t idx = static_cast<size_t>(startSample) + s;
-			bus.l[idx] += sL * v.gainL * gCur;
-			bus.r[idx] += sR * v.gainR * gCur;
+			bus.l[idx] += sL * mgL * gCur;
+			bus.r[idx] += sR * mgR * gCur;
 
 			gCur += gStep;
-			pos += v.step;
+			pos += effStep;
 		}
 	}
 

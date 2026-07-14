@@ -46,12 +46,10 @@ namespace play
 			int track = 0;
 			bool mono = false;
 
-			// The C6 native mix params, latched at note-on. volAmp is the product of
-			// the track/master/expression volume amplitudes; panOffset is the track
-			// 0xC0 + 0xDC pan as offsets from centre; pitchSemitones is bend + transpose.
-			float volAmp = 1.0f;
-			int panOffset = 0;
-			double pitchSemitones = 0.0;
+			// The C7 live-modulation anchor: the voice follows track `track`'s live
+			// timeline (volume/pan/pitch/LFO/LPF) and the master-volume curve from
+			// `startSample` onward -- no per-note latch of volume/pan/pitch anymore.
+			// noteOnSample == startSample; kept explicit for the LFO delay reference.
 		};
 
 		// A 48-slot variable file with the converter's scoping: 0-31 are shared
@@ -81,18 +79,14 @@ namespace play
 			int trackPriority = 0;
 			bool mono = false;
 
-			// C6 native mix state. Volumes are 0..127 bytes (127 = unity), pans are
-			// 0..127 (64 = centre); bend is the 0xC4 signed value, bendRange the 0xC5
-			// semitone span (RPN 0,0; default 2), transpose the 0xC3 coarse tune
-			// (RPN 0,2). The converter maps these to CC7/CC11/CC10/pitch-bend; the
-			// player folds them straight into per-voice gain / pan / step.
-			int trackVolume = 127;   // 0xC1
-			int expression = 127;    // 0xD5
-			int trackPan = 64;       // 0xC0
-			int initPan = 64;        // 0xDC
-			int bend = 0;            // 0xC4
-			int bendRange = 2;       // 0xC5 (semitones)
-			int transpose = 0;       // 0xC3 (semitones)
+			// C7 native mix state as LIVE per-frame curves (volume 0xC1 / expression
+			// 0xD5 / pan 0xC0 / init pan 0xDC / bend 0xC4 / bend range 0xC5 / transpose
+			// 0xC3), each in the engine's control-value domain. A `_t`-suffixed command
+			// glides the curve from its current value to the target over the trailing
+			// duration; a plain command is an instant step. Sounding voices sample these
+			// each frame, so a mid-note change follows the note (the engine model) rather
+			// than latching at onset. The LFO block + LPF (0xD8) extend the same struct.
+			TrackTimeline timeline;
 
 			bool cmpFlag = true;
 			int16_t vars[16] = { 0 };        // slots 32-47 (track-local)
@@ -115,7 +109,7 @@ namespace play
 			double tempoBpm = kDefaultTempoBpm;
 			uint32_t timebase = kDefaultTimebase;
 
-			int masterVolume = 127;   // 0xC2, sequence-wide (C6)
+			ParamCurve masterVolume;   // 0xC2, sequence-wide, live (C7)
 
 			int16_t globalVars[32] = { 0 };      // slots 0-31 (shared)
 			bool globalWritten[32] = { false };
@@ -127,7 +121,15 @@ namespace play
 			RenderStats* stats = nullptr;
 			set<uint32_t> skipped;   // safe-skipped opcodes (for the report)
 
-			explicit Runtime(const map<uint32_t, CseqCmd>& cmds) : commands(cmds) {}
+			explicit Runtime(const map<uint32_t, CseqCmd>& cmds) : commands(cmds)
+			{
+				masterVolume.reset(127.0f);
+
+				for (TrackState& t : tracks)
+				{
+					t.timeline.reset();
+				}
+			}
 
 			bool anyActive() const
 			{
@@ -222,6 +224,82 @@ namespace play
 			}
 
 			return raw;
+		}
+
+		// A `_t`-suffixed command appends a trailing s16 ramp DURATION (in ticks) after
+		// its own arguments (parse: Suffix2 Time/TimeRnd/TimeVar). Resolve it the way
+		// the primary arg resolves -- a TimeVar reads the live VM, a TimeRnd stands in
+		// the range midpoint (PRNG-free), a plain Time is the raw s16. Returns 0 (an
+		// instant set) for a non-`_t` command or a negative/dropped duration.
+		uint32_t rampDurationTicks(Runtime& rt, int track, const CseqCmd& cmd)
+		{
+			if (cmd.Suffix2 == SuffixType::None || cmd.Args.empty())
+			{
+				return 0;
+			}
+
+			int32_t last = static_cast<int32_t>(cmd.Args.size()) - 1;
+			int32_t dur = cmd.Args[last];
+
+			if (cmd.Suffix2 == SuffixType::TimeRnd)
+			{
+				dur = (cmd.Arg2Rnd.first + cmd.Arg2Rnd.second) / 2;
+			}
+			else if (cmd.Suffix2 == SuffixType::TimeVar)
+			{
+				int32_t idx = cmd.Args[last];
+
+				if (idx < 0 || idx >= 48)
+				{
+					return 0;
+				}
+
+				dur = rt.readVar(track, idx);
+			}
+
+			return (dur > 0) ? static_cast<uint32_t>(dur) : 0;
+		}
+
+		// Command a live track/master parameter: resolve the target (Args[0], honouring
+		// a Var/Rnd prefix) and the `_t` ramp duration, convert the duration from ticks
+		// to samples at the current tempo, and glide the curve there. A non-`_t` command
+		// is an instant step (0 duration). A dropped Var arg leaves the curve unchanged.
+		void setParam(Runtime& rt, int track, const CseqCmd& cmd, uint32_t currentSample,
+			ParamCurve& curve, float lo, float hi)
+		{
+			bool drop = false;
+			int32_t val = cmd.Args.empty() ? 0 : resolveArg(rt, track, cmd, 0, drop);
+
+			if (drop)
+			{
+				return;
+			}
+
+			float target = static_cast<float>(clamp<int32_t>(val, static_cast<int32_t>(lo), static_cast<int32_t>(hi)));
+
+			uint32_t durTicks = rampDurationTicks(rt, track, cmd);
+			uint32_t durSamples = durTicks
+				? static_cast<uint32_t>(static_cast<double>(durTicks) * samplesPerTick(rt) + 0.5)
+				: 0;
+
+			curve.set(currentSample, target, durSamples);
+
+			if (rt.stats)
+			{
+				if (durSamples > 0)
+				{
+					++rt.stats->rampsApplied;
+
+					if (durTicks > rt.stats->longestRampTicks)
+					{
+						rt.stats->longestRampTicks = durTicks;
+					}
+				}
+				else
+				{
+					++rt.stats->instantSets;
+				}
+			}
 		}
 
 		// The extended (0xF0) variable + comparison ops -- ported verbatim from
@@ -340,6 +418,7 @@ namespace play
 
 			TrackState& t = rt.tracks[idx];
 			t = TrackState{};
+			t.timeline.reset();   // fresh SeqTrack::InitParam defaults (assignment above cleared it)
 			t.active = true;
 			t.cursor = it;
 			t.waitTicks = 0;
@@ -435,21 +514,12 @@ namespace play
 							ev.envOverride[e] = t.envOverride[e];
 						}
 
-						// The 24-voice pool inputs, latched at note-on.
+						// The 24-voice pool inputs, latched at note-on. Volume/pan/pitch
+						// are NOT latched -- the voice follows track `track`'s live
+						// timeline each frame (C7), so a mid-note change reaches it.
 						ev.priority = clamp<int>(64 + t.trackPriority, 0, 255);
 						ev.track = track;
 						ev.mono = t.mono;
-
-						// The C6 native mix params, latched at note-on. Track/master/
-						// expression volumes multiply as amplitudes; the two track pans
-						// combine as offsets from centre; bend (scaled by its range) plus
-						// transpose give the semitone offset.
-						ev.volAmp = volumeByteToAmp(t.trackVolume)
-							* volumeByteToAmp(rt.masterVolume)
-							* volumeByteToAmp(t.expression);
-						ev.panOffset = (t.trackPan - 64) + (t.initPan - 64);
-						ev.pitchSemitones = (static_cast<double>(t.bend) / 128.0) * static_cast<double>(t.bendRange)
-							+ static_cast<double>(t.transpose);
 
 						rt.events.push_back(ev);
 
@@ -758,39 +828,22 @@ namespace play
 					continue;
 				}
 
-				// Native volume / pan / pitch (C6). These bear no time, so they only
-				// affect notes started AFTER them (the params are latched at note-on).
-				// The converter maps them to CC7/CC11/CC10/master-vol/pitch-bend; the
-				// player folds them straight into per-voice gain / pan / step.
-				if (c == 0xC1 || c == 0xC2 || c == 0xD5 || c == 0xC0 || c == 0xDC
-					|| c == 0xC4 || c == 0xC5 || c == 0xC3)
-				{
-					bool drop = false;
-					int32_t val = cmd.Args.empty() ? 0 : resolveArg(rt, track, cmd, 0, drop);
-
-					if (!drop)
-					{
-						switch (c)
-						{
-							case 0xC1: t.trackVolume = clamp<int32_t>(val, 0, 127); break;  // track volume
-							case 0xC2: rt.masterVolume = clamp<int32_t>(val, 0, 127); break; // master volume
-							case 0xD5: t.expression = clamp<int32_t>(val, 0, 127); break;   // expression
-							case 0xC0: t.trackPan = clamp<int32_t>(val, 0, 127); break;     // track pan
-							case 0xDC: t.initPan = clamp<int32_t>(val, 0, 127); break;      // init pan
-							case 0xC4: t.bend = clamp<int32_t>(val, -128, 127); break;      // pitch bend (signed)
-							case 0xC5: t.bendRange = clamp<int32_t>(val, 0, 127); break;    // bend range (semitones)
-							case 0xC3: t.transpose = clamp<int32_t>(val, -64, 63); break;   // coarse tune (semitones)
-							default: break;
-						}
-					}
-
-					++t.cursor;
-					continue;
-				}
+				// Native volume / pan / pitch (C7), as LIVE curves. A `_t` suffix glides
+				// the parameter from its current value to the target over the trailing
+				// duration (ticks -> samples at the current tempo); a plain command is an
+				// instant step. Sounding voices sample these each frame.
+				if (c == 0xC1) { setParam(rt, track, cmd, currentSample, t.timeline.volume,     0, 127); ++t.cursor; continue; }
+				if (c == 0xC2) { setParam(rt, track, cmd, currentSample, rt.masterVolume,       0, 127); ++t.cursor; continue; }
+				if (c == 0xD5) { setParam(rt, track, cmd, currentSample, t.timeline.expression, 0, 127); ++t.cursor; continue; }
+				if (c == 0xC0) { setParam(rt, track, cmd, currentSample, t.timeline.pan,        0, 127); ++t.cursor; continue; }
+				if (c == 0xDC) { setParam(rt, track, cmd, currentSample, t.timeline.initPan,    0, 127); ++t.cursor; continue; }
+				if (c == 0xC4) { setParam(rt, track, cmd, currentSample, t.timeline.bend,    -128, 127); ++t.cursor; continue; }
+				if (c == 0xC5) { setParam(rt, track, cmd, currentSample, t.timeline.bendRange,   0, 127); ++t.cursor; continue; }
+				if (c == 0xC3) { setParam(rt, track, cmd, currentSample, t.timeline.transpose, -64,  63); ++t.cursor; continue; }
 
 				// Everything else is a parameter/effect command that does NOT bear
-				// time (volume, pan, pitch bend, LFO, fx sends, ...). Safe-skip it so
-				// the cursor never desyncs; native rendering of these is C6+.
+				// time (LFO, fx sends, tie, sweep, portamento, ...). Safe-skip it so the
+				// cursor never desyncs; native rendering of these is C8+.
 				rt.skipped.insert(c);
 				++t.cursor;
 			}
@@ -1066,9 +1119,10 @@ namespace play
 			if (ev.envOverride[3] >= 0) v.envSustain = static_cast<uint8_t>(ev.envOverride[3]);
 			if (ev.envOverride[4] >= 0) v.envRelease = static_cast<uint8_t>(ev.envOverride[4]);
 
-			// C6: fold the track/master/expression volume, additive pan, and bend +
-			// transpose pitch (all latched at note-on) into this voice's gain/pan/step.
-			applyMixParams(v, ev.volAmp, ev.panOffset, ev.pitchSemitones);
+			// C7: volume/pan/pitch are NOT folded here -- the voice follows its track's
+			// live timeline per frame in renderVoice (see the VoiceMod in the render
+			// loop). The VoiceSpec keeps only the note's static base (velocity x zone
+			// volume, note pan, key/root/tune step).
 
 			PoolVoice p;
 			p.v = v;
@@ -1092,7 +1146,12 @@ namespace play
 				continue;
 			}
 
-			renderVoice(bus, p.v, p.start, p.gate, (p.stopAt < renderCap) ? p.stopAt : renderCap);
+			VoiceMod mod;
+			mod.track = &rt.tracks[p.track].timeline;
+			mod.master = &rt.masterVolume;
+			mod.noteOnSample = p.start;
+
+			renderVoice(bus, p.v, p.start, p.gate, (p.stopAt < renderCap) ? p.stopAt : renderCap, &mod);
 		}
 
 		// Stats.
