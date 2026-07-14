@@ -237,7 +237,14 @@ bool Cgrp::Extract()
 				ofs.write(reinterpret_cast<const char*>(pos), cbnkLength);
 				ofs.close();
 
-				Cbnks.push_back(new Cbnk(bankFile.c_str(), Cwars, Opts, Ctx));
+				// The .bcbnk was just written from [pos, pos + cbnkLength) into this
+				// Cgrp's buffer; hand that span to the child instead of re-reading
+				// the file. Unlike the group's wave archives (copied into the
+				// archive-lifetime shared Cwars map), this Cbnk lives only in
+				// Cgrp::Cbnks and is freed in ~Cgrp before Cgrp::Data, so the borrow
+				// is safe even though its conversion is deferred to later in this
+				// same Extract call.
+				Cbnks.push_back(new Cbnk(bankFile, pos, cbnkLength, Cwars, Opts, Ctx));
 
 				break;
 			}

@@ -80,7 +80,14 @@ struct Cbnk
 	std::map<int, Cwar*>* Cwars;
 	Options Opts;
 
-	Cbnk(const char* fileName, std::map<int, Cwar*>* cwars, const Options& opts, ParseContext& ctx);
+	// The parent hands over the span its just-written .bcbnk was serialised from
+	// (a pointer + length into the parent's already-loaded buffer), so the child
+	// no longer re-reads the file it was just written from. FileName stays the
+	// full output path (its directory is where the .sf2 is written). Data is
+	// borrowed, never owned: every construction site's parent (Csar's own buffer
+	// for a direct bank, the stack-local Cgrp's buffer for a group-resident one)
+	// provably outlives this Cbnk, so the destructor never frees it.
+	Cbnk(const std::string& fileName, uint8_t* data, std::streamoff length, std::map<int, Cwar*>* cwars, const Options& opts, ParseContext& ctx);
 	~Cbnk();
 	bool Convert();
 };

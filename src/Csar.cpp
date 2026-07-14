@@ -389,7 +389,11 @@ bool Csar::Extract(const string& outputDir)
 			ofs.write(reinterpret_cast<const char*>(pos), cbnkLength);
 			ofs.close();
 
-			Cbnk cbnk(bankFile.c_str(), &Cwars, Opts, Ctx);
+			// The .bcbnk was just written from [pos, pos + cbnkLength) into Csar's
+			// own buffer; hand that span to the child instead of re-reading the
+			// file. This Cbnk is a stack local, converted and destroyed here while
+			// Csar::Data is alive, so borrowing is safe.
+			Cbnk cbnk(bankFile, pos, cbnkLength, &Cwars, Opts, Ctx);
 
 			if (!cbnk.Convert())
 			{
