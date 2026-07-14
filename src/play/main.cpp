@@ -1,0 +1,254 @@
+// caesar-play — the suite stage-2 offline dry-render CLI. Renders a chosen
+// sequence from a .bcsar to a .wav with no audio device. A development/suite
+// tool, NOT part of the converter release.
+//
+//   caesar-play --list   <archive.bcsar>
+//   caesar-play --render <archive.bcsar> --seq <name-or-index> --out <file.wav>
+//                        [--rate <hz>] [--max-seconds <n>]
+//
+// C1 (this commit): the loader + --list + a silent --render of deterministic
+// length that proves the seq -> bank -> wave-archive -> sample resolution chain.
+// The voice DSP (C2) and the sequencer (C3) fill in the actual audio.
+
+#include "CaesarPlay.hpp"
+
+#include "Csar.hpp"
+#include "Wav.hpp"
+
+#include <cstdint>
+#include <cstdlib>
+#include <iostream>
+#include <string>
+#include <vector>
+
+using namespace std;
+
+namespace
+{
+	// C1 renders a fixed span of silence; C3 replaces this with the sequence's
+	// own length. Kept deterministic so the eventual golden set is stable.
+	constexpr double kC1SilentSeconds = 2.0;
+
+	constexpr uint32_t kDefaultRate = 48000;
+	constexpr uint32_t kDefaultMaxSeconds = 300;
+
+	void printUsage()
+	{
+		cerr <<
+			"caesar-play — offline dry renderer for BCSAR sequences (suite stage 2)\n"
+			"\n"
+			"usage:\n"
+			"  caesar-play --list   <archive.bcsar>\n"
+			"  caesar-play --render <archive.bcsar> --seq <name-or-index> --out <file.wav>\n"
+			"              [--rate <hz>] [--max-seconds <n>]\n"
+			"\n"
+			"options:\n"
+			"  --rate <hz>         output sample rate (default 48000)\n"
+			"  --max-seconds <n>   safety cap on render length (default 300)\n"
+			"  --version           print version and exit\n";
+	}
+
+	// Resolve --seq: an exact name match first, else a numeric index into the
+	// renderable-sequence list. Returns nullptr when neither resolves.
+	const play::SequenceInfo* resolveChoice(const vector<play::SequenceInfo>& seqs, const string& choice)
+	{
+		for (const play::SequenceInfo& s : seqs)
+		{
+			if (s.name == choice)
+			{
+				return &s;
+			}
+		}
+
+		// Numeric index fallback (all-digits).
+		if (!choice.empty() && choice.find_first_not_of("0123456789") == string::npos)
+		{
+			uint32_t idx = static_cast<uint32_t>(strtoul(choice.c_str(), nullptr, 10));
+
+			for (const play::SequenceInfo& s : seqs)
+			{
+				if (s.index == idx)
+				{
+					return &s;
+				}
+			}
+		}
+
+		return nullptr;
+	}
+
+	int doList(const string& archivePath)
+	{
+		auto arch = play::loadArchive(archivePath);
+
+		if (!arch)
+		{
+			return 1;
+		}
+
+		vector<play::SequenceInfo> seqs = play::listSequences(*arch->csar);
+
+		cout << "index  bank  start       name\n";
+
+		for (const play::SequenceInfo& s : seqs)
+		{
+			cout << "  " << s.index << "\t" << s.bankIndex << "\t0x" << hex << s.startOffset << dec
+				<< "\t" << (s.name.empty() ? "(unnamed)" : s.name) << "\n";
+		}
+
+		cout << seqs.size() << " renderable sequence(s)\n";
+
+		return 0;
+	}
+
+	int doRender(const string& archivePath, const string& choice, const string& outPath,
+		uint32_t rate, uint32_t maxSeconds)
+	{
+		(void)maxSeconds;  // used from C3, when the sequencer bounds the render
+
+		auto arch = play::loadArchive(archivePath);
+
+		if (!arch)
+		{
+			return 1;
+		}
+
+		vector<play::SequenceInfo> seqs = play::listSequences(*arch->csar);
+
+		if (seqs.empty())
+		{
+			cerr << "caesar-play: archive has no renderable sequences\n";
+			return 1;
+		}
+
+		const play::SequenceInfo* chosen = resolveChoice(seqs, choice);
+
+		if (!chosen)
+		{
+			cerr << "caesar-play: no sequence named or indexed '" << choice << "' (try --list)\n";
+			return 1;
+		}
+
+		if (!play::resolveSequence(*arch, *chosen))
+		{
+			return 1;
+		}
+
+		// C1: a deterministic span of silence. The chain above already proved the
+		// bank + samples + sequence all resolved; the audio comes online in C2/C3.
+		size_t frames = static_cast<size_t>(kC1SilentSeconds * rate);
+		vector<int16_t> interleaved(frames * 2, 0);
+
+		if (!play::writeWavPcm(outPath, interleaved, 2, rate))
+		{
+			cerr << "caesar-play: failed to write " << outPath << "\n";
+			return 1;
+		}
+
+		cout << "rendered '" << chosen->name << "' -> " << outPath
+			<< " (" << frames << " frames @ " << rate << " Hz)\n";
+
+		return 0;
+	}
+}
+
+int main(int argc, char** argv)
+{
+	string archivePath;
+	string choice;
+	string outPath;
+	uint32_t rate = kDefaultRate;
+	uint32_t maxSeconds = kDefaultMaxSeconds;
+	bool list = false;
+	bool render = false;
+
+	for (int a = 1; a < argc; ++a)
+	{
+		string arg = argv[a];
+
+		if (arg == "--version")
+		{
+#ifdef CAESAR_VERSION
+			cout << "caesar-play " << CAESAR_VERSION << "\n";
+#else
+			cout << "caesar-play (unknown version)\n";
+#endif
+			return 0;
+		}
+		else if (arg == "--list")
+		{
+			list = true;
+
+			if (a + 1 < argc && argv[a + 1][0] != '-')
+			{
+				archivePath = argv[++a];
+			}
+		}
+		else if (arg == "--render")
+		{
+			render = true;
+
+			if (a + 1 < argc && argv[a + 1][0] != '-')
+			{
+				archivePath = argv[++a];
+			}
+		}
+		else if (arg == "--seq")
+		{
+			if (a + 1 >= argc) { cerr << "caesar-play: --seq needs a value\n"; return 1; }
+			choice = argv[++a];
+		}
+		else if (arg == "--out")
+		{
+			if (a + 1 >= argc) { cerr << "caesar-play: --out needs a value\n"; return 1; }
+			outPath = argv[++a];
+		}
+		else if (arg == "--rate")
+		{
+			if (a + 1 >= argc) { cerr << "caesar-play: --rate needs a value\n"; return 1; }
+			rate = static_cast<uint32_t>(strtoul(argv[++a], nullptr, 10));
+		}
+		else if (arg == "--max-seconds")
+		{
+			if (a + 1 >= argc) { cerr << "caesar-play: --max-seconds needs a value\n"; return 1; }
+			maxSeconds = static_cast<uint32_t>(strtoul(argv[++a], nullptr, 10));
+		}
+		else if (arg == "--help" || arg == "-h")
+		{
+			printUsage();
+			return 0;
+		}
+		else if (archivePath.empty())
+		{
+			archivePath = arg;
+		}
+		else
+		{
+			cerr << "caesar-play: unexpected argument '" << arg << "'\n";
+			return 1;
+		}
+	}
+
+	if (rate < 8000 || rate > 384000)
+	{
+		cerr << "caesar-play: --rate " << rate << " out of the supported 8000..384000 range\n";
+		return 1;
+	}
+
+	if (list)
+	{
+		if (archivePath.empty()) { cerr << "caesar-play: --list needs an archive\n"; return 1; }
+		return doList(archivePath);
+	}
+
+	if (render)
+	{
+		if (archivePath.empty()) { cerr << "caesar-play: --render needs an archive\n"; return 1; }
+		if (choice.empty()) { cerr << "caesar-play: --render needs --seq <name-or-index>\n"; return 1; }
+		if (outPath.empty()) { cerr << "caesar-play: --render needs --out <file.wav>\n"; return 1; }
+		return doRender(archivePath, choice, outPath, rate, maxSeconds);
+	}
+
+	printUsage();
+	return 1;
+}

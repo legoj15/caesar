@@ -170,3 +170,40 @@ if(MSVC)
 else()
     target_compile_options(caesar-roundtrip PRIVATE -Wall -Wextra -Werror)
 endif()
+
+# ---------------------------------------------------------------------------
+# caesar_play — the offline dry-player engine (suite stage 2). A static library
+# linking caesar_core PUBLIC: it re-interprets Cseq's emit walk as a real-time
+# sequencer feeding an in-memory voice DSP that mixes at the DSP's native
+# 32,728 Hz and resamples once to the output rate. The engine deliberately lives
+# OUTSIDE caesar_core so the shipped converter's byte-identical A/B (ab-verify)
+# and round-trip guards keep watching caesar_core unchanged -- the player is a
+# parallel consumer of the same parsed models, never a modifier of the export
+# paths. The suite's tracker/editor will link this same library.
+# ---------------------------------------------------------------------------
+add_library(caesar_play STATIC
+    src/play/Loader.cpp
+    src/play/Wav.cpp)
+
+target_include_directories(caesar_play PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src/play")
+target_link_libraries(caesar_play PUBLIC caesar_core)
+
+if(MSVC)
+    target_compile_options(caesar_play PRIVATE /W3 /WX)
+else()
+    target_compile_options(caesar_play PRIVATE -Wall -Wextra -Werror)
+endif()
+
+# ---------------------------------------------------------------------------
+# caesar-play — the offline-render CLI. A DEVELOPMENT/suite tool, not part of the
+# converter release: it renders a chosen sequence from a .bcsar to a .wav without
+# any audio device. Just its entry point; the whole engine lives in caesar_play.
+# ---------------------------------------------------------------------------
+add_executable(caesar-play src/play/main.cpp)
+target_link_libraries(caesar-play PRIVATE caesar_play)
+
+if(MSVC)
+    target_compile_options(caesar-play PRIVATE /W3 /WX)
+else()
+    target_compile_options(caesar-play PRIVATE -Wall -Wextra -Werror)
+endif()
