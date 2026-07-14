@@ -45,6 +45,13 @@ namespace play
 			int priority = 64;
 			int track = 0;
 			bool mono = false;
+
+			// The C6 native mix params, latched at note-on. volAmp is the product of
+			// the track/master/expression volume amplitudes; panOffset is the track
+			// 0xC0 + 0xDC pan as offsets from centre; pitchSemitones is bend + transpose.
+			float volAmp = 1.0f;
+			int panOffset = 0;
+			double pitchSemitones = 0.0;
 		};
 
 		// A 48-slot variable file with the converter's scoping: 0-31 are shared
@@ -74,6 +81,19 @@ namespace play
 			int trackPriority = 0;
 			bool mono = false;
 
+			// C6 native mix state. Volumes are 0..127 bytes (127 = unity), pans are
+			// 0..127 (64 = centre); bend is the 0xC4 signed value, bendRange the 0xC5
+			// semitone span (RPN 0,0; default 2), transpose the 0xC3 coarse tune
+			// (RPN 0,2). The converter maps these to CC7/CC11/CC10/pitch-bend; the
+			// player folds them straight into per-voice gain / pan / step.
+			int trackVolume = 127;   // 0xC1
+			int expression = 127;    // 0xD5
+			int trackPan = 64;       // 0xC0
+			int initPan = 64;        // 0xDC
+			int bend = 0;            // 0xC4
+			int bendRange = 2;       // 0xC5 (semitones)
+			int transpose = 0;       // 0xC3 (semitones)
+
 			bool cmpFlag = true;
 			int16_t vars[16] = { 0 };        // slots 32-47 (track-local)
 			bool varWritten[16] = { false };
@@ -94,6 +114,8 @@ namespace play
 
 			double tempoBpm = kDefaultTempoBpm;
 			uint32_t timebase = kDefaultTimebase;
+
+			int masterVolume = 127;   // 0xC2, sequence-wide (C6)
 
 			int16_t globalVars[32] = { 0 };      // slots 0-31 (shared)
 			bool globalWritten[32] = { false };
@@ -418,6 +440,17 @@ namespace play
 						ev.track = track;
 						ev.mono = t.mono;
 
+						// The C6 native mix params, latched at note-on. Track/master/
+						// expression volumes multiply as amplitudes; the two track pans
+						// combine as offsets from centre; bend (scaled by its range) plus
+						// transpose give the semitone offset.
+						ev.volAmp = volumeByteToAmp(t.trackVolume)
+							* volumeByteToAmp(rt.masterVolume)
+							* volumeByteToAmp(t.expression);
+						ev.panOffset = (t.trackPan - 64) + (t.initPan - 64);
+						ev.pitchSemitones = (static_cast<double>(t.bend) / 128.0) * static_cast<double>(t.bendRange)
+							+ static_cast<double>(t.transpose);
+
 						rt.events.push_back(ev);
 
 						if (rt.stats)
@@ -725,6 +758,36 @@ namespace play
 					continue;
 				}
 
+				// Native volume / pan / pitch (C6). These bear no time, so they only
+				// affect notes started AFTER them (the params are latched at note-on).
+				// The converter maps them to CC7/CC11/CC10/master-vol/pitch-bend; the
+				// player folds them straight into per-voice gain / pan / step.
+				if (c == 0xC1 || c == 0xC2 || c == 0xD5 || c == 0xC0 || c == 0xDC
+					|| c == 0xC4 || c == 0xC5 || c == 0xC3)
+				{
+					bool drop = false;
+					int32_t val = cmd.Args.empty() ? 0 : resolveArg(rt, track, cmd, 0, drop);
+
+					if (!drop)
+					{
+						switch (c)
+						{
+							case 0xC1: t.trackVolume = clamp<int32_t>(val, 0, 127); break;  // track volume
+							case 0xC2: rt.masterVolume = clamp<int32_t>(val, 0, 127); break; // master volume
+							case 0xD5: t.expression = clamp<int32_t>(val, 0, 127); break;   // expression
+							case 0xC0: t.trackPan = clamp<int32_t>(val, 0, 127); break;     // track pan
+							case 0xDC: t.initPan = clamp<int32_t>(val, 0, 127); break;      // init pan
+							case 0xC4: t.bend = clamp<int32_t>(val, -128, 127); break;      // pitch bend (signed)
+							case 0xC5: t.bendRange = clamp<int32_t>(val, 0, 127); break;    // bend range (semitones)
+							case 0xC3: t.transpose = clamp<int32_t>(val, -64, 63); break;   // coarse tune (semitones)
+							default: break;
+						}
+					}
+
+					++t.cursor;
+					continue;
+				}
+
 				// Everything else is a parameter/effect command that does NOT bear
 				// time (volume, pan, pitch bend, LFO, fx sends, ...). Safe-skip it so
 				// the cursor never desyncs; native rendering of these is C6+.
@@ -1002,6 +1065,10 @@ namespace play
 			if (ev.envOverride[2] >= 0) v.envDecay = static_cast<uint8_t>(ev.envOverride[2]);
 			if (ev.envOverride[3] >= 0) v.envSustain = static_cast<uint8_t>(ev.envOverride[3]);
 			if (ev.envOverride[4] >= 0) v.envRelease = static_cast<uint8_t>(ev.envOverride[4]);
+
+			// C6: fold the track/master/expression volume, additive pan, and bend +
+			// transpose pitch (all latched at note-on) into this voice's gain/pan/step.
+			applyMixParams(v, ev.volAmp, ev.panOffset, ev.pitchSemitones);
 
 			PoolVoice p;
 			p.v = v;

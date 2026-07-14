@@ -187,18 +187,22 @@ per stage. Status:
       phases; first audible `.wav` at C3; `caesar_play` lib + `caesar-play`
       offline-render exe; golden-render net from the first `.wav`): full plan in
       [HISTORY.md](HISTORY.md#suite-stage-2--the-dry-player-blueprint-2026-07-14-survey).
-      **Phase I done (C1–C3, 2026-07-14): first audible `.wav` achieved.** The
-      `caesar_play`/`caesar-play` scaffold, the in-memory loader (no Export), the
-      single-voice DSP + native mix bus + windowed-sinc final resample, and the
-      concurrent-track sequencer (notes/rests/program/tempo/timebase/control-flow/
-      `[If]`-VM, noteWait default on) all landed; a real BGM (`BGM_DEN_RESULT`)
-      renders to an audible, note-shaped WAV whose length matches its tick-length
-      at tempo, and the `tools/play-goldens` Net-A golden hash net is live.
-      **Next: Phase II — C4 the NW4R `EnvGenerator` (the load-bearing envelope,
-      replacing C3's trivial declick gate), C5 the 24-voice priority allocator +
-      mono, C6 native pan/vol/pitch/Tune.** Write-up in the HISTORY 2026-07-14
-      Phase I entry, including the per-command handoff (what each safe-skipped
-      opcode needs, and the deferred re-roll/tie/loop refinements).
+      **Phase I done (C1–C3, 2026-07-14): first audible `.wav` achieved.**
+      **Phase II done (C4–C6, 2026-07-14): the "mostly right" milestone.** C4 ports
+      the NW4R `EnvGenerator` (tables read byte-for-byte from the console binary,
+      `CalcRelease` verbatim, release-127 = instant) in place of the declick gate;
+      C5 adds the single 24-voice priority pool (steal-lowest / refuse-if-front-
+      outranks, verbatim from the disasm) with `0xC6` priority and `0xB2` mono; C6
+      folds track/master/expression volume, additive equal-power pan, velocity, and
+      bend/range/coarse-tune natively into per-voice gain/pan/step (resolving the
+      dry-sum clipping). Full write-up in the HISTORY 2026-07-14 Phase II entry
+      (envelope constant provenance, the gain/pan model with evidence per choice,
+      the golden diff inventory, and the flagged Net-B unknowns).
+      **Next: Phase III — C7 ramp synthesis (the reusable `_t` flattener stage 5
+      shares), C8 tie/sweep/portamento, C9 LFO, C10 bank switch + velocity range +
+      mute + LPF.** The safe-skipped set is now just the LFO family (`0xCA`–`0xCD`,
+      `0xE0` → C9), reverb send (`0xD9` → stage 3), and the mid-seq bank/velocity-
+      range/biquad group (→ C10).
       **Console-capture dependency for the final tolerance proof (Phase IV):
       the old music captures are gone — fresh New 3DS captures needed
       (`BGM_MAIN_Mii_Only_One`, per-instrument isolated notes, the MeetSound

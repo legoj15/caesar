@@ -327,6 +327,39 @@ namespace play
 		return startSample + end;
 	}
 
+	float volumeByteToAmp(int byte)
+	{
+		int b = byte < 0 ? 0 : (byte > 127 ? 127 : byte);
+
+		return gainFromValue(static_cast<float>(DecibelSquareTable[b]));
+	}
+
+	void applyMixParams(VoiceSpec& v, float volAmp, int panOffset, double pitchSemitones)
+	{
+		// Command volumes (track / master / expression), pre-multiplied into volAmp.
+		v.gainL *= volAmp;
+		v.gainR *= volAmp;
+
+		// Additive pan: the note's own pan plus the track's 0xC0/0xDC offset, clamped
+		// to 0..127, then an equal-power cos/sin split (pan 0 = hard left, 127 = hard
+		// right, 64 ~ centre). The engine's actual curve is a sqrt polynomial
+		// (disasm 0x14AFC8); this standard equal-power law is flagged for Net-B.
+		int pan = static_cast<int>(v.notePan) + panOffset;
+		pan = pan < 0 ? 0 : (pan > 127 ? 127 : pan);
+
+		double x = static_cast<double>(pan) / 127.0;   // 0..1
+		double angle = x * (kPi / 2.0);
+		v.gainL *= static_cast<float>(cos(angle));
+		v.gainR *= static_cast<float>(sin(angle));
+
+		// Pitch: bend + transpose semitones fold into the playback step (a one-shot
+		// offset at note-on; continuous bend ramps are C7/C8).
+		if (pitchSemitones != 0.0)
+		{
+			v.step *= pow(2.0, pitchSemitones / 12.0);
+		}
+	}
+
 	bool resolveVoice(const LoadedArchive& arch, uint32_t program, int key, int velocity, VoiceSpec& out)
 	{
 		if (!arch.bank)
@@ -419,12 +452,17 @@ namespace play
 		// Velocity -> linear gain (C3), folded with the note zone's own volume
 		// (the instrument's design level, the SF2 initialAttenuation analogue).
 		// Native volume/pan/expression commands are C6.
+		// Velocity -> gain: (vel/127)^2. Linear-squared is the NW4R velocity precedent
+		// (flagged for Net-B). The note zone's design volume goes through the engine's
+		// decibel-square domain, like every other volume byte.
 		float velGain = static_cast<float>(velocity) / 127.0f;
-		float volGain = static_cast<float>(zone->Volume) / 127.0f;
+		velGain *= velGain;
+		float volGain = volumeByteToAmp(static_cast<int>(zone->Volume));
 		float gain = velGain * volGain;
 
 		out.gainL = gain;
 		out.gainR = gain;
+		out.notePan = static_cast<uint8_t>(zone->Pan > 127 ? 64 : zone->Pan);
 
 		// The note's ADSHR envelope bytes (the same fields Cbnk parses at note+0x38);
 		// the player runs the NW4R EnvGenerator over them. Per-track 0xB1/0xD0-0xD3

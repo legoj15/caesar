@@ -43,6 +43,23 @@ House rules:
   **`output-identical` for the converter** — `caesar` is a byte-for-byte unchanged
   parallel target (ab-verify + diag-goldens both exit 0); this adds a new build
   artifact only.
+- **`caesar-play` Phase II — the "mostly right" milestone (C4–C6): native
+  envelope, voice pool, and gain/pan/pitch.** The dry player now shapes every note
+  with a direct port of the NW4R/NW4C `EnvGenerator` (attack/hold/decay/sustain/
+  release) instead of a declick gate — its `DecibelSquareTable`/`attackTable` read
+  byte-for-byte from the console binary, `CalcRelease` verbatim, so a `release`/
+  `decay` byte of 127 stops the voice in one step (the instant-release correction,
+  no fake 3.5 s tail); Cbnk's SF2 timecent approximations are ignored. Voices now
+  contend for the single 24-voice priority pool (reuse-free / steal-lowest /
+  refuse-if-front-outranks, verbatim from the disasm), with `0xC6` track priority
+  and `0xB2` mono/poly honoured (both of which the converter can only drop). Track
+  volume (`0xC1`), master volume (`0xC2`), expression (`0xD5`), additive pan
+  (`0xC0`/`0xDC` + the note's own pan, equal-power), velocity (linear-squared), and
+  pitch bend + range + coarse-tune (`0xC4`/`0xC5`/`0xC3`) fold natively into
+  per-voice gain / pan / step — resolving Phase I's dry-sum clipping (BGM_DEN_RESULT
+  peak-clip 0.64 % of samples → 11 samples, RMS 0.29 → 0.12, with a real stereo
+  field). **`output-identical` for the converter** — `caesar` stays byte-for-byte
+  unchanged (ab-verify + diag-goldens exit 0); only `caesar-play`'s audio changes.
 - **BCSAR container round-trip serialization (`Csar::Serialize()` in `caesar_core`)
   — the stage-1 milestone reached: byte-identical BCSAR + BCSEQ + BCBNK round-trip,
   proven corpus-wide.** The inverse of `Csar::Parse`, reading only model state

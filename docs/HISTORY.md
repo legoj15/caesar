@@ -4049,3 +4049,143 @@ safety bound for the rest.
   timing (frame-quantized by design). A lazy per-bank wave-archive decode (the
   loader decodes *all* internal wave archives up front, like Export) would cut
   load time on large archives — a clean optimization when it matters.
+
+## Suite stage 2 Phase II — the "mostly right" milestone: envelope, pool, gain/pan/pitch (2026-07-14)
+
+Executed C4–C6 of the dry-player blueprint. The player now shapes notes with the
+real engine envelope, contends for the true 24-voice pool, and mixes with native
+gain/pan/pitch — the blueprint's "mostly right" tier. Three commits, each
+warning-clean on all targets with `caesar` itself byte-identical (ab-verify
+257,125 files + diag-goldens 18/18 at every commit). play-goldens deliberately
+recaptured per commit (renders change by design), with the diff inventoried below.
+
+**Commits:** C4 `4f5da8b` (EnvGenerator), C5 `0e636e5` (24-voice pool), C6 (this).
+
+### C4 — the NW4R EnvGenerator (the load-bearing correction)
+
+`renderVoice` ported the NW4C/NW4R `EnvGenerator` in place of Phase I's ~2 ms
+declick gate. Phases: Attack (per-ms `mValue *= attackTable[a]` toward 0, snap at
+`> -1/32`), Hold (dwell at peak for `round((h+1)²/4)` ms), Decay (rate down to the
+sustain target), Sustain (hold), Release (rate down on note-off), updated once per
+DSP frame (4.889 ms), gain linearly ramped across the 160 samples of each frame.
+The player **ignores** Cbnk's `Attack/Hold/Decay/ConvertTime` (those are sf2cute
+timecent approximations).
+
+**Constant provenance (every constant documented inline in `Dsp.cpp`):**
+
+- `DecibelSquareTable[128]` (s16) and `attackTable[128]` (f32): **read
+  byte-for-byte from StreetPass Mii Plaza `code.bin`** at vaddr `0x328844` /
+  `0x328944` (file offset vaddr − `0x100000`) — the exact addresses
+  `NW4C-disasm-handoff.md` records. Head/tail match its fingerprint
+  (`-723,-722,-721,-651,…,-1,0`; `0.9992175…0.0`). This is the strongest possible
+  provenance (the console binary itself), not a formula reconstruction.
+- `CalcRelease`: ported verbatim (127 → 65535/ms instant; 126 → 24; x<50 →
+  (2x+1)/128/5; else 60/(126−x)/5), **re-confirmed by this session's own capstone
+  disasm at `0x201D60`/`0x201E3C`**. One curve serves decay and release.
+- `SetAttack` = `mAttack = attackTable[a]` (disasm `0x201DD8`), `SetHold`
+  = `round((h+1)²/4)` ms (disasm `0x201D40`) — both re-disassembled this session.
+- **Amplitude conversion = `10^(mValue/400)`** (the decibel-square / *power*
+  domain — the "square"). Derived numerically: `10^(DecibelSquareTable[s]/400)`
+  tracks `s/127` to <1 % across all 128 sustain levels (e.g. s=16→0.1259 vs
+  0.1260; s=32→0.2527 vs 0.2520), i.e. the sustain byte maps ~linearly to
+  amplitude. The `/40`-vs-`/20` split of `GetValue()=mValue/10` is flagged for
+  Net-B. `0x14AFC8` (the doc's "sustain calc") turned out to be the **pan** L/R
+  sqrt calc, not the volume conversion — corrected here.
+
+Per-track ADSHR overrides wired (converter drops them, no MIDI equivalent): `0xD0`
+attack / `0xB1` hold / `0xD1` decay / `0xD2` sustain / `0xD3` release latch a track
+override the next note uses; `0xFB` resets. **Proof:** an isolated note traces a
+clean attack→hold→decay→sustain envelope; a `release`-127 note reaches Done in one
+frame (4.9 ms) with no 3.5 s fake; `BGM_DEN_RESULT` extends 29.2 s → 34.9 s (the
+new release tails).
+
+**Flagged for Net-B (chosen, unconfirmed against this binary):** the attack-start
+floor (`-2000`), the `-1/32` attack-done threshold, the per-frame vs integer-ms
+update cadence, and the amplitude `/40`-vs-`/20`. Decay/sustain *timing* is
+independent of the floor (it uses the fixed `DecibelSquareTable` range), so only
+slow-attack rise-time and the release tail-to-silence carry that uncertainty.
+
+### C5 — the single 24-voice priority pool (verbatim from the RE)
+
+Replaced C3/C4's unbounded per-note allocation with one 24-voice pool
+(`NW4C-disasm-handoff.md` session 3, "the Wii crib HOLDS", 0 refutations): reuse a
+free voice; else take the **front** of the priority-sorted active list (lowest
+*current* priority, released voices dropped to priority 1); **refuse if the front
+outranks the requester** (the note silently does not sound); else evict the front.
+Priority = playerPriority(64) + the track's `0xC6` value. `0xB2` mono re-triggers
+the track's single voice (its previous note releases at the new note-on). The
+allocator is an extracted, testable free function `play::allocateVoicePool` over a
+public `PoolVoice`. Tie-break among equal priority: the **oldest** (lowest
+allocation index) is stolen — a deterministic FIFO-within-priority choice, flagged
+for Net-B (the sorted-insert tie order was not byte-traced).
+
+**Stress evidence** (scratchpad harness driving `allocateVoicePool` directly):
+30 simultaneous uniform-priority notes → exactly 24 survive, the 6 oldest dropped;
+24 held priority-100 notes + a priority-50 latecomer → **refused** (front
+outranks); 20×prio-100 + 4×prio-30 held + a prio-64 requester → steals a prio-30
+voice, never a prio-100; 40 time-spaced notes → zero drops. Corpus:
+`BGM_DEN_RESULT` peaks 24/24 and steals 42 voices — **all releasing tails (0 still
+held)**, so no audible note is lost, only inaudible tails truncated at saturation
+(RMS unchanged 0.2914). `BGM_MAIN_Mii_Only_One` peaks 18/24, no steals.
+
+### C6 — native pan / volume / pitch / Tune
+
+Track volume (`0xC1`), master volume (`0xC2`) and expression (`0xD5`) each convert
+through the **same decibel-square domain as the envelope** —
+`amp = 10^(DecibelSquareTable[byte]/400)` — and multiply into the voice gain
+(multiplying per-source linear gains ≡ summing their decibel contributions, the
+NW4R volume model). Velocity → `(vel/127)²` (linear-squared, the NW4R precedent per
+the blueprint; flagged). Pan is additive — the note's own `CbnkNote.Pan` plus the
+track `0xC0` + init `0xDC` pans as offsets from centre (the `combinePan` model) —
+split into L/R by a standard **equal-power cos/sin** law; the engine's actual curve
+is a sqrt polynomial (disasm `0x14AFC8`, `pan*0.008` normalisation), flagged for
+Net-B. Pitch: `0xC4` bend scaled by the `0xC5` range (RPN 0,0; default 2 semitones)
+plus `0xC3` coarse-tune (RPN 0,2) fold into the playback step as a one-shot offset
+at note-on (continuous bend ramps are C7/C8). **Note the blueprint said "0xC4/0xC3
+bend/range"; the converter's own RPN mapping makes `0xC5` the range (sensitivity)
+and `0xC3` the coarse-tune transpose — wired per the code, not the label.**
+
+**Clipping (before → after):** `BGM_DEN_RESULT` peak-clip fell from **21,444
+samples (0.64 %)** at C4 to **11 samples (0.0003 %)** at C6; RMS 0.2914 → 0.1213
+(≈ −18 dBFS); with a real stereo field (L/R RMS 0.098/0.141, 31 % spread). The
+residual 11 samples are transient voice-alignment peaks the **console DSP also
+hard-clamps** — the engine has no soft-clip, so none was added (`finalizeToPcm`'s
+hard clamp is the faithful behaviour). Absolute output-level calibration is a
+Net-B item.
+
+### Golden diff inventory (`tools/play-goldens`, Net A)
+
+- **C4:** all 3 renders move — the envelope replaces the declick gate on every
+  note (`note-caravel`, `bgm-den-result`, `se-square`).
+- **C5:** only `bgm-den-result` moves — the 42 release-tail truncations at pool
+  saturation; `note-caravel` (single note) and `se-square` (small SE) are
+  unchanged (no pool pressure). A clean inventory.
+- **C6:** all 3 move — velocity², decibel-square volumes and equal-power pan
+  change every note's gain/pan.
+
+Every commit's renders are byte-identical run-to-run (the harness double-render
+determinism guard), and `caesar` stays byte-for-byte unchanged throughout.
+
+### Handoff for Phase III
+
+- **C7 — ramp synthesis (`_t` suffix).** The ~462k `_t` events (volume/pan/pitch
+  ramps) are still one-shot at note-on; C7 flattens them into per-frame parameter
+  ramps (the reusable flattener stage 5's `.it` export shares). The per-voice mix
+  params are currently latched once at note-on (`NoteEvent.volAmp`/`panOffset`/
+  `pitchSemitones`); C7 will need them to evolve over the note's life.
+- **C8 — tie / sweep / portamento.** `0xC8` tie (single-voice legato, one voice
+  both edges), `0xE3` sweep pitch, `0xC9`/`0xCE`/`0xCF` portamento. The mono
+  re-trigger (C5) is the nearest existing machinery.
+- **C9 — LFO.** The `0xCA`–`0xCD` + `0xE0` family (still safe-skipped): one
+  persistent retargetable `LfoParam`, pitch depth = depth×range cents (per the
+  vibrato-gating memory). `0xCC` target routing already parsed by the converter.
+- **C10 — bank switch + velocity range + mute + LPF.** `0xB6` mid-seq bank,
+  `0xB3` velocity range, `0xDD` mute, `0xB4`/`0xB5`/`0xD8` biquad/LPF.
+- **Still safe-skipped after Phase II:** `0xCA`/`0xCB`/`0xCC`/`0xCD`/`0xE0` (LFO →
+  C9), `0xD9` reverb send (→ stage 3). Everything else a `BGM_DEN_RESULT` /
+  `BGM_MAIN_Mii_Only_One` render touches is now native.
+- **Net-B flagged unknowns accumulated:** envelope floor / attack-done threshold /
+  update cadence / amplitude `/40`-vs-`/20`; velocity linear-vs-squared; the pan
+  sqrt-polynomial vs equal-power; absolute output level; the pool sorted-insert
+  tie order. All are calibration questions the console captures (Phase IV) settle;
+  none blocks a structurally-correct render.

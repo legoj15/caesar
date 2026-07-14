@@ -121,7 +121,27 @@ namespace play
 		uint8_t envDecay = 127;    // 127 = instant decay to sustain
 		uint8_t envSustain = 127;  // 127 = full level (0 dB)
 		uint8_t envRelease = 127;  // 127 = instant release
+
+		// The note zone's own pan (CbnkNote.Pan, 0..127, 64 = centre); the additive
+		// base the track's 0xC0/0xDC pans offset (C6, applied by applyMixParams).
+		uint8_t notePan = 64;
 	};
+
+	// Convert a 0..127 volume/expression byte to a linear amplitude gain, through the
+	// engine's decibel-square domain: amp = 10^(DecibelSquareTable[byte]/400). This is
+	// the SAME table+conversion the envelope sustain uses (verified: it tracks
+	// byte/127 to <1% across all 128 levels). Multiplying these per-source amplitudes
+	// equals summing their decibel contributions -- the NW4R volume model. (C6)
+	float volumeByteToAmp(int byte);
+
+	// Apply the C6 native mix parameters to an already-resolved voice: `volAmp` (the
+	// product of the track/master/expression volume amplitudes) scales the gain;
+	// `panOffset` (the track 0xC0 + 0xDC pan, as offsets from centre) adds to the
+	// note's own pan and splits the gain into equal-power L/R; `pitchSemitones` (bend
+	// + transpose) multiplies the playback step by 2^(semitones/12). The engine's pan
+	// curve is a sqrt polynomial (disasm 0x14AFC8); this uses a standard equal-power
+	// cos/sin split, flagged for Net-B.
+	void applyMixParams(VoiceSpec& v, float volAmp, int panOffset, double pitchSemitones);
 
 	// Resolve (program, key, velocity) against the loaded bank and its wave
 	// archives, the way Cbnk's SF2 emit walk resolves a note zone -> sample: pick
