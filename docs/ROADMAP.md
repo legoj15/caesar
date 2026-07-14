@@ -181,7 +181,10 @@ per stage. Status:
     - Permanently opaque (settled, not a gap): BCWAR/BCWAV/BCWSD/BCGRP never
       re-encode — CWAV's DSP-ADPCM cannot round-trip — so they stay copy-through
       spans in the container and SKIPPED (informational) in the verifier.
-- [ ] **Stage 2 — dry player**: native-rate voices, console interpolation,
+- [x] **Stage 2 — dry player**: **proof criterion MET 2026-07-14** — both
+      console captures pass the tolerance net except the reverb tail; what
+      remains below is constant-refinement polish, not structure.
+      Native-rate voices, console interpolation,
       solved envelopes, priority voice stealing (RE'd and confirmed), tempo
       clock, single final upsample. Blueprinted 2026-07-14 (11 commits in four
       phases; first audible `.wav` at C3; `caesar_play` lib + `caesar-play`
@@ -234,6 +237,23 @@ per stage. Status:
       shows HF energy the band-limited render lacks; recover via the teakra oracle).
 - [ ] **Stage 3 — reverb + delay**: offline `teakra` impulse capture →
       comb/allpass fit → New 3DS hardware validation. The long pole.
+      **Recon done (2026-07-14, write-up in HISTORY):** teakra builds and runs
+      on the dev machine today (MSVC, no vcvars; `dsp1_reader` parsed the real
+      firmware); the DSP1 images are extracted + SHA-verified from five system
+      titles — three distinct images whose DATA coefficient tables are
+      byte-identical, so **one oracle firmware serves all** (MiiPlaza's
+      49.8 KB image); Azahar's `lle.cpp` is the single-file port template
+      (DSP1 load, boot handshake, PipeStatus protocol, 16384 cycles/slice);
+      and Azahar's own `ReverbEffect` struct is an 8-year 26-word TODO stub —
+      HLE cannot produce reverb, confirming the LLE-oracle ruling at the
+      source. Riskiest unknown: engaging reverb with a VALID config (a
+      malformed block is silently bypassed — indistinguishable from off);
+      de-risk by capstone-scanning the ARM11 driver for its 52-byte
+      `ReverbEffect` write and replaying those exact bytes. First code
+      commit: vendor teakra (MIT) + a standalone `dsp_oracle` booting the
+      firmware to the audio callback, paired with the de-risk spike. ~5–7
+      sessions to the fitted-coefficient milestone; the oracle stays out of
+      caesar_core/CI — only fitted coefficients + a golden IR ship.
       Same oracle method now also covers the **Surround-mode virtualization**
       (the DSP folds a quad per-voice gain matrix down to stereo using
       `surround_depth`/`rear_ratio`/speaker-position + two biquads,

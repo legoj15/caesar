@@ -4473,3 +4473,45 @@ tail is the release-vs-reverb witness), and two optional short SEs. Those close 
 envelope-floor / decay-table / pan-law / absolute-level constants; portamento and
 the velocity-squared law need their own repros. The captures are the user's to take;
 the harness verdicts whatever is present, so a partial set is immediately useful.
+
+## Suite stage 3 — the reverb-oracle recon (2026-07-14)
+
+Scratchpad reconnaissance run the same day the stage-2 proof landed, taking
+the teakra feasibility question past research to a working build. Findings:
+
+- **Tooling**: `ctrtool.exe` (at the dump root) produced the existing
+  `re_extract` tree; the five system titles' `code.bin` were already
+  extracted. Python 3.14 + capstone, CMake 4.3.4, and VS 2022 BuildTools are
+  all present and sufficient.
+- **Firmware**: all five titles' DSP1 segments re-sliced fresh with their
+  embedded SHA-256 verified. Three distinct images (MiiPlaza `944b40b5`; the
+  byte-identical eShop/Photos/SystemSettings triplet `8e213f3e`; the
+  AAC-capable Sound app `5c03dd63`) — but the DATA coefficient tables are
+  byte-identical across all five, so for reverb **one oracle firmware serves
+  all**: MiiPlaza's 49.8 KB image, whose archives are already the project's
+  EMPTY_LANDSCAPE repro set.
+- **teakra builds and runs here today**: C++17, interpreter-only, CMake-4-safe,
+  MSVC via the VS generator with no vcvars; `teakra.lib` + `dsp1_reader.exe`
+  built clean, and `dsp1_reader` parsed all five segments of the real MiiPlaza
+  firmware (24,531 disassembled lines). The API surface needed for the oracle
+  exists: `GetDspMemory()`, `Run(cycles)`, the APBP mailbox, and
+  `SetAudioCallback` (the final stereo mix, where the reverb tail emerges).
+- **The port template is one file**: Azahar `src/audio_core/lle/lle.cpp` —
+  DSP1 segment loading, the boot handshake (flags=3 → channel-2
+  `pipe_base_waddr` reply), the `PipeStatus` circular-buffer pipe protocol,
+  16384 cycles/slice. Porting it minus Citra's threading/services is the
+  whole oracle harness.
+- **The no-HLE ruling confirmed at the source**: Azahar's `shared_memory.h`
+  maps `DelayEffect` fully (delay is codeable now from its known transfer
+  function) but `ReverbEffect` is 52 bytes of
+  `INSERT_PADDING_DSPWORDS(26); ///< TODO` — an 8-year opaque stub. HLE
+  literally cannot produce the reverb; the real firmware under teakra can.
+- **Riskiest unknown + de-risk**: a malformed reverb config is silently
+  bypassed, so "off" and "misconfigured" both yield a dry capture. Before any
+  parameter sweep, capstone-scan MiiPlaza's ARM11 driver for the site that
+  writes the 52-byte `ReverbEffect` block and replay those exact bytes as the
+  known-good "engaged" baseline.
+
+Artifacts (scratchpad, session-local): the recon report, the extraction
+script, five verified firmware images, the built teakra tree, and the
+MiiPlaza DSP disassembly. First stage-3 code commit scoped on the roadmap.
