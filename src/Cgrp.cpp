@@ -200,7 +200,14 @@ bool Cgrp::Extract()
 				ofs.write(reinterpret_cast<const char*>(pos), cwarLength);
 				ofs.close();
 
-				(*Cwars)[files[i].Id] = new Cwar(warcFile.c_str(), Ctx);
+				// The .bcwar was just written from [pos, pos + cwarLength) into
+				// this Cgrp's buffer; hand that span to the child instead of
+				// re-reading the file. Unlike the Csar path, this Cwar is stored
+				// in the archive-lifetime shared Cwars map yet built from the
+				// stack-local Cgrp's Data, which is freed when this Cgrp is
+				// destroyed at the end of Csar's group loop -- so it must own a
+				// private copy (ownsData = true), not borrow.
+				(*Cwars)[files[i].Id] = new Cwar(warcFile, pos, cwarLength, true, Ctx);
 
 				if (!(*Cwars)[files[i].Id]->Extract())
 				{

@@ -2,6 +2,7 @@
 #include "Common.hpp"
 #include "Cwav.hpp"
 
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -9,19 +10,34 @@
 
 using namespace std;
 
-Cwar::Cwar(const char* fileName, ParseContext& ctx) : Ctx(ctx), FileName(fileName)
+Cwar::Cwar(const string& fileName, uint8_t* data, streamoff length, bool ownsData, ParseContext& ctx) : Ctx(ctx), FileName(fileName), OwnsData(ownsData)
 {
-	ifstream ifs(FileName, ios::binary | ios::ate);
+	Length = length;
 
-	Length = ifs.tellg();
-	Ctx.RequireOpen(ifs.good(), Length, FileName);
-	Data = new uint8_t[Length];
+	// The parent already holds these bytes -- the span its just-written .bcwar
+	// was serialised from -- so take them directly instead of re-opening the
+	// file we just wrote. A zero-length span is the same degenerate condition
+	// the old file-path constructor rejected when it re-read an empty file
+	// (RequireOpen on length <= 0); preserve that error identically, and fire it
+	// before the Push echo so the stdout stream stays byte-for-byte unchanged.
+	Ctx.RequireOpen(true, Length, FileName);
+
+	if (OwnsData)
+	{
+		// The parent buffer does not outlive this child: a group-resident wave
+		// archive is built from the stack-local Cgrp's Data but stored in the
+		// archive-lifetime shared Cwars map, so it must own a private copy.
+		Data = new uint8_t[Length];
+		copy(data, data + Length, Data);
+	}
+	else
+	{
+		// The parent buffer provably outlives this child (a direct Csar wave
+		// archive lives in Csar's own Cwars, freed before Csar::Data); borrow it.
+		Data = data;
+	}
 
 	Ctx.Push(filesystem::path(FileName).filename().string(), Data, Length);
-
-	ifs.seekg(0, ios::beg);
-	ifs.read(reinterpret_cast<char*>(Data), Length);
-	ifs.close();
 }
 
 Cwar::~Cwar()
@@ -33,7 +49,12 @@ Cwar::~Cwar()
 
 	Ctx.Pop();
 
-	delete[] Data;
+	// Only free Data when it is our own copy; a borrowed span belongs to the
+	// parent (freed there, after this child -- see the construction sites).
+	if (OwnsData)
+	{
+		delete[] Data;
+	}
 }
 
 bool Cwar::Extract()

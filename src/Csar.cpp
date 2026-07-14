@@ -322,7 +322,11 @@ bool Csar::Extract(const string& outputDir)
 			ofs.write(reinterpret_cast<const char*>(pos), cwarLength);
 			ofs.close();
 
-			Cwars[id] = new Cwar(warcFile.c_str(), Ctx);
+			// The .bcwar was just written from [pos, pos + cwarLength) into
+			// Csar's own buffer; hand that span to the child instead of
+			// re-reading the file. This Cwar lives in Csar::Cwars, freed before
+			// Csar::Data in ~Csar, so borrowing (ownsData = false) is safe.
+			Cwars[id] = new Cwar(warcFile, pos, cwarLength, false, Ctx);
 
 			if (!Cwars[id]->Extract())
 			{
