@@ -128,7 +128,7 @@ static int32_t combinePan(int32_t pan, int32_t initPan)
 	return clamp(pan + initPan - 64, 0, 127);
 }
 
-vector<int32_t> ReadArgs(uint8_t*& pos, ArgType argType)
+vector<int32_t> ReadArgs(uint8_t*& pos, ArgType argType, pair<int32_t, int32_t>* rndBounds)
 {
 	if (argType == ArgType::Uint8)
 	{
@@ -150,21 +150,26 @@ vector<int32_t> ReadArgs(uint8_t*& pos, ArgType argType)
 	{
 		// A random range: two s16 bounds in file order (NOT necessarily
 		// low-then-high -- corpus files carry both orders); the engine rolls a
-		// fresh value between them per execution. A deterministic converter
-		// must pick one stand-in, and it used to be the raw pair -- callers
-		// took Args[0], the FIRST bound, silently biasing 196k volumes, 177k
-		// pitch bends and 94k rest durations (timing!) toward that end
-		// corpus-wide. The midpoint is the honest deterministic choice: the
-		// convert-time VM evaluates every other argument exactly, but stays
-		// deliberately PRNG-free so one input yields one reproducible file, so
-		// the range midpoint is the settled stand-in for randomness (symmetric,
-		// so the unsorted order is irrelevant; C++ truncation toward zero;
-		// callers see exactly one value, so every consumer inherits it). The VM
-		// surfaces the midpoint as an approximation notice at the command site.
+		// fresh value between them per execution. The raw pair is retained in
+		// the model (handed back through rndBounds), keeping the bytes lossless
+		// and leaving the exporter's midpoint decision to the emit walk rather
+		// than welding it into the parsed model here. A deterministic converter
+		// must still pick one stand-in; caesar's is the range midpoint
+		// ((lo + hi) / 2, C++ truncation toward zero), computed at emit in
+		// resolveArg -- symmetric, so the unsorted order is irrelevant, and the
+		// VM surfaces it as an approximation notice at the command site. The
+		// value stored in Args is the first bound as an inert placeholder that
+		// keeps the slot count intact; no consumer reads a Rnd slot's Args value
+		// (every Rnd read goes through resolveArg, which uses the bounds).
 		int32_t rndA = ReadFixLen(pos, 2, false, true);
 		int32_t rndB = ReadFixLen(pos, 2, false, true);
 
-		return { (rndA + rndB) / 2 };
+		if (rndBounds)
+		{
+			*rndBounds = { rndA, rndB };
+		}
+
+		return { rndA };
 	}
 	else if (argType == ArgType::Var)
 	{
@@ -398,7 +403,7 @@ bool Cseq::Convert(uint32_t startOffset)
 				cmd.Arg1 = ArgType::VarLen;
 			}
 
-			vector<int32_t> args = ReadArgs(pos, cmd.Arg1);
+			vector<int32_t> args = ReadArgs(pos, cmd.Arg1, &cmd.Arg1Rnd);
 
 			cmd.Args.insert(cmd.Args.end(), args.begin(), args.end());
 		}
@@ -409,7 +414,7 @@ bool Cseq::Convert(uint32_t startOffset)
 				cmd.Arg1 = ArgType::VarLen;
 			}
 
-			vector<int32_t> args = ReadArgs(pos, cmd.Arg1);
+			vector<int32_t> args = ReadArgs(pos, cmd.Arg1, &cmd.Arg1Rnd);
 
 			cmd.Args.insert(cmd.Args.end(), args.begin(), args.end());
 		}
@@ -470,7 +475,7 @@ bool Cseq::Convert(uint32_t startOffset)
 				cmd.Arg1 = ArgType::Uint8;
 			}
 
-			vector<int32_t> args = ReadArgs(pos, cmd.Arg1);
+			vector<int32_t> args = ReadArgs(pos, cmd.Arg1, &cmd.Arg1Rnd);
 
 			cmd.Args.insert(cmd.Args.end(), args.begin(), args.end());
 
@@ -497,7 +502,7 @@ bool Cseq::Convert(uint32_t startOffset)
 				cmd.Arg1 = ArgType::Int16;
 			}
 
-			vector<int32_t> args = ReadArgs(pos, cmd.Arg1);
+			vector<int32_t> args = ReadArgs(pos, cmd.Arg1, &cmd.Arg1Rnd);
 
 			cmd.Args.insert(cmd.Args.end(), args.begin(), args.end());
 		}
@@ -525,7 +530,7 @@ bool Cseq::Convert(uint32_t startOffset)
 					cmd.Arg1 = ArgType::Int16;
 				}
 
-				vector<int32_t> args2 = ReadArgs(pos, cmd.Arg1);
+				vector<int32_t> args2 = ReadArgs(pos, cmd.Arg1, &cmd.Arg1Rnd);
 
 				cmd.Args.insert(cmd.Args.end(), args2.begin(), args2.end());
 			}
@@ -536,7 +541,7 @@ bool Cseq::Convert(uint32_t startOffset)
 					cmd.Arg1 = ArgType::Uint8;
 				}
 
-				vector<int32_t> args = ReadArgs(pos, cmd.Arg1);
+				vector<int32_t> args = ReadArgs(pos, cmd.Arg1, &cmd.Arg1Rnd);
 
 				cmd.Args.insert(cmd.Args.end(), args.begin(), args.end());
 
@@ -557,7 +562,7 @@ bool Cseq::Convert(uint32_t startOffset)
 					cmd.Arg1 = ArgType::Uint16;
 				}
 
-				vector<int32_t> args = ReadArgs(pos, cmd.Arg1);
+				vector<int32_t> args = ReadArgs(pos, cmd.Arg1, &cmd.Arg1Rnd);
 
 				cmd.Args.insert(cmd.Args.end(), args.begin(), args.end());
 			}
@@ -568,7 +573,7 @@ bool Cseq::Convert(uint32_t startOffset)
 					cmd.Arg1 = ArgType::Int16;
 				}
 
-				vector<int32_t> args = ReadArgs(pos, cmd.Arg1);
+				vector<int32_t> args = ReadArgs(pos, cmd.Arg1, &cmd.Arg1Rnd);
 
 				cmd.Args.insert(cmd.Args.end(), args.begin(), args.end());
 			}
@@ -604,7 +609,7 @@ bool Cseq::Convert(uint32_t startOffset)
 		// range). Error paths above return before reaching this, as before.
 		if (cmd.Arg2 != ArgType::None)
 		{
-			vector<int32_t> args = ReadArgs(pos, cmd.Arg2);
+			vector<int32_t> args = ReadArgs(pos, cmd.Arg2, &cmd.Arg2Rnd);
 
 			cmd.Args.insert(cmd.Args.end(), args.begin(), args.end());
 		}
@@ -1018,6 +1023,13 @@ bool Cseq::Convert(uint32_t startOffset)
 			{
 				Common::Warning(here, "Rnd argument approximated by its range midpoint",
 					"Rnd-valued arguments approximated (range midpoint)");
+
+				// The exporter's midpoint stand-in, decided here at emit rather
+				// than welded into the parsed model: the same (lo + hi) / 2 (C++
+				// truncation toward zero) over the raw bounds ReadArgs retained in
+				// Arg1Rnd. Symmetric, so the unsorted file order is irrelevant;
+				// raw (Args[slot]) is only the first bound placeholder here.
+				return (i->second.Arg1Rnd.first + i->second.Arg1Rnd.second) / 2;
 			}
 
 			return raw;
