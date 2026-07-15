@@ -48,56 +48,76 @@ current `kLfoRateHz = 5/64`) and a **1.45 Hz** modulation in `EMPTY_LANDSCAPE`.
 
 ---
 
-## What is STILL WANTED — per-instrument isolated notes
+## What is STILL WANTED — one recording of the capture cartridge
 
-A busy BGM cannot isolate the envelope/level/pan constants. A handful of
-**single-note** captures would close them (and the queued decay-table console
-spot-check). Each is a single note in `MeetSound` — record it **note → full
-silence**, one sound per WAV, and name it `<SEQ>_console.wav` in the directory
-above (matching the existing convention).
+The in-game SE triggers proved impractical (the target sounds only fire
+during music and can't be requested on demand), so the isolated-note plan is
+superseded by **`tools/capture-cartridge`** (2026-07-14): a Luma3DS
+LayeredFS-patched `MeetSound.bcsar` that turns the selectable plaza tune
+`BGM_MAIN_Mii_Only_One` into a hands-free, looping **43.5 s calibration
+battery** played by the console's own engine — in silence, because the
+battery *replaces* the music. One recording covers everything the old
+per-SE table asked for, plus pan, velocity-law, and portamento probes the
+in-game triggers never could.
 
-### Rig (same as the 2026-07-08 session)
+The batteries — TWO music-player tracks, one per SE bank, after the first
+single-track attempt came back silent with a `0xB6` bank switch in the
+stream (its slot-vs-global semantics is an open question; the two-track
+form needs no bank switching at all). Schedules with exact timestamps:
+`build\cartridge\MANIFEST.md`; expected audio:
+`build\cartridge\PREDICTION_battery_A.wav` / `_B.wav`.
 
-- New 3DS headphone jack → line-in, **stereo 192 kHz (or 48 kHz)**, 16/24-bit.
-- **3DS volume slider fixed** (do not move it — it scales the absolute level, which
-  is what the isolated notes calibrate); interface gain fixed, peaks ~−6 dBFS.
-- Half a second of silence before each note; let it ring fully out.
+**Track A** (replaces `BGM_MAIN_Mii_Only_One`, "Main Theme 1", ~23.5 s/pass):
 
-### The notes (2 priority, 2 optional)
+1. 3× `SE_NEW_DRUM01` (verbatim replica) — decay-table spot-check, envelope
+   floor, absolute output level, multi-take averaging
+2. Pan probes: the drum at hard-left / hard-right / center — pan curve
+3. `SE_NEW_SLIDE_MAP` — LPF depth
+4. Velocity ladder: the drum at vel 96/64/32 — the `(vel/127)²` law
 
-| File to save | Sequence | In-game trigger (best-effort) | Identifying feature | Calibrates |
-|---|---|---|---|---|
-| `SE_NEW_DRUM01_console.wav`   | `SE_NEW_DRUM01`   | the drum hit in a new-Mii greeting/arrival | one **percussive hit** (~0.5 s) | **decay-table spot-check**, envelope floor, absolute output level |
-| `SE_LEGEND_KEY_FLY_console.wav` | `SE_LEGEND_KEY_FLY` | StreetPass Quest / *Find Mii* — a key flying to its lock | **one long sustained ring (~9 s)** | envelope **release / decay tail**, reverb residual, pan L/R, output level |
-| `SE_NEW_SLIDE_MAP_console.wav` *(optional)* | `SE_NEW_SLIDE_MAP` | sliding/scrolling the plaza map | one short note (~0.25 s) | output level, pan |
-| `SE_LEGEND_MENU_CURSOR_console.wav` *(optional)* | `SE_LEGEND_MENU_CURSOR` | moving the cursor in a *Find Mii* command menu | one short blip (~0.18 s) | attack, output level |
+**Track B** (replaces `BGM_DEN_EMPTY_LANDSCAPE`, ~23 s/pass):
 
-The pair that matters: **`SE_NEW_DRUM01`** (a clean percussive one-shot for the
-decay table) and **`SE_LEGEND_KEY_FLY`** (a long sustained voice whose exposed tail
-is the release-vs-reverb witness). If a specific SE is impractical to trigger,
-**skip it** — the harness verdicts whatever is present. If StreetPass Mii Plaza
-exposes a sound-test / soundlist (note the `_for_Soundlist` sequence names), that is
-the cleanest way to trigger a specific SE; otherwise trigger it via the UI action
-noted. You can also tell me which single-note SEs you *can* reliably trigger and I
-will map those instead.
+1. `SE_LEGEND_KEY_FLY` + 12 s ring-out — release/decay tail, reverb
+   residual, LFO
+2. `SE_LEGEND_MENU_CURSOR` — attack
+3. A monophonic portamento glide (key 50→74, time byte 48) — the
+   time→duration mapping, the one constant no capture has ever touched
+
+### Procedure
+
+1. Build (or rebuild) with `tools\capture-cartridge\build-cartridge.ps1`;
+   copy the contents of `build\cartridge\sd\` onto the SD card root.
+2. Boot holding SELECT → enable **Game Patching** (use a current Luma
+   build — old ones don't intercept the plaza update-title's romfs).
+3. Rig, same as the 2026-07-08 session: headphone jack → line-in, **stereo
+   192 kHz (or 48 kHz)**, 16/24-bit, **volume slider fixed**, peaks ~−6 dBFS.
+4. In the plaza music player: play "Main Theme 1", record **two full
+   passes** (~50 s) as `BATTERY_A_console.wav`; then play the Empty
+   Landscape den track, record two passes as `BATTERY_B_console.wav`.
+   Save both in the captures directory above.
+5. Delete the SD file (or toggle Game Patching off) to restore the music.
+
+The cartridge targets the plaza's **v14 update** romfs path
+(`region_common/frame/sound/MeetSound.bcsar`) and is built from the
+`MiiPlazaUpdate` dump — the base title's `sound/` path is never requested by
+the updated game (the first deploy proved this the hard way). If the music
+still sounds unchanged, Luma is outdated or Game Patching is off; if a
+future plaza update misbehaves, dump the active title's romfs with GodMode9
+and rebuild with `-Source <that file> -RomfsRel <its path>`.
 
 ### Also useful (lower priority)
 
 - A capture in **System Settings = Surround** of a span-using sequence (feeds the
   stage-3 surround virtualization model; the Part-B register dump is the rigorous
   follow-up).
-- A **portamento** SE (a monophonic pitch glide) — would calibrate the
-  portamento time→duration mapping, the one flagged constant no current capture
-  touches.
 
 ---
 
 ## After you record
 
-Drop the WAVs in the directory above and run
-`tools\console-tolerance\console-tolerance.ps1`. It prints, per capture, a
-PASS/FAIL on each metric, the reverb-attributable residual (reported, never
-failing), and a measured value for each flagged constant. Paste the output back
-into the caesar session — each deviating constant is a one-line recalibration, and
-the reverb residual is the stage-3 target. Nothing you capture is committed
-(WAVs are gitignored, like the corpus).
+Drop `BATTERY_A_console.wav` / `BATTERY_B_console.wav` in the directory
+above and run
+`tools\console-tolerance\console-tolerance.ps1`, or just hand the file over.
+Each deviating constant is a one-line recalibration against the battery's
+manifest schedule, and the reverb residual is the stage-3 target. Nothing you
+capture is committed (WAVs are gitignored, like the corpus).

@@ -4678,3 +4678,204 @@ constant-refinement fed by the isolated-note captures (CAPTURE-REQUEST.md) and
 the stage-3 oracle work (reverb, the interpolation filter, Surround) — polish
 and successor-stage items, not stage-2 structure. The roadmap's stage-2 block
 is compressed to a completion line in the same commit, per the docs rule.
+
+## The capture cartridge — hands-free console calibration via LayeredFS (2026-07-14)
+
+The stage-2 refinement plan asked for isolated-note console captures
+(CAPTURE-REQUEST.md), but the user reported the trigger problem honestly: the
+target SEs only fire during plaza music and cannot be requested on demand. No
+existing homebrew plays BCSAR sequences (the NW4C runtime lives inside each
+game's own code), and writing player homebrew would measure our
+reimplementation instead of the console — worthless as ground truth. The
+answer was to make the console's own engine play a probe: **patch the archive
+it loads**.
+
+`tools/capture-cartridge` (build_cartridge.py + build-cartridge.ps1 +
+check_prediction.py) surgically patches a retail `MeetSound.bcsar` in three
+same-size, in-place regions — the `BGM_MAIN_Mii_Only_One` INFO entry's volume
+byte (64 → 127, a known reference level), its bank index (BANK_BGM →
+BANK_MEET_SE), and its embedded `.bcseq` DATA payload (5,900-byte window,
+rewritten with a 307-byte battery + phantom-note zero pad) — so the selectable
+plaza tune becomes a **43.5 s hands-free calibration battery**, looping
+forever via the retail backward-jump convention, played in silence because
+the battery replaces the music itself. Delivery is a Luma3DS LayeredFS
+whole-file override (`SD:/luma/titles/0004001000021800/romfs/sound/
+MeetSound.bcsar`; USA base title CTR-N-HMEE, romfs copy SHA-verified
+identical to the dump; "Game Patching" on; caveat: the plaza's v14 update
+title needs a current Luma to intercept `ro2:` reads, and if the update ships
+a different archive the builder re-targets a GodMode9 dump by name).
+
+Recon was a four-Opus-agent fan-out: (1) the exact INFO/FILE byte-offset
+recipes from Csar.cpp (the CbnkOffset-anchored sub-struct: start offset at
+R+C+0x10, bank u16 at R+0x1C+C; no checksums anywhere; unchecked
+file/bank-index lookups are the patcher's job to bound); (2) the CSEQ
+authoring cheat-sheet from Cseq.cpp/SeqRuntime.cpp (varint/prefix/arg-table,
+what the player renders vs safe-skips — counted loops D4/FC are skipped, so
+the battery loops with 0x89); (3) MeetSound facts (the SEs are one-note
+sequences in two shared .bcseq banks; entry volumes 30–75; Only_One = entry 3,
+vol 64, standalone 5,920 B file); (4) the Luma path + title ID from the CIA
+extract.
+
+Design choices that mattered: the battery **replays the target SEs' own
+command bytes**, lifted verbatim from the same archive by a strict
+deterministic-replica walker (control flow, Rnd/Var/If, VM ops refused), so
+the console executes exactly the retail commands; KEY_FLY's internal
+volume-fade-to-0 forced the state-restore-after-ring-out rule (restoring
+volume immediately would boost the release tail the capture exists to
+witness); replica ADSHR overrides are cleared with 0xFB after each section;
+KEY_FLY's notewait-off is restored after its run; the zero pad stays a
+multiple of 3 (padded with 0xFB no-ops after the loop jump) so the parser
+walks whole phantom notes to the exact DATA boundary and never overshoots
+into LABL. Battery: 3× DRUM01 (decay/level, multi-take), KEY_FLY + 12 s ring
+(release/reverb/LFO), pan L/R/C drum probes, MENU_CURSOR (attack) +
+SLIDE_MAP (LPF), velocity ladder 96/64/32, and a monophonic portamento glide
+(50→74, time byte 48) — the one flagged constant no capture has ever touched.
+
+Verification, all green in one driver run: builder self-checks (by-name
+re-parse of the patched bytes, whole-payload command-walk with
+exact-boundary termination, diff ranges confined to the three intended
+regions); converter parses the patched archive exit 0 with no new warnings;
+**caesar-roundtrip re-serializes it byte-identically** (59 matched, 0
+mismatched); `caesar-play` renders the prediction (14 notes fired, 4,177
+ticks = the 43.50 s pass, loop detected); and the schedule check verdicts
+the rendered audio numerically — every percussive onset within 10 ms of the
+manifest, soft events verified by windowed energy, pan probes ±100.7 dB
+hard-split / −0.11 dB centered, and the velocity ladder peaks 0.632/0.358/
+0.159/0.040 matching the (vel/127)² law to three decimals. The prediction
+WAV doubles as the tolerance-net reference once `BATTERY_console.wav`
+exists. No `src/` change anywhere: converter and player outputs are
+untouched by construction.
+
+### Addendum, same day — the first deploy failed, and the cause was the update romfs
+
+The cartridge was FTP-deployed to the console (3DS ftpd, SHA-verified
+readback) at the base title's path and did nothing: plaza music unchanged,
+Game Patching on, current Luma. Root cause, found in the user's
+`MiiPlazaUpdate` dump: the v14 plaza update's romfs holds a **different,
+larger archive at a different path** — `region_common/frame/sound/
+MeetSound.bcsar`, 6,110,784 B vs the base's 3,521,880 — and the update romfs
+has no top-level `sound/` at all, so the updated game never requests the
+overridden path. Silent no-op, exactly as the recon caveat warned, just via
+the path rather than Luma's `ro2:` interception.
+
+The rebuild against the update archive surfaced a real design change: the
+update **splits the target SEs across two banks** (`BANK_MEET_SE_MAIN` for
+DRUM01/SLIDE_MAP, `BANK_MEET_LEGEND` for KEY_FLY/MENU_CURSOR), so the
+single-INFO-bank-repoint design grew a per-section `0xB6` bank switch
+(global-CbnkRecords-index form, retail-confirmed) — which makes the capture
+double as a hardware test of that command's semantics. The SEs' lifted
+command bytes are byte-identical between plaza versions (same tick counts,
+identical schedule-check measurements), so the battery content is unchanged.
+Builder/driver defaults now point at the update dump + update path
+(`--romfs-rel`/`-RomfsRel` for future shifts); full verification chain green
+against the update archive; redeployed to the correct path, stale old file
+removed from the SD, SHA-verified readback. Awaiting `BATTERY_console.wav`.
+
+### Addendum 2 — the battery went silent on hardware; 0xB6 is the suspect; two-track redesign
+
+With the cartridge at the correct update path, the console DID load it —
+and played total silence on "Main Theme 1". The sibling-entry theory died
+on enumeration (the update's `BGM_MAIN_Mii_Only_One` owns file 11 alone, no
+`_for_Soundlist` twin; the 2026-07-08 captures prove the music player plays
+these exact entries), so the battery executed with the pokes in force and
+still made no sound. Prime suspect: the very first sound-affecting command
+in the stream, `0xB6 04`. caesar's player reads the argument as a GLOBAL
+CbnkRecords index — "empirically confirmed" only from retail args that are
+equally consistent with the OTHER reading, an index into the sound's
+up-to-4 INFO bank SLOTS (caesar parses exactly one slot; the disasm handoff
+has nothing on 0xB6). Under slot semantics, `B6 04` selects an invalid
+slot before the first note and every subsequent note references nothing —
+total silence, exactly as observed. **The two readings are
+indistinguishable on all corpus data seen so far; only hardware can split
+them** — filed on the roadmap.
+
+The redesign removes 0xB6 entirely: TWO music-player tracks, one per SE
+bank, each bank set through the hijacked entry's INFO record (the exact
+retail mechanism): track A = `BGM_MAIN_Mii_Only_One` (drums, pans, slide,
+ladder; BANK_MEET_SE_MAIN; 23.5 s/pass), track B = `BGM_DEN_EMPTY_LANDSCAPE`
+(key-fly, cursor, portamento; BANK_MEET_LEGEND; 23 s/pass) — both hosts
+proven playable by the 2026-07-08 captures. The split doubles as a
+differential: both tracks silent => the BGM-player path doesn't load
+non-BGM banks (the fallback battery would use BANK_BGM's own instruments);
+one silent => partial load info; both audible => capture session proceeds.
+Full verification chain green on both tracks (round-trip byte-identical;
+schedule checks: onsets ≤10 ms, pan ±100.7 dB/−0.11 dB, ladder (vel/127)²
+to three decimals); redeployed over ftpd, SHA-verified readback.
+
+## The battery captures — every flagged constant measured (2026-07-14)
+
+The user recorded both battery tracks (192 kHz/24-bit line-in, one full pass
+each, noise floor −78 dBFS, zero clipping/hum/stray sounds). An 11-agent
+analysis (2 alignment + 9 measurement, each comparing capture vs the dry
+prediction so any difference = model error or reverb, never content)
+returned. Alignment: every scheduled event found within ~10 ms; clock ratio
+1.0000 again; battery t=0 pinned to ±3 ms on both tracks.
+
+**Confirmed on hardware (no change):**
+- **Velocity law (vel/127)²** — implied exponent 1.98–2.01 vs model 2.000;
+  v64/v32 within 0.15 dB. (Isolated anomaly: the vel-96 hit reads ~1.2 dB
+  low in capture vs model — single-point, orthogonal to the law; filed.)
+- **Pan** — equal-power confirmed (center −2.86 dB vs extremes ≈ −3 dB,
+  ruling out a linear −6 dB law); the byte-64 right-bias (−0.107 dB, byte 64
+  ≠ true midpoint 63.5) reproduced in the capture to 0.002 dB; extremes are
+  true digital zero in the model and analog-floor-limited in the capture.
+  Bytes 0/64/127 still cannot discriminate cos/sin vs sqrt-poly — v2 needs
+  probes at 32/96.
+- **Absolute level / volume-law endpoint** — byte-127 point lands 0.17 dB
+  from the byte-120 BGM point; the 1.5 dB cross-session residual does not
+  widen (it is carried by the byte-64 Only_One capture); within-capture
+  master gain uniform to 0.077 dB std across six vel-127 sections.
+- **Attack + envelope cadence** — cursor rise 3.13 ms (capture) vs 2.32 ms
+  (model), smooth at 192 kHz, no stepping: hardware interpolates gain
+  within the DSP frame exactly like our per-frame linear ramp; the
+  4.889 ms frame period stands.
+- **Bonus**: prog-23 sample pitch confirmed to 0.5% via a 6.5 Hz
+  partial-beating match (cap 6.53 / pred 6.50 Hz).
+
+**Deviations (recalibrations filed on the roadmap):**
+1. **Envelope decay/release dynamics ~2× too shallow** — drum tail:
+   console −174 dB/s vs model −94 dB/s, ratio rock-stable 1.85–1.87 across
+   fit windows, three takes std 0.2 dB/s; independently corroborated by the
+   attack agent (cursor blip tail 38% too long in the model). Of the three
+   degenerate candidates (amplitude divisor /400→/200; double calcRelease
+   rates; halve kMsPerFrame), the divisor is disfavored (the validated
+   volume law rides the same map) and the cadence is now pinned by the
+   attack measurement — so the fix points at the **rate constants**
+   (calcRelease ×2), with the disasm's time-unit interpretation as the
+   suspected original error. Scoped to decay/release; attack-rate scaling
+   for non-instant attacks remains unmeasured.
+2. **Portamento ~17× too fast — and structurally wrong.** The measured
+   glide is **linear in cents at a constant rate**: 2.841 st/s at time
+   byte 48 (0.352 s/semitone), R²=0.99998, no pitch step at the note
+   boundary, and it NEVER reaches key 74 — the note gate ends mid-glide.
+   Our model glides the full distance in a fixed 0.5 s
+   (portaTime×samplesPerTick, distance-independent). Fix = distance-
+   proportional duration at the calibrated rate; the general
+   portaTime→rate law needs one more capture point (different interval or
+   time byte). This was the one constant flagged as a pure guess — now
+   measured.
+3. **LPF byte 48: corner ~4.1 kHz, ~6–7 dB/oct** (two independent methods
+   agree) vs the model's 2,890 Hz 2nd-order Q=0.707 (~14 dB/oct) — half an
+   octave too dark and twice too steep. Recalibrate corner ×~1.45 and
+   soften toward 1-pole. Likely explains most of the linked finding: the
+   slide SE renders ~9.5 dB quieter in the model than on console relative
+   to the drum baseline.
+
+**Inconclusive — the two constants that still need one more capture:**
+- **Release table / reverb residual**: KEY_FLY's own internal volume fade
+  hits the noise floor exactly at note-off — the byte-104 release tail and
+  any reverb are sub-floor. A real behavioral finding in itself, and:
+  **this SE bank is genuinely DRY** (post-event gaps = pre-onset floor to
+  0.04 dB) — the DSP reverb send for BANK_MEET_SE_MAIN is ~0.
+- **LFO rate 5/64**: KEY_FLY's LFO is a 0.47 Hz volume tremolo — one cycle
+  inside the gate, unresolvable. TRAP recorded: the prominent 6.5 Hz
+  modulation is instrument partial-beating (identical in the dry render);
+  misreading it as the LFO would imply a 13.9× constant error.
+  Battery v2 wants a fast pitch-vibrato instrument over many cycles, a
+  loud unfaded sustain (release + reverb), pan 32/96, and a second porta
+  point.
+
+Also settled operationally: the two-track no-0xB6 cartridge played — the
+INFO-bank mechanism carries the whole battery; 0xB6 slot-vs-global stays
+open on the roadmap (the silent single-track battery remains weak evidence
+for slot semantics).

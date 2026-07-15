@@ -24,6 +24,16 @@ House rules:
 
 ### Added
 
+- **`tools/capture-cartridge` — the console calibration cartridge builder.**
+  Surgically patches a retail `MeetSound.bcsar` (same-size, in-place, by-name
+  lookup; three byte regions) so StreetPass Mii Plaza's `BGM_MAIN_Mii_Only_One`
+  plaza tune becomes a hands-free 43.5 s looping calibration battery played by
+  the console's own engine via Luma3DS LayeredFS — replacing the impractical
+  per-SE in-game trigger hunt in `docs/CAPTURE-REQUEST.md`. The driver gates
+  the build on converter parse, byte-identical round-trip, a `caesar-play`
+  prediction render, and a numerical schedule check. Tooling only:
+  output-identical (no `src/` change; all converter and player outputs
+  unchanged).
 - **`caesar-play` — the suite stage-2 offline dry player (Phase I: first audible
   `.wav`).** A new `caesar_play` static library and `caesar-play` CLI, built
   alongside the converter but entirely separate from it: they re-interpret

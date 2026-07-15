@@ -239,25 +239,56 @@ Hardware-RE queue (New 3DS + CFW, feeds stages 2–3):
       the original repro track was release-127-sentinel and untouched by the
       fix. One A/B on a decay-table-using track closes the loop; also
       grounds stage 2's envelope solver.
-- [ ] **Stage-2 constant refinement — the isolated-note captures**
-      ([docs/CAPTURE-REQUEST.md](CAPTURE-REQUEST.md): `SE_NEW_DRUM01`,
-      `SE_LEGEND_KEY_FLY`, +optional; the tolerance net verdicts whatever is
-      present, so a partial set is immediately useful). They recalibrate the
-      flagged constants a busy BGM cannot isolate: the LFO rate→Hz constant
-      (~4.00 Hz first reading) + sine resolution; the portamento time→duration
-      mapping (needs a glide SE); the LPF topology (RBJ assumed) + Q; the
-      velocity `(vel/127)²` law (needs ≥2 isolated notes); pan sqrt-polynomial
-      vs equal-power; the envelope floor / attack-done threshold / update
-      cadence / amplitude `/40`-vs-`/20`; the pool sorted-insert tie order; and
-      the absolute-level residual — now just 1.5 dB after the volume-byte fix
-      (runtime `SoundPlayer` volume / DSP master). The console **interpolation
-      filter** (capture HF the band-limited render lacks) is recovered via the
-      stage-3 teakra oracle instead. Player polish, not stage structure. Latent
-      same-area polish: instant (non-`_t`) volume/expression/pan sets step
-      per-voice gain once per frame with no intra-frame ramp (zipper-class,
-      never yet audible). Settled by census (2026-07-14, HISTORY): volume
-      byte 0 = deliberate silence-at-rest (1,241 retail sequences, names like
-      `SE_SYS_SILENT` / runtime-managed BGMs) — do not add a floor.
+- [ ] **Stage-2 constant recalibration — apply the battery-capture findings**
+      (2026-07-14: the capture-cartridge session HAPPENED — both tracks
+      recorded and analyzed, full findings in HISTORY "battery captures".
+      Hardware-confirmed, no change: velocity `(vel/127)²`, equal-power pan
+      (byte-64 bias reproduced to 0.002 dB), vol/127 endpoint (residual
+      stays 1.5 dB, carried by the byte-64 capture), attack + the 4.889 ms
+      per-frame gain interpolation, clock 1.0000.) THREE measured fixes to
+      apply to `caesar_play`:
+      1. **Envelope decay/release dynamics ×2** — console −174 dB/s vs
+         model −94 (ratio stable 1.85–1.87; corroborated by the cursor tail
+         38% too long). Fix in the calcRelease rate constants (cadence is
+         pinned by the attack measurement; the amplitude divisor is pinned
+         by the validated volume law). Re-derive the disasm time unit.
+      2. **Portamento: constant-rate, linear-in-cents** — 2.841 st/s at
+         time byte 48 (0.352 s/st, R²=0.99998); model is a fixed 0.5 s
+         full-distance glide (~17× too fast). Make duration
+         distance-proportional; the portaTime→rate LAW needs a 2nd capture
+         point (different interval or byte).
+      3. **LPF byte 48: corner ≈4.1 kHz @ ~6–7 dB/oct** vs model 2,890 Hz
+         2nd-order (×1.45 corner, soften toward 1-pole). Likely explains
+         the slide SE rendering ~9.5 dB quiet relative to the drums.
+      After applying: re-pin play-goldens, both BGM console-tolerance
+      captures must still PASS, ab-verify guard (converter untouched).
+      Filed anomalies: vel-96 hit reads ~1.2 dB low (single-point,
+      orthogonal to the law); **BANK_MEET_SE_MAIN's reverb send is ~0 —
+      the SE bank is genuinely dry on hardware** (useful stage-3 fact).
+- [ ] **Battery v2 — the four still-open constants** (one more capture
+      session): a loud UNFADED sustain for the release table + reverb
+      residual (KEY_FLY's internal fade buries both sub-floor); a fast
+      pitch-vibrato instrument over many cycles for the LFO rate 5/64
+      (TRAP recorded in HISTORY: the 6.5 Hz partial-beating confound); pan
+      bytes 32/96 to discriminate cos/sin vs the engine's sqrt-polynomial
+      (0/64/127 coincide on both); a 2nd portamento point for the
+      time→rate law. Also the pool sorted-insert tie order (needs a
+      steal-saturation probe). The interpolation filter stays with the
+      stage-3 teakra oracle. Latent polish (zipper-class instant param
+      steps, never audible) and the volume-byte-0 census ruling
+      (silence-at-rest is deliberate — no floor) carry over unchanged.
+      Same-area UX nit: `caesar-play --list` loads each entry's INFO
+      volume byte but doesn't print it — add a volume column to `doList`
+      on the next player touch-up (output-identical elsewhere).
+      **Open semantics question (2026-07-14, first cartridge went silent):**
+      `0xB6`'s argument — global CbnkRecords index (caesar's reading, in the
+      player AND the convert-time bank handling) vs an index into the
+      sound's up-to-4 INFO bank SLOTS (caesar parses only slot 0). All
+      corpus data seen so far fits both readings; the silent battery is
+      weak evidence FOR slot semantics. Settle via a dedicated cartridge
+      probe or code.bin disasm of the 0xB6 handler; if slot wins, the
+      player/VM bank plumbing and the INFO parser (read all 4 slots) both
+      change.
 
 ## Settled decisions & standing rules
 
