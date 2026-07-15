@@ -20,3 +20,6 @@ CLAUDE.md
 
 # Local A/B verification harness (hardcodes this machine's corpus path)
 tools/ab-verify/
+
+# Python bytecode (tools)
+__pycache__/
