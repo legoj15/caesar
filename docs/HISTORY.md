@@ -4879,3 +4879,67 @@ Also settled operationally: the two-track no-0xB6 cartridge played — the
 INFO-bank mechanism carries the whole battery; 0xB6 slot-vs-global stays
 open on the roadmap (the silent single-track battery remains weak evidence
 for slot semantics).
+
+## The decibel-divisor resolution — /400 was wrong, the pipeline is 10^(value/200) (2026-07-15)
+
+**The report.** The user A/B'd `SEQ_SD_BGM_RESULT` (Mii Plaza DLC `mgExp`)
+three ways — foo_midi/BASSMIDI over caesar's own SF2+MIDI, `caesar-play`,
+and a New 3DS line-in capture — and heard the kick drum prominent in the
+MIDI and on console but "too quiet and maybe even muffled" in the player.
+That a track sounded MORE accurate through the converter's GM approximation
+than through the accuracy-first player made it a hard discrepancy.
+
+**Objective confirmation.** The kick is program 80, key 36, velocity 99 —
+16 hits, and critically its track carries NO volume/expression commands, so
+its level is purely velocity × instrument. Band analysis of all three WAVs:
+kick low-band (35–130 Hz) prominence over the 300 Hz–5 kHz music bed came
+out **BASSMIDI +4.6 dB, console +4.1 dB, caesar-play +0.7 dB** — the player
+buried the kick by ~3.5 dB relative to both references. Kick fundamental is
+80 Hz in all three (no pitch defect); the "muffled" impression was the
+buried body plus masking, not a filter.
+
+**The cause.** The accompaniment tracks ride expression bytes 74/83/59.
+`gainFromValue` applied the byte-provenanced `DecibelSquareTable` as
+amplitude `10^(value/400)` — under which the table (400·log10(v/127))
+degenerates to BYTE-LINEAR amplitude — so expression 74 attenuated only
+4.5 dB. The engine's actual law applies `value/10` as plain dB, i.e.
+`10^(value/200)`, under which byte v maps to **(v/127)² amplitude** —
+expression 74 = 9.4 dB. Every non-127 volume-class byte in the player was
+too loud by 20·log10(127/v); the three music tracks each played 3.7–6.7 dB
+hot, and the CC-less kick track alone stayed correct.
+
+**Why this resolves three flagged unknowns at once:**
+1. The `/40-vs-/20 GetValue split` flag (open since the envelope port) —
+   settled: /20 (plain dB), i.e. the /200 divisor in amplitude form.
+2. The battery's **"decay dynamics ×2"** finding (console −174 dB/s vs
+   model −94, ratio stable 1.85–1.87): the divisor doubles every
+   decay/release dB-rate — the model now runs −188 dB/s. The
+   disasm-verbatim `calcRelease` rates were NEVER wrong, and the filed plan
+   to alter them is cancelled. The remaining ~8% (188 vs 174) is a
+   battery-v2 refinement question (measurement chain vs cadence), not a
+   divisor candidate — no /200-adjacent value fits 174 exactly and the
+   divisor is now pinned independently by the expression evidence.
+3. The SF2/player split-brain: Cbnk's `ConvertVolume` has always written
+   `(v/127)²` attenuation (why BASSMIDI matched console). Converter and
+   player now share one volume law.
+
+**Why the old "verification" didn't pin it.** The /400 reading was
+"pinned by the validated volume law" — but the console-confirmed LINEAR
+`vol/127` law belongs to the per-sound INFO volume byte, a CPU-side f32
+multiply OUTSIDE the decibel pipeline. It never constrained this divisor.
+The console-confirmed vel² law in fact SUPPORTS /200: velocity through
+the same table under /200 gives exactly (v/127)².
+
+**The fix.** One constant: `gainFromValue` 400 → 200 (`src/play/Dsp.cpp`),
+comments corrected at both call-surface docs. Velocity keeps its explicit
+`(v/127)²` (identical to table-under-/200 within table-rounding, <0.03 dB).
+
+**Verification.**
+- Patched render of `SEQ_SD_BGM_RESULT`: kick prominence **+5.07 dB** vs
+  console +4.09 / BASSMIDI +4.61 (was +0.66). Within ~1 dB of console.
+- `tools/console-tolerance`: **both** New 3DS captures still PASS
+  (envelope-fit residuals 2.15 / 1.90 dB, onset slope 1.0000).
+- `tools/play-goldens`: re-pinned (deliberate audio change), twice-run
+  deterministic, 7/7.
+- Converter untouched by construction — the full rebuild relinked only
+  `caesar_play`/`caesar-play`; `caesar.exe` did not change.

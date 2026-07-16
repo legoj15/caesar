@@ -221,7 +221,7 @@ namespace play
 
 		// The envelope value floor / attack start. NW4R's exact reset constant is not
 		// byte-confirmed in this binary (a Net-B item); -2000 in the value domain maps
-		// (see gainFromValue) to ~1e-5 amplitude -- inaudible -- so attack rises from
+		// (see gainFromValue) to ~1e-10 amplitude -- inaudible -- so attack rises from
 		// silence and release settles to silence. Decay/sustain timing is INDEPENDENT
 		// of this (they use the fixed DecibelSquareTable range), so only the slow-attack
 		// rise-time and the release tail-to-silence depend on it.
@@ -229,17 +229,23 @@ namespace play
 		const float kAttackDone = -0.03125f;  // -1/32: attack completes near 0 (NW4R; flagged)
 		const float kStopGain = 1.0f / 32768.0f;  // 16-bit LSB: below this the voice is silent -> Stop()
 
-		// Convert an envelope value to a LINEAR amplitude gain. GetValue()=value/10 is
-		// a decibel-square (power) quantity, so amplitude = 10^(value/400). Verified
-		// numerically against the console table: 10^(DecibelSquareTable[s]/400) tracks
-		// s/127 to <1% across all 128 sustain levels -- i.e. the sustain byte maps
-		// ~linearly to amplitude, which is the "square" (the /400, not /200). The
-		// /40-vs-/20 split of GetValue is flagged for the Net-B capture.
+		// Convert an envelope value to a LINEAR amplitude gain: amplitude =
+		// 10^(value/200). The table stores 400*log10(v/127) ("the dB of the square"),
+		// and the engine applies value/10 as PLAIN dB on amplitude, so a byte v maps
+		// to (v/127)^2 amplitude -- the same concave curve the SF2 exporter writes
+		// (ConvertVolume) and BASSMIDI/FluidSynth apply to CC7/CC11. The /400
+		// (byte-linear) reading was refuted 2026-07-15 by the SEQ_SD_BGM_RESULT
+		// three-way A/B (console + BASSMIDI kick prominence ~+4 dB vs the /400
+		// render's +0.7; /200 lands +5.1), and independently by the battery's decay
+		// slope (console -174 dB/s vs -94 modelled: the divisor is the missing x2 --
+		// the disasm-verbatim calcRelease rates were never wrong). The INFO volume
+		// byte's console-confirmed LINEAR vol/127 law is a separate CPU-side f32
+		// multiply, not this pipeline, and never pinned this divisor.
 		float gainFromValue(float value)
 		{
 			if (value <= kEnvFloor) return 0.0f;
 			if (value >= 0.0f) return 1.0f;
-			return powf(10.0f, value / 400.0f);
+			return powf(10.0f, value / 200.0f);
 		}
 
 		// The ported EnvGenerator state machine. Phases: Attack (multiply toward full),

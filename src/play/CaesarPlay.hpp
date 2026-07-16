@@ -317,15 +317,16 @@ namespace play
 	};
 
 	// Convert a 0..127 volume/expression byte to a linear amplitude gain, through the
-	// engine's decibel-square domain: amp = 10^(DecibelSquareTable[byte]/400). This is
-	// the SAME table+conversion the envelope sustain uses (verified: it tracks
-	// byte/127 to <1% across all 128 levels). Multiplying these per-source amplitudes
-	// equals summing their decibel contributions -- the NW4R volume model. (C6)
+	// engine's decibel-square domain: amp = 10^(DecibelSquareTable[byte]/200), i.e.
+	// byte v -> (v/127)^2 amplitude (the /200-vs-/400 resolution is documented at
+	// gainFromValue in Dsp.cpp). This is the SAME table+conversion the envelope
+	// sustain uses. Multiplying these per-source amplitudes equals summing their
+	// decibel contributions -- the NW4R volume model. (C6)
 	float volumeByteToAmp(int byte);
 
 	// Convert a control-value byte (0..127, fractional allowed for a mid-ramp value)
 	// to a linear amplitude gain, interpolating the DecibelSquareTable in its stored
-	// decibel domain then applying amp = 10^(value/400) -- the float-domain form of
+	// decibel domain then applying amp = 10^(value/200) -- the float-domain form of
 	// volumeByteToAmp a `_t` volume ramp needs. Integer bytes match volumeByteToAmp
 	// exactly. (C7)
 	float decibelSquareAmp(float byte);

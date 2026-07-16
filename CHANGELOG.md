@@ -22,6 +22,23 @@ House rules:
 
 ## [Unreleased]
 
+### Fixed
+
+- **`caesar-play` — the decibel-domain divisor: volume/expression/sustain bytes
+  now map to `(v/127)²` amplitude and decay/release run at their true dB rate.**
+  `gainFromValue` applied the NW4C `DecibelSquareTable` as `10^(value/400)`
+  (byte-linear amplitude); the engine applies `value/10` as plain dB —
+  `10^(value/200)`. Diagnosed from a user report that `SEQ_SD_BGM_RESULT`
+  (Mii Plaza DLC `mgExp`) buried its kick drum: the accompaniment tracks ride
+  expression bytes 74/83/59 and each played 3.7–6.7 dB too loud. The fix lands
+  kick prominence within ~1 dB of the console capture (was 3.4 dB under), makes
+  the player's volume law agree with the SF2 exporter's `ConvertVolume` and the
+  console-confirmed vel² law, and closes the capture battery's "decay dynamics
+  ×2" finding (−188 dB/s modelled vs −174 measured) without touching the
+  disasm-verbatim `calcRelease` rates. Changes `caesar-play` renders only;
+  converter outputs identical (play-goldens re-pinned; both New 3DS
+  console-tolerance captures PASS).
+
 ### Added
 
 - **`tools/capture-cartridge` — the console calibration cartridge builder.**

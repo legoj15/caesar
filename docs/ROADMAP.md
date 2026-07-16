@@ -287,11 +287,13 @@ Hardware-RE queue (New 3DS + CFW, feeds stages 2–3):
       stays 1.5 dB, carried by the byte-64 capture), attack + the 4.889 ms
       per-frame gain interpolation, clock 1.0000.) THREE measured fixes to
       apply to `caesar_play`:
-      1. **Envelope decay/release dynamics ×2** — console −174 dB/s vs
-         model −94 (ratio stable 1.85–1.87; corroborated by the cursor tail
-         38% too long). Fix in the calcRelease rate constants (cadence is
-         pinned by the attack measurement; the amplitude divisor is pinned
-         by the validated volume law). Re-derive the disasm time unit.
+      1. [x] **Envelope decay/release dynamics ×2** — FIXED 2026-07-15: the
+         missing ×2 was the decibel divisor (`gainFromValue` 10^(v/400) →
+         10^(v/200)), NOT the disasm-verbatim calcRelease rates; volume/
+         expression bytes now map to (v/127)², matching console + BASSMIDI
+         (SEQ_SD_BGM_RESULT kick-prominence A/B; full story in HISTORY).
+         Model decay now −188 dB/s vs console −174; the ~8% residual is a
+         battery-v2 refinement question, not a divisor candidate.
       2. **Portamento: constant-rate, linear-in-cents** — 2.841 st/s at
          time byte 48 (0.352 s/st, R²=0.99998); model is a fixed 0.5 s
          full-distance glide (~17× too fast). Make duration
