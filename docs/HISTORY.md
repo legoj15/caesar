@@ -4943,3 +4943,43 @@ comments corrected at both call-surface docs. Velocity keeps its explicit
   deterministic, 7/7.
 - Converter untouched by construction — the full rebuild relinked only
   `caesar_play`/`caesar-play`; `caesar.exe` did not change.
+
+### Addendum — the RESULT "kick punchiness" follow-up: the player is voice-exact; the gap is reverb (2026-07-15)
+
+After the divisor fix, the user (listening on loudness-normalized copies)
+still heard the kick's attack as "off" in the player, with BASSMIDI closest
+to console. A long forensic chase produced two false leads before the truth:
+
+**False leads (recorded as measurement traps):**
+1. Threshold-based onset detection fires up to ~30 ms LATE on a quiet,
+   slow-rising 80 Hz kick — and the bias differs per file with the kick's
+   relative level. Every metric that inherited those onsets (band envelopes,
+   matched-filter windows, spectrogram panels) showed a phantom "body cut at
+   55 ms / 13 dB missing" in the renders. Template cross-correlation against
+   the actual kick sample (WARC_48 wav 88) is the only trustworthy alignment.
+2. Anchoring a hit grid to the STRONGEST template match picks a mid-song
+   kick, and the sequence's groove rests (93/96/97 ticks) then produce
+   phantom "+21 ms timing drift" against a grid extended from the wrong
+   anchor. Anchor to the EARLIEST >=60%-of-max match.
+
+**Verified findings (template-aligned, per-hit xcorr):**
+- A solo-kick render (three OpenTrack offsets in a scratch copy of
+  mgExp.bcsar retargeted to an immediate Fin — the player's first
+  isolation-render trick) is IDENTICAL to the kick inside the full mix:
+  no steal, no duck, level exact.
+- The kick's 60–120 Hz envelope has the SAME shape in console, BASSMIDI and
+  caesar-play: rise to ~40 ms, body plateau to the 130 ms gate, release
+  cliff by ~150 ms. Kick-vs-accompaniment prominence: console 11.2 dB,
+  BASSMIDI 12.0, caesar-play 13.9 — the player is CLOSE and slightly hot,
+  though console's accompaniment reading is reverb-inflated, so the true
+  overshoot is < 2.6 dB.
+- The audible difference is AFTER the notes: console keeps ~10 dB of
+  post-release low-band energy (the DSP reverb tail) that the dry player
+  lacks; foo_midi/BASSMIDI applies its default GM reverb (CC91=40 on GM
+  reset), which imitates console's glue — exactly why the user ranked
+  midi closest. A dry kick against a wet mix reads as "less punchy" even
+  at equal level.
+
+**Outcome:** no player change. SEQ_SD_BGM_RESULT (MiiPlazaDLC mgExp) is
+filed as a stage-3 validation track — its exposed, periodic kick + reverb
+hump is a clean reverb-fit target.

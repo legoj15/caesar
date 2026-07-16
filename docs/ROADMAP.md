@@ -229,6 +229,11 @@ per stage. Status:
       `surround_depth`/`rear_ratio`/speaker-position + two biquads,
       headphone-aware; Citra/Azahar have never implemented it — `span` and
       `front_bypass` feed this path; see the HISTORY 2026-07-11 addendum).
+      Validation track filed 2026-07-15: MiiPlazaDLC mgExp
+      `SEQ_SD_BGM_RESULT` — its exposed periodic kick carries a clean,
+      user-audible reverb hump (~10 dB post-release low-band vs the dry
+      render); the dry player is proven voice-exact on it (HISTORY
+      2026-07-15 addendum), so any residual there is reverb by construction.
 - [ ] **Stage 4 — exact variables/conditionals/random** + the NW4C
       `mod2/3/4` LFO curves (the one genuine engine unknown left).
 - [ ] **Stage 5 — tracker export**: `.it` writer (`.mptm` one-flag upgrade).
