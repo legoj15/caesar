@@ -207,24 +207,26 @@ per stage. Status:
       renderer gets the counted form. (Filed 2026-07-15 from a user ask.)
 - [ ] **Stage 3 — reverb + delay**: offline `teakra` impulse capture →
       comb/allpass fit → New 3DS hardware validation. The long pole.
-      **Recon done (2026-07-14, write-up in HISTORY):** teakra builds and runs
-      on the dev machine today (MSVC, no vcvars; `dsp1_reader` parsed the real
-      firmware); the DSP1 images are extracted + SHA-verified from five system
-      titles — three distinct images whose DATA coefficient tables are
-      byte-identical, so **one oracle firmware serves all** (MiiPlaza's
-      49.8 KB image); Azahar's `lle.cpp` is the single-file port template
-      (DSP1 load, boot handshake, PipeStatus protocol, 16384 cycles/slice);
-      and Azahar's own `ReverbEffect` struct is an 8-year 26-word TODO stub —
-      HLE cannot produce reverb, confirming the LLE-oracle ruling at the
-      source. Riskiest unknown: engaging reverb with a VALID config (a
-      malformed block is silently bypassed — indistinguishable from off);
-      de-risk by capstone-scanning the ARM11 driver for its 52-byte
-      `ReverbEffect` write and replaying those exact bytes. First code
-      commit: vendor teakra (MIT) + a standalone `dsp_oracle` booting the
-      firmware to the audio callback, paired with the de-risk spike. ~5–7
-      sessions to the fitted-coefficient milestone; the oracle stays out of
-      caesar_core/CI — only fitted coefficients + a golden IR ship. **Same
-      first commit is also the first mover of the analog-free capture
+      **Recon done (2026-07-14)** and **commit 1 SHIPPED (2026-07-16)** —
+      both in HISTORY: `tools/dsp-oracle/` vendors teakra (MIT, pinned, no
+      patches) and the standalone `dsp_oracle` boots the MiiPlaza firmware
+      to the audio callback (4096.00 cycles/sample = 32,728.3 Hz, clean
+      idle silence, exit 0); the per-frame ARM11 duty is answered by
+      experiment (drain `RecvData(2)` every frame or the firmware stalls
+      and the DAC underruns; frame-counter bump + `SetSemaphore(0x2000)` is
+      what makes the DSP consume new config); and the de-risk spike
+      recovered the ARM11 `ReverbEffect` write site AND the 26-word block
+      layout (an 8-year Citra TODO — disasm-handoff Session 5), with the
+      coefficient values runtime-computed → sourced later via the 3GX tap
+      (analog-free program) or a structured sweep over the recovered
+      layout. Remaining to the fitted-coefficient milestone (~4–5
+      sessions): commit 2 — a dry click through AHBM-backed FCRAM captured
+      at the final mix (also answers route-a's final-mix readback
+      question); commit 3 — engage reverb via the recovered layout +
+      replay recipe; commit 4 — sweep the words, fit comb/allpass,
+      validate against the New 3DS captures. The oracle stays out of
+      caesar_core/CI — only fitted coefficients + a golden IR ship. **The
+      shipped commit is also the first mover of the analog-free capture
       program (hardware-RE queue, greenlit 2026-07-16)** — the oracle
       doubles as the route-a final-mix spike bench and the route-b replay
       renderer.
@@ -306,10 +308,11 @@ Hardware-RE queue (New 3DS + CFW, feeds stages 2–3):
       bit-perfect digital console captures, and teakra renders, so every
       stage-2/3 claim gets multiple test points). Two routes, shared
       infrastructure, dependency order:
-      1. **dsp_oracle first** (= stage-3's first commit, unchanged): vendor
-         teakra + boot the MiiPlaza firmware to the audio callback. One
-         artifact, three consumers (reverb IR fits, route-b replay, the
-         route-a spike).
+      1. [x] **dsp_oracle first — DONE 2026-07-16** (stage-3 commit 1,
+         `tools/dsp-oracle/`; HISTORY): teakra vendored, firmware boots to
+         the audio callback. One artifact, three consumers (reverb IR fits,
+         route-b replay, the route-a spike — the spike itself rides oracle
+         commit 2).
       2. **Route-a feasibility spike — console-free**: run the real
          firmware under teakra with one minimal synthetic voice and watch
          the shared region via `GetDspMemory()` — does the firmware write

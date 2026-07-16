@@ -22,6 +22,17 @@ House rules:
 
 ## [Unreleased]
 
+### Added
+
+- **`tools/dsp-oracle` — the stage-3 DSP oracle (offline measuring
+  instrument).** Vendors the teakra Teak-DSP interpreter (MIT, pinned commit,
+  no patches) and adds a standalone `dsp_oracle` that boots the console's real
+  DSP1 firmware (extracted locally from the user's own dumps via the included
+  self-certifying `extract_dspfirm.py`; the firmware is copyrighted and never
+  committed) through the LLE boot/pipe protocol to the audio callback, capturing
+  the final stereo mix as WAV. Its own standalone CMake tree — never part of the
+  main build or CI. Output-identical: no converter or player code touched.
+
 ### Fixed
 
 - **`caesar-play` — the decibel-domain divisor: volume/expression/sustain bytes

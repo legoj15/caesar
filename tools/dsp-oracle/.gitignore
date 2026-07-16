@@ -1,0 +1,7 @@
+# Machine-local build tree (also matched by the repo-root "build/" pattern).
+build/
+
+# Extracted DSP firmware — Nintendo copyright. Regenerate locally with
+# extract_dspfirm.py; NEVER commit. Only fitted coefficients + a golden IR
+# wav ever ship from the oracle.
+firmware/

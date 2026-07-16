@@ -440,6 +440,73 @@ porting Wii-decomp behaviour into the stage-2 player.
 
 ---
 
+## Session 5 (2026-07-16) — DspConfiguration setter family, the ReverbEffect flush site, and the 26-word block layout
+
+The stage-3 de-risk spike: statically locate where Mii Plaza's ARM11 driver writes the 52-byte
+`ReverbEffect` block (Citra/Azahar's ~8-year `INSERT_PADDING_DSPWORDS(26)` TODO stub), so the
+teakra oracle can replay a config known to engage reverb on real hardware. All addresses are VAs
+(load base `0x00100000`; file offset = VA − 0x100000).
+
+**Method integrity note first:** capstone's `disasm()` over the whole `.text` silently halts at
+the first literal-pool word, so naive immediate scans return false zeros. Every conclusion below
+was drawn only after rebuilding a gap-tolerant disassembly (539,101 instructions, coverage to
+`0x310680`).
+
+**The Rosetta Stone — the DspConfiguration setter family.** The driver singleton lives at data
+`0x004042D4`; it stores the region-0/region-1 shared-config pointers at `+0x10A0`/`+0x10A4`
+(proved by the pipe-2 table-read loop at `0x129D18`, which converts each received word address via
+the `ConvertProcessAddressFromDspDram` idiom and lands index 4 in `+0x10A0`), and the write-region
+index at `+0x131E`. Every scalar setter resolves `cfg = [driver + [driver+0x131E]*4 + 0x10A0]` and
+then matches Azahar's `shared_memory.h` field offset AND dirty bit exactly — `0x215B88`
+master_volume `+0x04`/bit 16, `0x215AAC` aux_bus_enable `+0x28`/bits 8–9, `0x2159EC` surround_depth
+`+0x1C`/bit 29, `0x136A00` output_format `+0x16`/bit 26, ten-plus in all. That family makes
+DspConfiguration writes reliably identifiable in the stripped binary.
+
+**The write sites.** `0x1367D0` is the *delay*-effect flush — its writes match the documented
+`DelayEffect` layout field-for-field (enable `+2`, outputs `+6`, work_buffer_address `+8`,
+frame_count `+0xC`, then g/a/b), stride 20. Its byte-for-byte sibling **`0x1368B4`** with stride
+**52** is therefore the **reverb flush**: `FlushReverbEffect(driver, index, shadow*)` writes the
+26-word block to `cfg+0x54` (index 0) / `cfg+0x88` (index 1), gated by the block's own word-0
+dirty bits, then sets `DspConfiguration.dirty_raw |= 0x1000/0x2000` — exactly Azahar's
+`reverb_effect_0/1_dirty`. A whole-`.text` scan found no other writer reaching `cfg+0x54` (the
+command-interpreter at `0x12FA38` with its many `orr #0x1000` writes an indirect shadow, not the
+config region — excluded). Supporting sites: `0x1299A8` per-effect flush loop, `0x12983C`
+`SetReverbEffect`, `0x13B51C` the float-param→packed-word converter (caller `0x22A4A8`, the
+3-aux-bus updater).
+
+**The recovered 52-byte `ReverbEffect` layout** (byte offsets inside the block; the first three
+fields parallel the documented DelayEffect):
+
+```
++0x00  w0      dirty_raw u16    (bit0 = enable, bit1 = u32 block, bit2 = coeffs)
++0x02  w1      enable    u16    gated by bit0
++0x04  w2      (padding — never written)
++0x06  w3      outputs   u16    gated by bit2
++0x08  w4–5    work_buffer_address u32_dsp   gated by bit1   ← engage-vs-bypass field
++0x0C..+0x18   w6–13   four more u32         gated by bit1
++0x1C..+0x32   w14–25  twelve u16 coefficients   gated by bit2
+```
+
+**The values are runtime-computed, not static.** The packer `0x13B51C` reads a heap reverb
+object's float params (`obj+0x18/+0x1C/+0x20/+0x24` each ×255.0 packed to gain/level bytes;
+`obj+0x28` ×256.0 clamped to [4096, 8191] — a delay-line length; more from `obj+0x34`). A
+`.rodata`/`.data` scan found no 26-word template and no NW4R `FxReverbHi` default cluster
+(`{.02, 3, .6, .4, .1, 1}`). So the exact engaged bytes Mii Plaza uses require a live read
+(Luma 3GX tap of the config region while `BGM_DEN_EMPTY_LANDSCAPE` plays — already on the
+roadmap's analog-free capture program) or a structured sweep with words 0–5 held valid.
+
+**Replay skeleton for the oracle** (target addresses from the firmware's own struct table, also
+embedded in `code.bin` at file `0x255440` = firmware `+0x340`): `dsp_configuration` = DSP word
+`0x9430` → teakra DspMemory byte `0x52860` (region 0) / `0x72860` (region 1); `reverb_effect[0]` =
+`cfg+0x54` → byte `0x528B4` / `0x728B4`. Write the full block first (w0 `dirty_raw=0x0007`, w1
+`enable=1`, w3 `outputs=1`, w4–5 = a **valid non-zero DSP work-buffer address** — this field
+decides engage vs silent bypass — w6–25 from capture/sweep), *then* OR `0x1000` into the config
+`dirty_raw`, with `aux_bus_enable[0]=1` (`+0x28`, dirty `0x100`) and the source's `gain[1]/gain[2]`
+non-zero, writing both regions identically to sidestep the frame-parity double-buffer. Full
+recipe + analysis scripts: the stage-3 session records (HISTORY 2026-07-16).
+
+---
+
 ## Why the RE stops here — *for the SF2/MIDI exporter only*
 
 > **Scope correction (2026-07-09, later the same day).** Everything in this section is correct
@@ -500,9 +567,12 @@ tails.
 
 ## Still open
 
-- **DSP reverb coefficients.** Precisely targeted but **deliberately not pursued** — see "Why the
-  RE stops here". If ever wanted: firmware at Mii Plaza `code.bin` file offset `0x255100`, content
-  size `0xC288`. Parser + extractor: `…\3DSWii Dumps\re_extract\dsp_extract.py`, which writes
+- **DSP reverb coefficients.** *(Update 2026-07-16: the ARM11-side half is now done — Session 5
+  recovered the `ReverbEffect` write site, the 26-word block layout, and the replay recipe; what
+  remains open is the coefficient VALUES, which are runtime-computed → console 3GX tap or
+  structured sweep. The Teak-side "deliberately not pursued" ruling stands; the oracle recovers
+  the behaviour, not the code.)* Original pointer kept for the firmware side: firmware at Mii
+  Plaza `code.bin` file offset `0x255100`, content size `0xC288`. Parser + extractor: `…\3DSWii Dumps\re_extract\dsp_extract.py`, which writes
   standalone `*_dspfirm.cdc` and the PROG segments into `re_extract\dspfirm\`, self-certified by
   the firmware's own embedded per-segment SHA-256s (all `OK`).
 

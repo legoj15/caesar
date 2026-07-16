@@ -4983,3 +4983,81 @@ to console. A long forensic chase produced two false leads before the truth:
 **Outcome:** no player change. SEQ_SD_BGM_RESULT (MiiPlazaDLC mgExp) is
 filed as a stage-3 validation track — its exposed, periodic kick + reverb
 hump is a clean reverb-fit target.
+
+## Suite stage 3 — commit 1: the DSP oracle boots the real firmware to the audio callback (2026-07-16)
+
+The first stage-3 code commit, exactly as scoped by the 2026-07-14 recon: vendor
+teakra, port the LLE boot/pipe/audio harness into a standalone `dsp_oracle`, boot
+the MiiPlaza firmware to where the audio callback fires — paired with the de-risk
+spike (statically recover the ARM11 driver's "reverb engaged" configuration).
+Run as a three-lane fan-out; every lane landed.
+
+**Lane 1 — vendoring + skeleton (`tools/dsp-oracle/`).** Teakra vendored at
+upstream `3d697a18` (MIT — license-clean under caesar's GPLv3), 80 files, with
+`.git`/CI/tests/hwtest/the 675 KB catch header excluded and **zero patches**:
+as a subproject, teakra's own `MASTER_PROJECT` logic turns off tools, tests and
+warnings-as-errors, and its `externals/CMakeLists.txt` only references the
+removed catch directory inside the tests branch. `external/VENDOR.md` records
+the commit, exclusions and re-vendor procedure. The build tree is **standalone
+by design** (`cmake -S tools/dsp-oracle -B tools/dsp-oracle/build`) — the oracle
+never enters the repo-root build or CI; only fitted coefficients + a golden IR
+will ever ship into the player. `extract_dspfirm.py` regenerates the firmware
+from local dumps with every DSP1 segment's embedded SHA-256 verified
+(self-certifying); all five titles verified, MiiPlaza `944b40b5…` byte-identical
+to the recon reference. `firmware/` is gitignored — the firmware is Nintendo
+copyright and never committed.
+
+**Lane 2 — the port (`src/`, 8 original C++ files + PORT-NOTES.md).** Original
+code informed by (not copied from) Citra/Azahar `lle.cpp`/`dsp_dsp.cpp`, libctru
+`ndsp.c`, and teakra's internals, with line-level citations recorded in
+PORT-NOTES.md. The boot proof, reproduced independently after integration on the
+repo tree's own build and firmware: DSP1 parse (5 segments, layout `0xDF03`,
+`recv_data_on_start=1`) → handshake replies `1` on channels 0/1/2 →
+`pipe_base_waddr = 0x0C9E` → Audio-pipe Initialize (`WritePipe(2, {0,0,0,0})` +
+`SetSemaphore(0x4000)`, per ndsp.c) → the firmware replies with the 15-word
+shared-region address table, **byte-for-byte equal to Citra's HLE exemplar**
+(`frame_counter 0xBFFF, source_config 0x9E92, …, dsp_configuration 0x9430,
+final_mix 0x8540`) — the real firmware and Citra agree on order AND concrete
+addresses. A 5.00 s idle capture: 163,520 sample-pairs at **exactly 4096.00
+cycles/sample = 32,728.3 Hz** (the native rate; DSP clock = half the 268 MHz
+ARM11), zero nonzero samples, zero underruns, no stall, exit 0.
+
+**The headline protocol fact** (the single answer the rest of stage 3 leans
+on), settled by a 300-frame three-mode experiment counting BTDMP underruns:
+teakra's I2S transmit **free-runs** — the audio callback fires regardless — but
+with no per-frame ARM11 service the firmware stalls on its full DSP→ARM
+channel-2 mailbox and the DAC emits underrun-silence (95,976 of 96,000
+channel-samples underran). **Draining `RecvData(2)` each frame drops underruns
+to zero**; the faithful full duty additionally bumps the write-bank frame
+counter and calls `SetSemaphore(0x2000)` (ndsp.c's per-frame order), which is
+what advances the double-buffer so the DSP re-reads config — not needed at
+idle, mandatory for commits 2/3. `--service none|drain|full` keeps the
+experiment reproducible.
+
+**Lane 3 — the de-risk spike landed more than asked.** Verdict:
+site-found-values-computed. The ARM11 write site (`FlushReverbEffect` at VA
+`0x1368B4`) and the **full 26-word internal layout of the 52-byte
+`ReverbEffect` block** — an ~8-year Citra/Azahar `INSERT_PADDING_DSPWORDS(26)`
+TODO — are recovered, three-way-evidenced off the DspConfiguration setter
+family (every scalar setter matches Azahar's field offset AND dirty bit), the
+byte-for-byte delay-flush sibling, and a whole-.text only-writer scan. The
+coefficient values themselves are runtime-computed from a heap reverb object's
+floats (×255 gain packing, ×256 clamped delay-line length) — no static template
+exists in `code.bin` — so the exact engaged bytes come later from a Luma 3GX
+live read while `BGM_DEN_EMPTY_LANDSCAPE` plays (the analog-free capture
+program's plugin) or a structured sweep with the recovered layout holding words
+0–5 valid. Full addresses, evidence chain, layout table and the oracle replay
+recipe: NW4C-disasm-handoff.md Session 5. Method trap for future capstone work:
+`disasm()` over full `.text` halts silently at the first literal pool — build a
+gap-tolerant disassembly (539,101 instructions) before trusting any scan.
+
+**Verification.** Nothing outside `tools/dsp-oracle/` was touched (converter
+untouched by construction; `git status` clean otherwise). The oracle was
+rebuilt from the repo tree and re-run end-to-end by the orchestrator after
+integration: same handshake, same table, same 4096.00/32728.3/0-nonzero stats,
+exit 0. Roadmap effect: stage-3's "first code commit" milestone is done, and
+the analog-free capture program's step 1 (`dsp_oracle` first — one artifact,
+three consumers) is delivered. Next: commit 2 — one synthetic source playing a
+click through AHBM-backed FCRAM, captured dry at the final mix (which also
+answers route-a's `final_samples` readback question), then commit 3 — engage
+reverb via the recovered layout.
