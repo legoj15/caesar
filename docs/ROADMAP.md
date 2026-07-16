@@ -194,6 +194,17 @@ per stage. Status:
       diagnosis, completion entry). Constant refinement continues via the
       isolated-note captures (hardware-RE queue below); latent polish noted
       there too.
+    - [ ] **Loop playback (`--loops <n>`).** The whole-song loop — a track's
+      unconditional backward jump into already-played code — is detected but
+      deliberately rendered once: the track ends there and the render stats
+      say so (`--max-seconds` is only a runaway cap, not a loop control).
+      Honouring it means taking the jump instead, which needs the per-pass
+      counted-loop/retake budgets reset each pass (so `[If]` spin loops still
+      terminate) and a render bound: N passes then let voices ring out, or a
+      duration + fade. Per-track loop points make "one pass" per track, not
+      per song, so the bound must be defined against the longest-looping
+      track. Loop-forever is the eventual real-time player's mode; the WAV
+      renderer gets the counted form. (Filed 2026-07-15 from a user ask.)
 - [ ] **Stage 3 — reverb + delay**: offline `teakra` impulse capture →
       comb/allpass fit → New 3DS hardware validation. The long pole.
       **Recon done (2026-07-14, write-up in HISTORY):** teakra builds and runs
@@ -229,6 +240,35 @@ Hardware-RE queue (New 3DS + CFW, feeds stages 2–3):
 - [x] **Surround-mode A/B probe** (`tools/surround-probe/`) — console-confirmed
       2026-07-11: `span` (0xD7) IS audible in Surround mode; write-up in the
       HISTORY 2026-07-11 addendum.
+- [ ] **Console-in-the-loop automation (`n3ds-mcp` + line-in rig).** The
+      capture loop that has cost a human session each time (build → SD →
+      navigate → record → hand over WAVs) becomes scriptable. Both legs
+      verified 2026-07-15: the `n3ds-mcp` server (`E:\GitHub\3ds-mcp`,
+      hardware-verified 2026-07-14 — dual-screen NTR capture, full input
+      injection incl. HOME/touch/`input_sequence` macros, ftpd transfer,
+      3dslink launch; needs Luma + NTR-HR active console-side) is registered
+      at **user scope** (it was project-scoped to its own repo via `.mcp.json`,
+      which is why it "vanished" from every other folder), and the Scarlett
+      line feed records programmatically (ffmpeg/dshow). **Loop PROVEN
+      hands-free 2026-07-15**: ftpd cartridge hash-check → plaza launch →
+      music-player navigation → battery A recorded and analyzed — 28/28
+      schedule onsets, passes exactly 23.50 s apart, channel map ch0=L/ch1=R
+      (NOT reversed; ±53 dB probe split), interface knob mismatch +0.045 dB
+      (negligible), peaks -6.2 dBFS; slider and gain knobs now FROZEN (rig
+      constants + plaza navigation path in the `capture-rig-calibration`
+      memory). Plan: build `tools/console-capture/` (FTP push to the
+      Luma path → HOME-menu launch → screenshot-verified navigation → record →
+      `console-tolerance` verdict, with a level/noise pre-flight and a
+      one-time NTR-streaming on/off A/B to prove streaming doesn't perturb
+      the audio), then run battery v2, the `0xB6` probe, and the
+      re-verification of the three filed stage-2 fixes through it. No memory
+      read in v0 — the classic NTR control protocol does carry read-mem
+      commands, so a small `n3ds-mcp` addition could unblock Surround Part B
+      (unverified). Longer-view enablers: routine console-goldens regression
+      passes per player change (tolerance-net only — the analog path can
+      never be byte-identical), sound-test captures from arbitrary titles,
+      and same-size CWAV payload pokes as stage-3 stimulus injection
+      (unproven: needs fixed-size DSP-ADPCM re-encode).
 - [ ] **Surround Part B — tie the opcode to the register** (hardware-RE,
       follow-up now that Part A is confirmed). Dump the live
       `SourceConfiguration.gain[3][4]` while a span-sweeping `.bcseq` plays via
