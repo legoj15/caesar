@@ -4,3 +4,7 @@
 # Exclude vendored third-party libraries from GitHub language stats and diffs.
 src/libsmfc/**     linguist-vendored
 src/sf2cute-0.2/** linguist-vendored
+tools/dsp-oracle/external/teakra/** linguist-vendored
+
+# Vendored teakra test-data blobs must stay byte-exact (text=auto misdetects them).
+tools/dsp-oracle/external/teakra/**/*.bin binary
