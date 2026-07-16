@@ -223,7 +223,11 @@ per stage. Status:
       commit: vendor teakra (MIT) + a standalone `dsp_oracle` booting the
       firmware to the audio callback, paired with the de-risk spike. ~5–7
       sessions to the fitted-coefficient milestone; the oracle stays out of
-      caesar_core/CI — only fitted coefficients + a golden IR ship.
+      caesar_core/CI — only fitted coefficients + a golden IR ship. **Same
+      first commit is also the first mover of the analog-free capture
+      program (hardware-RE queue, greenlit 2026-07-16)** — the oracle
+      doubles as the route-a final-mix spike bench and the route-b replay
+      renderer.
       Same oracle method now also covers the **Surround-mode virtualization**
       (the DSP folds a quad per-voice gain matrix down to stereo using
       `surround_depth`/`rear_ratio`/speaker-position + two biquads,
@@ -263,17 +267,95 @@ Hardware-RE queue (New 3DS + CFW, feeds stages 2–3):
       constants + plaza navigation path in the `capture-rig-calibration`
       memory). Plan: build `tools/console-capture/` (FTP push to the
       Luma path → HOME-menu launch → screenshot-verified navigation → record →
-      `console-tolerance` verdict, with a level/noise pre-flight and a
-      one-time NTR-streaming on/off A/B to prove streaming doesn't perturb
-      the audio), then run battery v2, the `0xB6` probe, and the
+      `console-tolerance` verdict, with a level/noise pre-flight (which also
+      re-applies the Rosalina volume-override pin — see the rig bullet below)
+      and a one-time NTR-streaming on/off A/B to prove streaming doesn't
+      perturb the audio), then run battery v2, the `0xB6` probe, and the
       re-verification of the three filed stage-2 fixes through it. No memory
-      read in v0 — the classic NTR control protocol does carry read-mem
-      commands, so a small `n3ds-mcp` addition could unblock Surround Part B
-      (unverified). Longer-view enablers: routine console-goldens regression
+      read in v0 — and the classic-NTR read-mem idea is RETRACTED 2026-07-16
+      (dead on current firmware per the n3ds-mcp research report); memory
+      access routes through the analog-free program bullet below (3GX plugin
+      for streams, Rosalina GDB stub for one-shot snapshots). Longer-view
+      enablers: routine console-goldens regression
       passes per player change (tolerance-net only — the analog path can
       never be byte-identical), sound-test captures from arbitrary titles,
       and same-size CWAV payload pokes as stage-3 stimulus injection
       (unproven: needs fixed-size DSP-ADPCM re-encode).
+- [ ] **Capture-rig v2 — repeatability** (decided 2026-07-16; interface
+      confirmed **2nd-gen 2i2** — true analog knobs, no software gain
+      control, so the 4th-gen software escape hatch is unavailable and the
+      knobs stay welded at the max rail, +0.045 dB known constant).
+      ADOPTED, lands with battery v2: (1) **pilot tone** — every battery
+      opens with a fixed reference note; analysis normalizes each channel
+      to it per-session, so constant rig gain (slider, knobs, temperature)
+      divides out and cross-session absolute comparisons become
+      tone-referenced; the rig then only needs "unclipped + above the
+      noise floor". (2) **Rosalina volume override** replaces the analog
+      slider — digitally exact, menu is n3ds-mcp-navigable; NATIVE_FIRM
+      apps only (plaza qualifies); the camera-shutter path can silently
+      reset it, so the capture preflight re-applies + level-checks it; the
+      chosen value becomes a rig constant in the calibration memory.
+      Hardware purchases (≥4-input interface, dedicated always-wired box)
+      DECLINED for now — the mic-unplug + dual-channel friction is
+      accepted; revisit only if it grates. Onboard line-in stays retired
+      (noise floor buries tail forensics — the one defect a pilot tone
+      cannot normalize away — plus the default-device risk). The
+      analog-free endgame is GREENLIT — own bullet below.
+- [ ] **Analog-free capture program** (GREENLIT 2026-07-16 — the goal is
+      maximum independent comparison surfaces: analog console recordings,
+      bit-perfect digital console captures, and teakra renders, so every
+      stage-2/3 claim gets multiple test points). Two routes, shared
+      infrastructure, dependency order:
+      1. **dsp_oracle first** (= stage-3's first commit, unchanged): vendor
+         teakra + boot the MiiPlaza firmware to the audio callback. One
+         artifact, three consumers (reverb IR fits, route-b replay, the
+         route-a spike).
+      2. **Route-a feasibility spike — console-free**: run the real
+         firmware under teakra with one minimal synthetic voice and watch
+         the shared region via `GetDspMemory()` — does the firmware write
+         the final mix (Azahar HLE's `final_samples` field) back to
+         ARM11-visible memory, or only feed BTDMP internally? Same
+         firmware code as the console, so the answer transfers; no Teak
+         disassembly unless it's "no". (Aux-bus `intermediate_mix`
+         readback exists for CPU-side game effects, so the mechanism is
+         proven in principle; the question is whether the FINAL mix gets
+         the same treatment.) If "no": route b's teakra render becomes the
+         digital ground-truth surface (validated against analog), and a
+         minimal DSP-firmware patch to export the mix (our cartridge
+         embeds its own firmware) stays a last-resort option.
+      3. **Console capture side = Luma 3GX game plugin**, NOT NTR
+         read-mem. Correction to the note above: per the n3ds-mcp research
+         report, classic-NTR memory reads are effectively dead on current
+         firmware (BootNTR abandoned Aug 2022, crashes on official Luma
+         via an SVC bug; NTR-HR deliberately removed the debugger
+         features). A small plugin copies the DSP shared-memory frame
+         state (per-voice SourceConfiguration + DspConfiguration, plus
+         `final_samples` if the spike says yes) to an SD ring each ~4.9 ms
+         audio frame. Official Luma has shipped the 3GX loader since
+         ~v10.3 (Rosalina → Plugin loader). One-shot register snapshots
+         (Surround Part B's `gain[3][4]`) can use the Rosalina GDB stub
+         meanwhile — all-stop is fine for a held-note snapshot.
+         **Placement (decided 2026-07-16): a caesar tool** in `tools/`
+         beside the capture cartridge — the dump format is a same-repo
+         contract with the replay/analysis readers, and correct capture is
+         DSP-protocol domain knowledge (the shared region is double-banked
+         by frame parity; snapshot the just-retired bank or voice state
+         tears). n3ds-mcp only deploys/toggles it (ftp + input, no new MCP
+         code); extract the generic transport into 3ds-mcp later only if a
+         non-caesar consumer appears. Build-time notes: devkitARM as an
+         optional toolchain (never caesar_core/CI), and check
+         CTRPluginFramework's GPL license vs a barebones 3gx; plugins are
+         per-title — MiiPlaza hosts both cartridge and tap.
+      4. **Replay harness**: dumped command stream → dsp_oracle → rendered
+         WAV. What the matrix buys: a command-stream diff isolates "is
+         caesar's ARM11 runtime model right?" (the stage-2 heart) from "is
+         the DSP model right?" (render diff) at exactly the stage-2/3
+         boundary; plus console-digital vs teakra-render vs tone-referenced
+         analog cross-checks; and if route a lands, bit-perfect console
+         ground truth with no knobs, slider, or resampling anywhere.
+      5. **Perturbation A/B**: dumper-on vs dumper-off analog captures must
+         match (the analog rig validates the digital tap; it then demotes
+         to arbitrary-title spot checks and one-time DAC validation).
 - [ ] **Surround Part B — tie the opcode to the register** (hardware-RE,
       follow-up now that Part A is confirmed). Dump the live
       `SourceConfiguration.gain[3][4]` while a span-sweeping `.bcseq` plays via
@@ -313,7 +395,9 @@ Hardware-RE queue (New 3DS + CFW, feeds stages 2–3):
       orthogonal to the law); **BANK_MEET_SE_MAIN's reverb send is ~0 —
       the SE bank is genuinely dry on hardware** (useful stage-3 fact).
 - [ ] **Battery v2 — the four still-open constants** (one more capture
-      session): a loud UNFADED sustain for the release table + reverb
+      session; open the battery with a fixed pilot/reference note for
+      per-channel session normalization — see the rig bullet above):
+      a loud UNFADED sustain for the release table + reverb
       residual (KEY_FLY's internal fade buries both sub-floor); a fast
       pitch-vibrato instrument over many cycles for the LFO rate 5/64
       (TRAP recorded in HISTORY: the 6.5 Hz partial-beating confound); pan
