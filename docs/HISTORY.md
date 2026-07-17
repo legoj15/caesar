@@ -5236,3 +5236,81 @@ player): pan 32→+7.58 dB, velocity (vel/127)², release −20 dB after
 2.04/0.86/0.42/0.10 s, vibrato FM 3.67/7.33 Hz. Open risk carried to ROADMAP:
 `0xD1`/`0xD3`/`0xD9` override honoring in the BGM-player path is untested (B1r's
 natural-R127 reverb residual is override-free and always valid).
+
+## Battery v2 — console capture, analysis, and four more player fixes (2026-07-16)
+
+The v2 cartridge was played on the New 3DS via Luma LayeredFS and both tracks
+captured hands-free over the line-in rig. Full arc:
+
+**Capture.** `tools/console-capture` navigation proven end-to-end: HOME → the
+StreetPass Mii Plaza tile (4th app from the left) → walkable plaza → `Y` "Switch
+Icons" → the Music Player feature (music-note icon) → track list. Track A = "Main
+Theme 1" (`BGM_MAIN_Mii_Only_One`); track B = "Find Mii - Dark Room"
+(`BGM_DEN_EMPTY_LANDSCAPE`). Battery-not-retail confirmed by the silence-gap loop
+period: track A ~35.9 s, track B exactly 85.79 s. **Two rig defects, both invisible
+to a naive peak check, were caught and fixed:** (1) the first take was **dual-mono**
+— the Focusrite was capturing only input 1, so one 3DS channel duplicated to both
+(L−R −92 dBFS); detected by `pan=c0-c1` and fixed by capturing both inputs. (2) the
+Windows input was at 100%, putting the vel-127 pilot near −1 dBFS; **`astats`
+flat-factor (0) + peak-count (2) proved the first take never actually clipped**, and
+`AudioDeviceCmdlets` set the input to 50% (pilot ≈ −6 dBFS) for the re-capture. The
+true-stereo re-captures (`BATTERY_A/B_v2_stereo.wav`) show full L/R separation
+(max|L−R| = peak) and supersede the mono take.
+
+**Track A (pan/LPF/velocity/steal).** Pan law = **constant-power sqrt** confirmed at
+the split level (byte 32 −4.83 dB, byte 96 +4.82 dB; sqrt residual 0.10 dB vs cos/sin
+2.91 dB), and the **direction is inverted** vs the player (console byte 0 → right).
+LPF byte-48 corner ≈ **5.1 kHz** (crossing; the shipped 4100 anchor undershot);
+1-pole order + 187.5 cents/unit slope confirmed off byte-24/40. Velocity `(vel/127)²`
+confirmed to 0.09 dB over a 35 dB ladder (the filed vel-96 −1.2 dB anomaly REFUTED).
+**Steal tie-order resolved:** the 6 lowest keys (48–53) are stolen, 54–77 survive —
+confirming FIFO-within-priority steal-oldest and steal-on-priority-tie (the strict
+`>` refuse guard). The center cluster fixes only the low survivor edge (HF aliasing) —
+a distinct-pan steal-probe-v3 would make the upper edge bulletproof.
+
+**Track B (release/decay/LFO/porta/reverb).** `0xD3`/`0xD1` overrides ARE honored in
+the BGM-player path (not instant cuts). Release slopes byte 60/100/114/124 =
+18.2/44.7/112.5/instant dB/s, matching calcRelease + the /200 divisor to ~3–7%.
+**Decay byte-122 spot-check CONFIRMED** (plateau Δ 0.1 dB) — the first console exercise
+of the 2026-07-08 DecayTable correction, closing that roadmap item. **LFO rate
+REVISED:** rate ∝ byte holds (exact 2× byte48→96) but the console (19.17/38.31 Hz) is
+**5.11× faster** than the model's `kLfoRateHz = 5/64`; the console constant is
+byte/512 cycle per 160-sample frame @ 32728 (= 32728/81920 = 0.3995 Hz/unit).
+**Portamento byte→rate REVISED:** rate ∝ **1/byte²** (byte 24/48/96 = 11.49/2.84/0.713
+st/s; byte²·rate ≈ 6578 constant), not 1/byte; the distance law and the byte-48 anchor
+(2.841 st/s) are both confirmed. Reverb residual (LEGEND send 127): wet return −7.8 dB,
+T60 ≈ 4.0 s, bright (centroid ~9 kHz, not low-passed) — a stage-3 fit datapoint,
+contrasting the dry SE bank.
+
+**Independent verification.** A blind agent re-measured the two surprising revisions
+from the stereo track B without being told the expected answers: LFO 19.17/38.31 Hz
+(∝ setting), portamento byte²·rate ≈ 6578 (1/byte rejected). Both matched to within
+tolerance — the revisions are real, not analysis artifacts.
+
+**The four fixes (each a separately-gated commit; play-goldens re-pinned, both BGM
+console-tolerance PASS, ab-verify byte-identical 273,350 files).**
+- `9769a96` **pan** — equal-power cos/sin → constant-power sqrt (`mgL=√(panPos/127)`,
+  `mgR=√(1−panPos/127)`) + inverted direction (byte 0 → R). The near-center BGM
+  captures can't adjudicate direction (their ±0.2 dB lean flipped sign, psd within
+  gate) — battery v2's ±4.8 dB hard-pan probes do.
+- `8c55869` **LPF** — `kLpfByte48Hz` 4100 → 5150 Hz (slope + 1-pole unchanged).
+- `f5082e4` **LFO** — `kLfoRateHz` → 32728/81920 = 0.39951 Hz/unit (the byte/512-cycle
+  closed form), 5.11× faster. Coverage note: the `vibrato-zelda` golden is inert to the
+  constant (short notes + `0xE0` mod-delay gate the LFO off per note); real coverage is
+  `ramp-kaen` + `bgm-den-result` — the witness comment was corrected and a re-point filed.
+- `4ac1393` **portamento** — rate 1/byte → 1/byte² (`rate = 2.841·(48/byte)²`). No
+  golden/capture can discriminate the exponent on current content (the only porta,
+  KEY_FLY, sits exactly on the byte-48 anchor where both laws coincide) — correct by
+  verified algebra with the anchor unmoved.
+
+**Pan direction — disassembly-settled (NW4C-disasm-handoff Session 7).** The direction
+flip rested on the rig's ch0=3DS-left labeling, so it was re-derived purely from
+MiiPlaza `code.bin`: the pan routine (0x14AFB8) writes the pan-growing gain to
+front-L (`slot+0x3c`, channel 0) and the shrinking gain to front-R (`slot+0x3e`), so
+pan 0 mutes front-L → **RIGHT**. Commit `9769a96` **CONFIRMED**. Two refinements fell
+out: (a) the engine pan LAW is not literally sqrt but a cos-table linear crossfade
+over an exponential position LUT (constant-*sum*) — sqrt is a validated approximation
+at the 5 probed bytes but the curve may deviate elsewhere → a pan-fidelity follow-up;
+(b) the real driver writes **s16** gains at `slot+0x3c`, NOT the Azahar-HLE-modeled
+`f32 gain[3][4]` at `slot+0x04` — the Surround Part B reader address needs reconciling
+(channel order L-before-R is unchanged).

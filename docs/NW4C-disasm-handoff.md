@@ -707,6 +707,75 @@ tails.
 
 ---
 
+## Session 7 (2026-07-16) — the pan-lane verdict: **pan 0 → RIGHT (CONFIRMED), and the pan LAW is NOT sqrt**
+
+Settled the open direction question behind caesar's shipped pan fix (`src/play/Dsp.cpp`, commit
+`9769a96`): does pan value 0 route to the front-LEFT or front-RIGHT DSP lane? **Front-RIGHT.**
+The lane assignment is established **purely from the binary** (independent of the capture rig's
+`ch0 = 3DS-left` labeling, which was the fix's only prior support). Capstone-only, gap-tolerant
+disasm of MiiPlaza `code.bin`, load base `0x00100000`. All `[self]`-re-disassembled.
+
+### The full front-L/R pan chain (traced end-to-end)
+
+1. **The pan routine is `0x14AFB8`** (its `push` is at `0x14AFC8`, the address the earlier memo
+   recorded; the routine does scalar setup before spilling). It is a **leaf that computes two
+   16-bit gains and pushes them to the voice's DSP source.** Input `r1` = a **0..16000 pan
+   *position*** (clamped `movhi #0x3E80`), NOT a 0..127 byte. Literals: scale `1/125` (`0x14b034`),
+   `2.0`, `1.0`, `32768.0`. The transcendental `bl 0x211224` is a **256-entry COSINE table**
+   (`0x31F95C`; `g(x)=cos(π·x/128)`, verified: `g(0)=1, g(64)=0, g(128)=−1`). With `t=cos(π·pos/16000)`
+   and `a=2−t`, it computes `orig = √(a²−1) − a`, then stores `gainA=(orig+1)·32768 → obj+8` and
+   `gainB=−orig·32768 → obj+0xa` (the second negated via `rsb`). **`gainA + gainB ≡ 32768`** — a
+   **linear crossfade** (constant-*sum*), NOT the constant-*power* `√(pan/127)` caesar models.
+2. Tailcall `0x14D030 → 0x14D708` copies the packed word `{obj+8 low, obj+0xa high}` into
+   `dspSource+0x10` (dspSource = the lower DSP voice's `+0x68` ptr) and sets dirty bit 3 (`0x8`).
+   **`0x14D708` has exactly one caller** (this routine) — so the front pair is written *only* here.
+3. **Commit `0x14D474` (dirty bit 3):** `ldrsh r2,[dsp+0x10]` (gainA) / `ldrsh r3,[dsp+0x12]`
+   (gainB) → `bl 0x145E38(driver 0x004042D4, voiceIdx, gainA, gainB)`.
+4. **`0x145E38` writes the DSP-RAM SourceConfiguration, in order:**
+   `strh gainA,[slot+0x3c]` then `strh gainB,[slot+0x3e]`, then `orr dirty |= 0x800000`. The
+   sibling `0x145E98` (bit 4) writes **five** more s16 gains to `slot+0x40..0x48` (rear + aux).
+   So the per-voice gain block is s16 `[FL@+0x3c, FR@+0x3e, RL@+0x40, RR@+0x42, aux…]` — **channel 0
+   (front-L) is the first/lowest, channel 1 (front-R) second.** (Note: this is s16 at `+0x3c`, NOT
+   the f32-at-`+0x04` that `surround-probe/partb` guessed from the Azahar HLE model — that layout
+   was never console-verified; the real driver uses this one. The **channel order** L-before-R is
+   unchanged and is what matters.)
+
+**⇒ front-L (channel 0) = gainA = `obj+8`, which GROWS with the pan position; front-R (channel 1) =
+gainB = `obj+0xa`, which SHRINKS.** At the low pan extreme the routine emits gainA≈0.016 (L muted),
+gainB≈0.984 (R full). This is the exact mirror of caesar's `mgL=√(pan/127)` (grows→L) /
+`mgR=√(1−pan/127)` (shrinks→R). **Same lane assignment ⇒ pan 0 → L muted → RIGHT. `9769a96`
+CONFIRMED, no revert.**
+
+### The value plumbing (context; direction corroborated 3 ways)
+
+`Voice::SetPan` (`0x14C398`) sets `Voice+0x38` + dirty `0x10`; the per-frame sync `0x1499FC` converts
+it via `0x14B174` (float `s0∈[0,1]` → position: `<0.1356→80`, `[0.1356,0.9)→`exp LUT `0x325B90`,
+`≥0.9→`**disable**, switching the source to the full quad-matrix path `0x14C48C`). `s0 = playerPan
+[player+0x24] + 1.0`. The note-pan byte (`+0xd`: byte0→−63/63=−1, byte127→+1, monotone) feeds a
+separate field (`Voice+0x30`, the surround/quad path), not the 2-gain front pan. That the pan
+*command* value 0 lands at the position minimum (front-L muted) rests on: (a) the standard monotone
+convention, (b) the byte→signed encoding above, and (c) the console battery (byte 32 → L 4.83 dB
+*below* R; byte 96 → L *above* R ⇒ L rises with the byte, matching front-L=gainA rising with
+position). The **lane assignment** (the rig-independent crux) is proven from the binary; the sign is
+triangulated.
+
+### Consequence for caesar (beyond the confirmed direction)
+
+The pan **law** is wrong-shaped, though the **direction** is right. The engine is a cos-driven
+**linear** crossfade (gains sum to 1) over an **exponential** position LUT, with a near-centre
+switch to the 12-lane quad matrix — not `√(pan/127)`. caesar's constant-power `sqrt` is an amplitude
+approximation (e.g. at position 3200 the console splits ~0.456/0.544 ≈ −1.6 dB; `sqrt` at the same
+balance differs). Direction verdict needs no change; the amplitude curve is a candidate refinement
+(file under the pan-fidelity follow-up, not a direction bug).
+
+Key addresses (MiiPlaza SDK-5.2; logic SDK-invariant): pan routine `0x14AFB8`; cosine table fn
+`0x211224` / table `0x31F95C`; pos-converter `0x14B174` (exp LUT `0x325B90`); `Voice::SetPan`
+`0x14C398` (`Voice+0x38`, dirty `0x10`); front-pair flush `0x14D708` (dsp `+0x10`, dirty bit 3);
+commit `0x14D474`; **gain writer `0x145E38` → `slot+0x3c`=FL / `slot+0x3e`=FR**; rear/aux writer
+`0x145E98` → `slot+0x40..0x48`; quad-matrix path `0x14C48C`/`0x14DEF4`.
+
+---
+
 ## Still open
 
 - **DSP reverb coefficients.** *(Update 2026-07-16: the ARM11-side half is now done — Session 5

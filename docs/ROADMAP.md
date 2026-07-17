@@ -377,15 +377,27 @@ Hardware-RE queue (New 3DS + CFW, feeds stages 2–3):
          match (the analog rig validates the digital tap; it then demotes
          to arbitrary-title spot checks and one-time DAC validation).
 - [ ] **Surround Part B — tie the opcode to the register** (hardware-RE,
-      follow-up now that Part A is confirmed). Dump the live
-      `SourceConfiguration.gain[3][4]` while a span-sweeping `.bcseq` plays via
-      LayeredFS, binding `span`/`front_bypass` to the rear gain lanes at the
-      source. Feeds suite stage 3's Surround virtualization model.
-- [ ] **Decay-table console spot-check.** The corrected decay values
-      (2026-07-08 fix) have never been exercised against a console capture —
-      the original repro track was release-127-sentinel and untouched by the
-      fix. One A/B on a decay-table-using track closes the loop; also
-      grounds stage 2's envelope solver.
+      follow-up now that Part A is confirmed). **Offline prep DONE 2026-07-16
+      (`tools/surround-probe/partb/`):** span-sweep stimulus cartridge
+      (`build_partb_cartridge.py`, held-note + retrigger/front_bypass
+      differential, byte-identical stage-1 round-trip gated) + a one-shot
+      Rosalina GDB-RSP reader (`gdb_read.py`, offline unit-tested 24/24). Dumps
+      the live `SourceConfiguration.gain[3][4]` while the span-sweeping `.bcseq`
+      plays, binding `span`/`front_bypass` to the rear lanes. Feeds suite stage
+      3's Surround virtualization model. **Live run remains** (blocked on a
+      physical Rosalina GDB-stub enable — InputRedirection can't drive the
+      overlay). **KNOWN-ADDRESS CORRECTION (disasm Session 7):** the reader's
+      gain address (`f32 @ slot+0x04`, from the Azahar HLE model) does NOT match
+      the real ARM11 driver, which writes **s16 gains at `slot+0x3c`** (front-L
+      first at +0x3c, front-R +0x3e, rear +0x40..; channel order L-before-R is
+      confirmed). Reconcile whether `slot+0x3c` is the DSP shared-mem struct or
+      an ARM11 intermediate before the live read (see the Known-bugs/follow-up
+      note).
+- [x] **Decay-table console spot-check — CLOSED 2026-07-16.** The corrected
+      decay values (2026-07-08 fix) are exercised on hardware for the first time
+      by battery-v2 track B's decay-byte-122 probe: console/prediction plateau
+      match to **0.1 dB** (decay slope 276 vs 261 dB/s), confirming the
+      corrected `DecayTable` tail. Full detail in HISTORY 2026-07-16.
 - [x] **Stage-2 constant recalibration — DONE 2026-07-16.** All three
       battery-capture fixes shipped, play-goldens re-pinned (+`lpf-slide`
       witness), both BGM console-tolerance captures PASS, ab-verify converter
@@ -398,51 +410,59 @@ Hardware-RE queue (New 3DS + CFW, feeds stages 2–3):
       3. [x] **LPF byte 48** — `e0b8713`: 4.1 kHz + bilinear 1-pole; lifted
          `SE_NEW_SLIDE_MAP` +5.7 dB RMS (drum unchanged); per-byte 187.5-cent
          slope still unmeasured (battery v2).
-      Still open — filed anomalies: vel-96 reads ~1.2 dB low (single-point,
-      orthogonal to the law); **BANK_MEET_SE_MAIN's reverb send is ~0 — the SE
-      bank is genuinely dry on hardware** (useful stage-3 fact).
-- [ ] **Battery v2 — the four still-open constants.** **Cartridge BUILT +
-      gated 2026-07-16** (`tools/capture-cartridge/build_cartridge_v2.py` +
-      `build-cartridge-v2.ps1` + `check_prediction_v2.py`; run-sheet in the
-      tool README, predictions on the recalibrated player). All-crafted probes
-      on the banks' shared prog-23 loop (pilot/sustain/release/decay/reverb/
-      pan/LPF/velocity/steal) + LEGEND prog-9 C4 tone (vibrato/portamento);
-      pilot tone `81 17 3C 7F 60` at tick 0 on both tracks. Track A (SE_MAIN,
-      36.1 s/pass), track B (LEGEND, 85.8 s/pass). Gate green: round-trip
-      byte-identical (78/0), both recalibrated renders, schedule checks, steal
-      24/24 +6 stolen. **Awaiting the capture session** (runs through
-      `tools/console-capture/`). Open risk: B1/B2/B1r use `0xD1/0xD3/0xD9`
-      sequence overrides (no MeetSound instrument has a non-127 release),
-      untested in the BGM-player path — a console instant-cut where the
-      prediction slopes is itself the answer. v3 owes: portamento
-      tempo-independence (item 5c, needs a tempo-aware assembler). Original
-      per-constant asks (one more capture session; open with a fixed pilot/
-      reference note for per-channel session normalization — see the rig
-      bullet above):
-      a loud UNFADED sustain for the release table + reverb
-      residual (KEY_FLY's internal fade buries both sub-floor); a fast
-      pitch-vibrato instrument over many cycles for the LFO rate 5/64
-      (TRAP recorded in HISTORY: the 6.5 Hz partial-beating confound); pan
-      bytes 32/96 to discriminate cos/sin vs the engine's sqrt-polynomial
-      (0/64/127 coincide on both); a 2nd portamento point for the
-      time→rate law. Also the pool sorted-insert tie order (needs a
-      steal-saturation probe). The interpolation filter stays with the
-      stage-3 teakra oracle. Latent polish (zipper-class instant param
-      steps, never audible) and the volume-byte-0 census ruling
-      (silence-at-rest is deliberate — no floor) carry over unchanged.
-      Same-area UX nit: `caesar-play --list` loads each entry's INFO
-      volume byte but doesn't print it — add a volume column to `doList`
-      on the next player touch-up (output-identical elsewhere).
-      **Semantics question — RESOLVED 2026-07-16 (disasm; HISTORY +
-      NW4C-disasm-handoff Session 6):** `0xB6`'s argument is a **SLOT index
-      into the sound's own INFO bank slots** (MeetSound caps at 2), NOT a
-      global CbnkRecords index. Default 0 = slot 0 = the sound's primary
-      bank, which is why corpus data fit both. This exactly explains the
-      silent battery (the SE stream selected an empty slot on a
-      single-bank BGM host → NULL → note dropped), so the slot-vs-global
-      battery diagnostic is retired. The fix is filed under the converter
-      `0xB6` bullet above (INFO multi-slot parse + player/VM slot indexing);
-      the battery need not carry `0xB6` to settle anything now.
+- [x] **Battery-v2 render-constant application — DONE 2026-07-16.** Four more
+      console-validated player fixes from the battery-v2 captures, each a
+      separately-gated commit (play-goldens re-pinned, both BGM console-tolerance
+      PASS, ab-verify byte-identical 273,350 files). Full narrative in HISTORY.
+      1. [x] **Pan** — `9769a96`: constant-power sqrt (byte 32/96 split
+         −4.83/+4.82 dB, 0.10 dB fit) + **inverted direction** (byte 0→R, 127→L).
+         Direction **disasm-CONFIRMED** (Session 7: pan routine's growing gain →
+         front-L `slot+0x3c`, so pan 0 mutes front-L → right). Law is a validated
+         sqrt *approximation* — the true engine curve is a cos-table linear
+         crossfade over an exponential LUT → pan-fidelity follow-up below.
+      2. [x] **LPF byte-48 anchor** — `8c55869`: 4100→5150 Hz (v1 undershot; v2
+         crossing ≈5150, also fits byte-24/40); slope + 1-pole order confirmed.
+      3. [x] **LFO rate** — `f5082e4`: `kLfoRateHz` 5/64 → 32728/81920 = 0.3995
+         Hz/unit (byte/512 cycle per frame), **5.11× faster**; rate∝byte holds.
+      4. [x] **Portamento byte→rate** — `4ac1393`: 1/byte → **1/byte²**
+         (rate = 2.841·(48/byte)²); distance law + byte-48 anchor unchanged.
+      Also confirmed on hardware (no change): velocity `(vel/127)²`, 1-pole LPF,
+      187.5 cents/unit slope, 24-voice pool, tempo 1.0000, the release table
+      (calcRelease + /200 divisor), **decay byte-122** (see the closed spot-check
+      above), and the **steal tie-order** (6 lowest keys stolen = FIFO
+      steal-oldest + steal-on-priority-tie). Reverb residual (LEGEND send 127):
+      −7.8 dB wet, T60 ~4 s, bright ~9 kHz — a stage-3 fit datapoint.
+      Still open — filed anomalies: the vel-96 −1.2 dB anomaly is **REFUTED**
+      (battery v2: vel-96 on the (vel/127)² curve to 0.09 dB); **BANK_MEET_SE_MAIN's
+      reverb send is ~0 — the SE bank is genuinely dry on hardware** (stage-3 fact).
+      New follow-ups (own bullets in Known bugs / suite): pan-fidelity exact-LUT
+      curve; re-point the inert `vibrato-zelda` LFO golden witness; a distinct-pan
+      steal-probe-v3 (the center cluster fixes only the low survivor edge); a
+      one-probe pan-direction re-confirm is no longer needed (disasm settled it).
+- [x] **Battery v2 — the four still-open constants: CAPTURED + ANALYZED +
+      APPLIED 2026-07-16.** The cartridge (`tools/capture-cartridge/build_cartridge_v2.py`,
+      round-trip gated) was played on the New 3DS via LayeredFS and **both tracks
+      captured hands-free** (`tools/console-capture` navigation proven — plaza
+      "Main Theme 1" = track A, "Find Mii - Dark Room" = track B; loop periods
+      35.9 / 85.79 s confirm the battery). First take was dual-mono + at 100%
+      input; re-captured in true stereo at 50% input after the rig fix
+      (`BATTERY_A/B_v2_stereo.wav`). Analysis
+      (`analyze_capture_v2{,_trackB}.py` + a blind independent re-measure)
+      closed all four constants → **the four player fixes shipped** (see the
+      render-constant bullet above): pan sqrt+direction, LPF 5150, LFO ×5.11,
+      porta 1/byte². The `0xD1/0xD3/0xD9` override risk resolved (overrides ARE
+      honored in the BGM path). The `--list` volume-column nit shipped
+      (`eea57c1`). **Battery v3 owes** (own bullets): a distinct-pan
+      steal-probe (upper survivor edge), a pan-fidelity sweep (more pan bytes to
+      map the exact LUT curve), portamento tempo-independence, and the interpolation
+      filter (stays with the stage-3 teakra oracle). Latent polish (zipper-class
+      instant param steps) and the volume-byte-0 census (silence-at-rest is
+      deliberate) carry over unchanged. Full narrative in HISTORY 2026-07-16.
+      **`0xB6` semantics — RESOLVED 2026-07-16 (disasm; NW4C-disasm-handoff
+      Session 6):** the argument is a **SLOT index into the sound's own INFO bank
+      slots** (MeetSound caps at 2), NOT a global CbnkRecords index (default 0 =
+      slot 0 = primary bank, why corpus fit both); explains the silent single-track
+      battery. Fix filed under the converter `0xB6` bullet above.
 
 ## Settled decisions & standing rules
 
