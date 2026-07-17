@@ -400,20 +400,36 @@ namespace play
 			return (cap > start) ? (cap - start) : gate;   // never lifts: hold to the cap
 		}
 
-		// The portamento glide duration for a 0xCF time value, in samples. The exact
-		// CTR portaTime -> duration mapping is not byte-confirmed in the disasm (the
-		// doc records no portamento address), so this uses the NW4R precedent that the
-		// time value scales the glide and treats it as a tick count at the current
-		// tempo (a distance-independent glide). FLAGGED for the console capture -- one
-		// constant to recalibrate.
-		uint32_t portaDurationSamples(Runtime& rt, int portaTime)
+		// Portamento rate anchor (console battery 2026-07-14, KEY_FLY glide): time
+		// byte 48 glides at 2.841 st/s (0.352 s/semitone, R^2=0.99998).
+		constexpr double kPortaRateByte = 48.0;
+		constexpr double kPortaRateStPerSec = 2.841;
+
+		// The portamento glide DURATION for a 0xCF time byte, in samples. The battery
+		// measured a CONSTANT-RATE, linear-in-cents glide, so the duration is
+		// DISTANCE-PROPORTIONAL (duration = |distance| / rate) -- NOT the old fixed
+		// full-distance glide (portaTime x samplesPerTick), which was ~17x too fast on
+		// the measured interval. PROVISIONAL single-point law: seconds-per-semitone is
+		// LINEAR in the time byte (rate proportional to 1/byte), anchored so byte 48 =
+		// 2.841 st/s; monotonic (a bigger "time" byte = a longer glide) and tempo-
+		// independent (a wall-clock st/s rate, exactly as measured). The byte->rate
+		// SHAPE and the tempo-independence are unconstrained off byte 48 -- battery v2's
+		// second capture point (a different interval or time byte) firms both up. Byte 0
+		// (portamento off) stays instant: no glide.
+		uint32_t portaDurationSamples(int portaTime, float distanceSemis)
 		{
-			if (portaTime <= 0)
+			double dist = distanceSemis < 0.0f ? -static_cast<double>(distanceSemis) : static_cast<double>(distanceSemis);
+
+			if (portaTime <= 0 || dist == 0.0)
 			{
 				return 0;
 			}
 
-			return static_cast<uint32_t>(static_cast<double>(portaTime) * samplesPerTick(rt) + 0.5);
+			// seconds/semitone = portaTime * (1 / rate@48) / 48; duration = |distance| x that.
+			double secPerSemi = static_cast<double>(portaTime) / kPortaRateStPerSec / kPortaRateByte;
+			double durSamples = dist * secPerSemi * static_cast<double>(kNativeRate);
+
+			return static_cast<uint32_t>(durSamples + 0.5);
 		}
 
 		// The extended (0xF0) variable + comparison ops -- ported verbatim from
@@ -680,7 +696,7 @@ namespace play
 								if (origin >= 0 && origin != key)
 								{
 									ev.portaFromSemis = static_cast<float>(origin - key);
-									ev.portaDurSamples = portaDurationSamples(rt, t.portaTime);
+									ev.portaDurSamples = portaDurationSamples(t.portaTime, ev.portaFromSemis);
 								}
 							}
 

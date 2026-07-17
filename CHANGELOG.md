@@ -35,6 +35,18 @@ House rules:
 
 ### Fixed
 
+- **`caesar-play` — portamento is now a constant-rate, distance-proportional
+  glide.** The `0xCF` glide was a fixed full-distance glide over
+  `portaTime × samplesPerTick` (distance-independent, ~17× too fast on the
+  measured interval). The console battery (2026-07-14, KEY_FLY) measured a
+  constant-rate, linear-in-cents glide of **2.841 st/s at time byte 48**
+  (0.352 s/semitone, R²=0.99998), so the duration is now `|distance| / rate`.
+  The `portaTime → rate` law is a **provisional single-point fit**
+  (seconds-per-semitone linear in the time byte, anchored so byte 48 = 2.841
+  st/s; monotonic and tempo-independent), pending battery v2's second capture
+  point. Byte 0 (portamento off) stays instant. Changes `caesar-play` `.wav`
+  renders only; converter outputs identical (play-goldens re-pinned; both New
+  3DS console-tolerance captures PASS).
 - **`caesar-play` — the decibel-domain divisor: volume/expression/sustain bytes
   now map to `(v/127)²` amplitude and decay/release run at their true dB rate.**
   `gainFromValue` applied the NW4C `DecibelSquareTable` as `10^(value/400)`
