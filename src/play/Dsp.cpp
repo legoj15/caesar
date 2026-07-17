@@ -33,17 +33,19 @@ namespace play
 
 		// --- The voice low-pass filter (C10, 0xD8 / 0xB4 / 0xB5) ------------------
 		//
-		// The disasm doc records NO filter topology. The console battery (2026-07-14)
-		// measured the 0xD8 filter at time byte 48: corner ~4.1 kHz with a ~6-7 dB/oct
-		// slope (a 1-POLE filter). This is therefore a bilinear-transform 1-pole
-		// low-pass -- NOT the earlier RBJ 2nd-order biquad, which placed byte 48 at
-		// 2,890 Hz with a 12 dB/oct slope (half an octave too dark AND twice too steep).
-		// The byte->corner curve is re-anchored on the measured point (byte 48 =
-		// 4.1 kHz) and keeps the converter's 187.5-cents/unit slope (UNMEASURED off
-		// byte 48, FLAGGED for battery v2); 64 = fully open (no filtering). The state is
-		// still the 5-coefficient Biquad with b2 = a2 = 0, so the render loop is unchanged.
+		// The disasm doc records NO filter topology. The console battery measured the
+		// 0xD8 filter as a 1-POLE (~6 dB/oct) low-pass, so this is a bilinear-transform
+		// 1-pole -- NOT the earlier RBJ 2nd-order biquad (byte 48 at 2,890 Hz, 12 dB/oct:
+		// half an octave too dark AND twice too steep). The byte->corner curve is
+		// anchored on battery v2 (2026-07-15 stereo): the byte-48 -3 dB corner crosses
+		// at ~5.1 kHz (5.06-5.22 kHz across passes; the more defensible -3 dB crossing
+		// ~5150 Hz -- a full 1-pole fit reads ~6.3 kHz). The converter's 187.5-cents/unit
+		// slope and the 1-pole order are now CONFIRMED: re-anchoring to 5150 also fits
+		// byte-24 ~400 Hz and byte-40 ~2.1 kHz. (Battery v1's 4.1 kHz undershot.) 64 =
+		// fully open (no filtering). The state is still the 5-coefficient Biquad with
+		// b2 = a2 = 0, so the render loop is unchanged.
 		constexpr double kLpfNyquistHz = static_cast<double>(kNativeRate) / 2.0;  // 16,364 Hz
-		constexpr double kLpfByte48Hz = 4100.0;   // console-measured corner @ byte 48 (battery 2026-07-14)
+		constexpr double kLpfByte48Hz = 5150.0;   // console -3 dB corner @ byte 48 (battery v2 2026-07-15)
 
 		struct Biquad { double b0, b1, b2, a1, a2; };
 

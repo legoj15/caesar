@@ -57,6 +57,16 @@ House rules:
 
 ### Fixed
 
+- **`caesar-play` — the `0xD8` low-pass byte-48 corner is re-anchored to
+  ~5.15 kHz (battery v2).** The shipped byte-48 anchor of 4.1 kHz came from
+  battery v1, which undershot. Battery v2 (2026-07-15 stereo) reads the byte-48
+  −3 dB corner at **≈5.1 kHz** (5.06–5.22 kHz across passes; the more defensible
+  −3 dB crossing ≈5150 Hz, so `kLpfByte48Hz` moves 4100 → 5150). The
+  187.5-cents/unit slope and the 1-pole order are confirmed — re-anchoring to
+  5150 also fits byte-24 ≈400 Hz and byte-40 ≈2.1 kHz. Makes the `0xD8`-filtered
+  voices brighter; changes LPF'd `caesar-play` `.wav` renders only; converter
+  outputs identical (play-goldens re-pinned; both New 3DS console-tolerance
+  captures PASS).
 - **`caesar-play` — the pan law is now constant-power sqrt with the console's
   L/R direction.** The stereo pan used an equal-power `cos`/`sin` split; the
   console battery v2 (2026-07-15 stereo, both passes ≤0.01 dB apart) measured a
