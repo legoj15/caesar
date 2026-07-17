@@ -57,6 +57,19 @@ House rules:
 
 ### Fixed
 
+- **`caesar-play` — the pan law is now constant-power sqrt with the console's
+  L/R direction.** The stereo pan used an equal-power `cos`/`sin` split; the
+  console battery v2 (2026-07-15 stereo, both passes ≤0.01 dB apart) measured a
+  **constant-power sqrt** split — byte 32 = −4.83 dB, byte 96 = +4.82 dB L/R,
+  fit by sqrt to **0.10 dB** where `cos`/`sin` misses by 2.91 dB — and that the
+  **direction is inverted**: byte 0 → RIGHT, byte 127 → LEFT (byte 64 → both
+  √0.5). The sqrt law is corroborated by the disasm (the vsqrt pan routine at
+  `0x14AFC8`); the L/R direction rests on the console split sign plus the rig's
+  ch0 = 3DS-left labeling (flagged for a one-probe re-confirm). Changes every
+  non-center-panned stereo `caesar-play` `.wav` render: the L/R spread narrows
+  ~2.9 dB at the extremes **and mirrors**; loudness is preserved (both laws are
+  constant-power). Converter outputs identical (play-goldens re-pinned; both
+  New 3DS console-tolerance captures PASS).
 - **`caesar-play` — the voice low-pass filter is retuned and softened to
   1-pole.** The `0xD8` LPF was an RBJ 2nd-order biquad placing byte 48 at
   2,890 Hz with a 12 dB/oct slope. The console battery (2026-07-14) measured

@@ -736,9 +736,24 @@ namespace play
 
 					panPos = panPos < 0.0f ? 0.0f : (panPos > 127.0f ? 127.0f : panPos);
 
-					double angle = static_cast<double>(panPos) / 127.0 * (kPi / 2.0);
-					mgL = v.gainL * volAmp * static_cast<float>(cos(angle));
-					mgR = v.gainR * volAmp * static_cast<float>(sin(angle));
+					// Constant-power PAN via the engine's sqrt law (mgL^2 + mgR^2 = 1),
+					// NOT the equal-power cos/sin. The console battery v2 (2026-07-15
+					// stereo, both passes <= 0.01 dB apart) measured a sqrt split -- byte
+					// 32 = -4.83 dB, byte 96 = +4.82 dB L/R -- fit by sqrt to 0.10 dB
+					// where cos/sin misses by 2.91 dB. The sqrt law is corroborated by the
+					// disasm: the vsqrt-based pan routine at 0x14AFC8 (NW4C-disasm-handoff.md,
+					// re-identified as the pan calc -- not sustain -- in the stage-2 memo).
+					//
+					// DIRECTION: byte 0 -> RIGHT, byte 127 -> LEFT (byte 64 -> both
+					// sqrt(0.5)). The console measured this unambiguously (byte 32's
+					// -4.83 dB split is L-below-R; byte 96's +4.82 is L-above-R). The
+					// 0x14AFC8 L/R lane assignment was NOT re-derived here (the code.bin
+					// was not re-extracted), so the mapping rests on the console split sign
+					// plus the rig's ch0 = 3DS-LEFT labeling (rig-verified to +/-53 dB);
+					// flagged for a one-probe re-confirm.
+					double panFrac = static_cast<double>(panPos) / 127.0;
+					mgL = v.gainL * volAmp * static_cast<float>(sqrt(panFrac));
+					mgR = v.gainR * volAmp * static_cast<float>(sqrt(1.0 - panFrac));
 
 					effStep = (semis != 0.0) ? v.step * pow(2.0, semis / 12.0) : v.step;
 
