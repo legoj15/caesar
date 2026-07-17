@@ -88,11 +88,12 @@ namespace
 
 		vector<play::SequenceInfo> seqs = play::listSequences(*arch->csar);
 
-		cout << "index  bank  start       name\n";
+		cout << "index  bank  start       vol   name\n";
 
 		for (const play::SequenceInfo& s : seqs)
 		{
 			cout << "  " << s.index << "\t" << s.bankIndex << "\t0x" << hex << s.startOffset << dec
+				<< "\t" << static_cast<int>(s.volume)
 				<< "\t" << (s.name.empty() ? "(unnamed)" : s.name) << "\n";
 		}
 

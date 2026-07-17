@@ -32,6 +32,11 @@ House rules:
   committed) through the LLE boot/pipe protocol to the audio callback, capturing
   the final stereo mix as WAV. Its own standalone CMake tree — never part of the
   main build or CI. Output-identical: no converter or player code touched.
+- **`caesar-play --list` now prints each entry's INFO volume byte.** The list
+  already loaded the per-sound volume byte but never showed it; `doList` gains
+  a `vol` column between `start` and `name`. Output-identical everywhere else
+  (extraction and `.wav` renders unchanged; only `caesar-play --list` stdout
+  gains a column).
 
 ### Fixed
 
