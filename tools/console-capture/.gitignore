@@ -1,0 +1,6 @@
+# Console captures and deploy artifacts are corpus/console-derived — never commit them.
+captures/
+*.wav
+*.readback.bcsar
+__pycache__/
+*.pyc

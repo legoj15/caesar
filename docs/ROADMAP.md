@@ -83,7 +83,19 @@ subsumed by suite stage 0. Rough priority order within each group.
   plays the wrong instrument wherever a track switches banks. Not a local
   Cseq fix: the emitted CC0 must be co-designed with Cbnk's SF2 bank layout
   (currently derived from the flat `0x81` program index), or it fights the
-  existing bank/program split.
+  existing bank/program split. **Semantics settled 2026-07-16 (disasm,
+  CONFIRMED-SLOT; NW4C-disasm-handoff Session 6):** the argument is a slot
+  index into the sound's own up-to-N INFO bank slots (not a global index),
+  default 0 = primary bank. caesar's current global reading is wrong for any
+  sound with ≥2 bank slots issuing `0xB6 arg≥1`. Two-part fix, filed and
+  scoped but unimplemented: (1) the INFO parser (`src/Csar.cpp` CSEQ loop)
+  must read the counted bank-slot table — today it reads only slot 0, the
+  rest of the tail is the "unparsed" region already noted at
+  `src/Csar.hpp:106-108`; (2) the player/VM `0xB6` handler
+  (`src/play/SeqRuntime.cpp`) + `getBank` must resolve the arg through the
+  slot list (clamp/drop on overflow, mirroring the engine's NULL-drop). A
+  corpus scan on `slotCount≥2 ∧ 0xB6 arg≥1` isolates exactly what changes;
+  the default-only majority stays byte-identical.
 
 ### Audio coverage
 
@@ -220,9 +232,11 @@ per stage. Status:
       coefficient values runtime-computed → sourced later via the 3GX tap
       (analog-free program) or a structured sweep over the recovered
       layout. Remaining to the fitted-coefficient milestone (~4–5
-      sessions): commit 2 — a dry click through AHBM-backed FCRAM captured
-      at the final mix (also answers route-a's final-mix readback
-      question); commit 3 — engage reverb via the recovered layout +
+      sessions): commit 2 — SHIPPED 2026-07-16 (17b3b25): a dry click
+      through AHBM-backed FCRAM captured at the final mix, unity gain
+      confirmed, and route-a answered **YES** (the firmware writes
+      `final_samples` back to ARM11-visible shared memory — analog-free
+      route a is live); commit 3 — engage reverb via the recovered layout +
       replay recipe; commit 4 — sweep the words, fit comb/allpass,
       validate against the New 3DS captures. The oracle stays out of
       caesar_core/CI — only fitted coefficients + a golden IR ship. **The
@@ -267,13 +281,19 @@ Hardware-RE queue (New 3DS + CFW, feeds stages 2–3):
       (NOT reversed; ±53 dB probe split), interface knob mismatch +0.045 dB
       (negligible), peaks -6.2 dBFS; slider and gain knobs now FROZEN (rig
       constants + plaza navigation path in the `capture-rig-calibration`
-      memory). Plan: build `tools/console-capture/` (FTP push to the
-      Luma path → HOME-menu launch → screenshot-verified navigation → record →
-      `console-tolerance` verdict, with a level/noise pre-flight (which also
-      re-applies the Rosalina volume-override pin — see the rig bullet below)
-      and a one-time NTR-streaming on/off A/B to prove streaming doesn't
-      perturb the audio), then run battery v2, the `0xB6` probe, and the
-      re-verification of the three filed stage-2 fixes through it. No memory
+      memory). **`tools/console-capture/` BUILT (offline, 26 tests green,
+      2026-07-16):** independently-callable stages — FTP push (hash-checked)
+      → HOME-menu launch → screenshot-verified navigation → ffmpeg record +
+      level/noise assertion → `console-tolerance` verdict, plus the Rosalina
+      volume-override re-apply hook and the one-time NTR on/off perturbation
+      A/B — reusing `n3ds-mcp` by import, exercised against the sims + a fake
+      ffmpeg/ftp. The ffmpeg dshow path, device presence and a −76 dBFS-RMS
+      quiet noise floor (both channels matched) were confirmed live
+      2026-07-16. **Open remainder = the live shakedown** + two live-nav
+      fill-ins: the Rosalina volume-override menu sequence + its chosen value
+      (→ a rig constant), and the HOME→plaza icon tap prefix — then run
+      battery v2, the (now-settled, see below) `0xB6` fix verification, and
+      re-verify the three filed stage-2 fixes through it. No memory
       read in v0 — and the classic-NTR read-mem idea is RETRACTED 2026-07-16
       (dead on current firmware per the n3ds-mcp research report); memory
       access routes through the analog-free program bullet below (3GX plugin
@@ -313,42 +333,39 @@ Hardware-RE queue (New 3DS + CFW, feeds stages 2–3):
          the audio callback. One artifact, three consumers (reverb IR fits,
          route-b replay, the route-a spike — the spike itself rides oracle
          commit 2).
-      2. **Route-a feasibility spike — console-free**: run the real
-         firmware under teakra with one minimal synthetic voice and watch
-         the shared region via `GetDspMemory()` — does the firmware write
-         the final mix (Azahar HLE's `final_samples` field) back to
-         ARM11-visible memory, or only feed BTDMP internally? Same
-         firmware code as the console, so the answer transfers; no Teak
-         disassembly unless it's "no". (Aux-bus `intermediate_mix`
-         readback exists for CPU-side game effects, so the mechanism is
-         proven in principle; the question is whether the FINAL mix gets
-         the same treatment.) If "no": route b's teakra render becomes the
-         digital ground-truth surface (validated against analog), and a
-         minimal DSP-firmware patch to export the mix (our cartridge
-         embeds its own firmware) stays a last-resort option.
-      3. **Console capture side = Luma 3GX game plugin**, NOT NTR
-         read-mem. Correction to the note above: per the n3ds-mcp research
-         report, classic-NTR memory reads are effectively dead on current
-         firmware (BootNTR abandoned Aug 2022, crashes on official Luma
-         via an SVC bug; NTR-HR deliberately removed the debugger
-         features). A small plugin copies the DSP shared-memory frame
-         state (per-voice SourceConfiguration + DspConfiguration, plus
-         `final_samples` if the spike says yes) to an SD ring each ~4.9 ms
-         audio frame. Official Luma has shipped the 3GX loader since
-         ~v10.3 (Rosalina → Plugin loader). One-shot register snapshots
-         (Surround Part B's `gain[3][4]`) can use the Rosalina GDB stub
-         meanwhile — all-stop is fine for a held-note snapshot.
-         **Placement (decided 2026-07-16): a caesar tool** in `tools/`
-         beside the capture cartridge — the dump format is a same-repo
-         contract with the replay/analysis readers, and correct capture is
-         DSP-protocol domain knowledge (the shared region is double-banked
-         by frame parity; snapshot the just-retired bank or voice state
-         tears). n3ds-mcp only deploys/toggles it (ftp + input, no new MCP
-         code); extract the generic transport into 3ds-mcp later only if a
-         non-caesar consumer appears. Build-time notes: devkitARM as an
-         optional toolchain (never caesar_core/CI), and check
-         CTRPluginFramework's GPL license vs a barebones 3gx; plugins are
-         per-title — MiiPlaza hosts both cartridge and tap.
+      2. [x] **Route-a feasibility spike — DONE 2026-07-16** (dsp_oracle
+         `--click`, commit 17b3b25; HISTORY): **YES** — the real firmware
+         writes the final mix back to the ARM11-visible `final_samples`
+         region (region-table[6], word 0x8540; `s16 pcm16[160][2]`, written
+         to the bank it is NOT currently reading). `final_region_peak ==
+         btdmp_peak` at every amplitude, silent at idle. Route a is live: a
+         3GX plugin can read `final_samples` from the just-retired bank each
+         ~4.9 ms frame for a bit-perfect digital console capture — no
+         line-in, no resampling. (The DSP-firmware-patch fallback is now
+         moot.)
+      3. **Console capture side = Luma 3GX game plugin** (`tools/dsp-tap/`
+         — scaffold + design landed 2026-07-16), NOT NTR read-mem
+         (classic-NTR reads are dead on current firmware). The plugin runs
+         *inside* MiiPlaza's process and reads the DSP shared memory
+         directly (DSP RAM already mapped via MiiPlaza's exheader at
+         0x1FF00000; data at 0x1FF40000 + W*2; **no `dsp::DSP`
+         session/`dspInit`** — that would unload the running firmware and
+         kill audio), snapshots the retired frame-parity bank (seqlock) and
+         streams per-voice `SourceConfiguration` + `DspConfiguration`
+         (+`SourceStatus`; `final_samples` now un-gated by route-a=YES,
+         still default-off pending on-device validation) to a 4 MiB
+         lock-free SD ring each ~4.9 ms frame. **License settled: barebones
+         `.3gx`, not CTRPluginFramework — CTRPF is NOT GPL as the roadmap
+         previously assumed but a bespoke source-availability license that
+         would form a non-GPL island in this GPLv3 repo; a barebones plugin
+         links only libctru (GPL-compatible).** Versioned dump-format
+         contract + mechanism in `tools/dsp-tap/DSP-TAP-DESIGN.md`.
+         One-shot register snapshots (Surround Part B's `gain[3][4]`) can
+         use the Rosalina GDB stub meanwhile. Remaining: first devkitARM
+         build + on-console bring-up (the plugin is uncompiled scaffold,
+         every device-dependent assumption marked VERIFY). devkitARM stays
+         optional, never in caesar_core/CI; n3ds-mcp only deploys/toggles
+         it; plugins are per-title — MiiPlaza hosts both cartridge and tap.
       4. **Replay harness**: dumped command stream → dsp_oracle → rendered
          WAV. What the matrix buys: a command-stream diff isolates "is
          caesar's ARM11 runtime model right?" (the stage-2 heart) from "is
@@ -369,34 +386,21 @@ Hardware-RE queue (New 3DS + CFW, feeds stages 2–3):
       the original repro track was release-127-sentinel and untouched by the
       fix. One A/B on a decay-table-using track closes the loop; also
       grounds stage 2's envelope solver.
-- [ ] **Stage-2 constant recalibration — apply the battery-capture findings**
-      (2026-07-14: the capture-cartridge session HAPPENED — both tracks
-      recorded and analyzed, full findings in HISTORY "battery captures".
-      Hardware-confirmed, no change: velocity `(vel/127)²`, equal-power pan
-      (byte-64 bias reproduced to 0.002 dB), vol/127 endpoint (residual
-      stays 1.5 dB, carried by the byte-64 capture), attack + the 4.889 ms
-      per-frame gain interpolation, clock 1.0000.) THREE measured fixes to
-      apply to `caesar_play`:
-      1. [x] **Envelope decay/release dynamics ×2** — FIXED 2026-07-15: the
-         missing ×2 was the decibel divisor (`gainFromValue` 10^(v/400) →
-         10^(v/200)), NOT the disasm-verbatim calcRelease rates; volume/
-         expression bytes now map to (v/127)², matching console + BASSMIDI
-         (SEQ_SD_BGM_RESULT kick-prominence A/B; full story in HISTORY).
-         Model decay now −188 dB/s vs console −174; the ~8% residual is a
-         battery-v2 refinement question, not a divisor candidate.
-      2. **Portamento: constant-rate, linear-in-cents** — 2.841 st/s at
-         time byte 48 (0.352 s/st, R²=0.99998); model is a fixed 0.5 s
-         full-distance glide (~17× too fast). Make duration
-         distance-proportional; the portaTime→rate LAW needs a 2nd capture
-         point (different interval or byte).
-      3. **LPF byte 48: corner ≈4.1 kHz @ ~6–7 dB/oct** vs model 2,890 Hz
-         2nd-order (×1.45 corner, soften toward 1-pole). Likely explains
-         the slide SE rendering ~9.5 dB quiet relative to the drums.
-      After applying: re-pin play-goldens, both BGM console-tolerance
-      captures must still PASS, ab-verify guard (converter untouched).
-      Filed anomalies: vel-96 hit reads ~1.2 dB low (single-point,
-      orthogonal to the law); **BANK_MEET_SE_MAIN's reverb send is ~0 —
-      the SE bank is genuinely dry on hardware** (useful stage-3 fact).
+- [x] **Stage-2 constant recalibration — DONE 2026-07-16.** All three
+      battery-capture fixes shipped, play-goldens re-pinned (+`lpf-slide`
+      witness), both BGM console-tolerance captures PASS, ab-verify converter
+      byte-identical (273,350 files). Narrative in HISTORY 2026-07-16.
+      1. [x] **Envelope decay/release ×2** — the /200 decibel divisor (`e058905`,
+         2026-07-15): bytes map to (v/127)².
+      2. [x] **Portamento constant-rate** — `aafb2f3`: duration `|distance|/rate`,
+         a provisional single-point law (byte 48 = 2.841 st/s, tempo-independent);
+         byte→rate shape + tempo-independence still need battery v2's 2nd point.
+      3. [x] **LPF byte 48** — `e0b8713`: 4.1 kHz + bilinear 1-pole; lifted
+         `SE_NEW_SLIDE_MAP` +5.7 dB RMS (drum unchanged); per-byte 187.5-cent
+         slope still unmeasured (battery v2).
+      Still open — filed anomalies: vel-96 reads ~1.2 dB low (single-point,
+      orthogonal to the law); **BANK_MEET_SE_MAIN's reverb send is ~0 — the SE
+      bank is genuinely dry on hardware** (useful stage-3 fact).
 - [ ] **Battery v2 — the four still-open constants** (one more capture
       session; open the battery with a fixed pilot/reference note for
       per-channel session normalization — see the rig bullet above):
@@ -414,15 +418,16 @@ Hardware-RE queue (New 3DS + CFW, feeds stages 2–3):
       Same-area UX nit: `caesar-play --list` loads each entry's INFO
       volume byte but doesn't print it — add a volume column to `doList`
       on the next player touch-up (output-identical elsewhere).
-      **Open semantics question (2026-07-14, first cartridge went silent):**
-      `0xB6`'s argument — global CbnkRecords index (caesar's reading, in the
-      player AND the convert-time bank handling) vs an index into the
-      sound's up-to-4 INFO bank SLOTS (caesar parses only slot 0). All
-      corpus data seen so far fits both readings; the silent battery is
-      weak evidence FOR slot semantics. Settle via a dedicated cartridge
-      probe or code.bin disasm of the 0xB6 handler; if slot wins, the
-      player/VM bank plumbing and the INFO parser (read all 4 slots) both
-      change.
+      **Semantics question — RESOLVED 2026-07-16 (disasm; HISTORY +
+      NW4C-disasm-handoff Session 6):** `0xB6`'s argument is a **SLOT index
+      into the sound's own INFO bank slots** (MeetSound caps at 2), NOT a
+      global CbnkRecords index. Default 0 = slot 0 = the sound's primary
+      bank, which is why corpus data fit both. This exactly explains the
+      silent battery (the SE stream selected an empty slot on a
+      single-bank BGM host → NULL → note dropped), so the slot-vs-global
+      battery diagnostic is retired. The fix is filed under the converter
+      `0xB6` bullet above (INFO multi-slot parse + player/VM slot indexing);
+      the battery need not carry `0xB6` to settle anything now.
 
 ## Settled decisions & standing rules
 

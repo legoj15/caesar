@@ -32,6 +32,23 @@ House rules:
   committed) through the LLE boot/pipe protocol to the audio callback, capturing
   the final stereo mix as WAV. Its own standalone CMake tree — never part of the
   main build or CI. Output-identical: no converter or player code touched.
+- **`dsp_oracle --click` (stage-3 commit 2)** renders one dry PCM16 source
+  through the real DSP firmware and captures it at the final mix, and answers
+  route-a: the firmware **does** write the final mix back to the ARM11-visible
+  `final_samples` region (word 0x8540) — region peak equals DAC peak at every
+  amplitude. New `dsp_oracle_config_smoke` target. Offline measuring instrument
+  only, out of caesar_core and CI; output-identical.
+- **`tools/console-capture/` — hands-free New-3DS audio capture harness.**
+  Independently-callable stages (preflight / deploy / navigate / record /
+  verdict / perturbation-A-B) reusing `n3ds-mcp` by import; 26 offline tests
+  against the simulators + a fake ffmpeg/ftp. Offline dev tooling only,
+  output-identical (no caesar output type changes).
+- **`tools/dsp-tap/` — Luma 3GX DSP shared-memory tap (scaffold + design).**
+  Route-b console-capture side of the analog-free program: a barebones `.3gx`
+  (not CTRPluginFramework — that is not GPL-compatible with this repo) that
+  streams per-frame DSP config to an SD ring; versioned dump-format contract in
+  `DSP-TAP-DESIGN.md`. Uncompiled scaffold, optional devkitARM, never in
+  caesar_core/CI; output-identical.
 - **`caesar-play --list` now prints each entry's INFO volume byte.** The list
   already loaded the per-sound volume byte but never showed it; `doList` gains
   a `vol` column between `start` and `name`. Output-identical everywhere else

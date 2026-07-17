@@ -5061,3 +5061,155 @@ three consumers) is delivered. Next: commit 2 — one synthetic source playing a
 click through AHBM-backed FCRAM, captured dry at the final mix (which also
 answers route-a's `final_samples` readback question), then commit 3 — engage
 reverb via the recovered layout.
+
+## Suite stage 3 — commit 2: a dry click through the firmware, and route-a answered YES (2026-07-16)
+
+The second stage-3 code commit, exactly as scoped by PORT-NOTES §6: feed one
+minimal synthetic voice through the real MiiPlaza firmware under teakra, capture
+it at the final mix, and settle the route-a feasibility question for the
+analog-free capture program.
+
+**The dry click (`--click`).** One PCM16-mono source: enable=1, unity gain to the
+MAIN mixer's front L/R (gain[0][0]=gain[0][1]=1.0; the aux/effect buses gain[1]/
+gain[2] stay 0 so nothing routes to reverb), rate_multiplier=1.0, interpolation
+None (no SRC), an embedded buffer pointing at a `--click-len`-sample pulse of
+`--click-amp` placed in AHBM-backed FCRAM (physical_address = 0x20008000). The
+192-byte SourceConfiguration and a minimal 196-byte DspConfiguration
+(master_volume=1.0, Stereo, aux buses disabled) are built byte-for-byte in
+shared_mem.h with every field offset, dirty bit and the u32_dsp middle-endian
+encoding cited line-level from Azahar's shared_memory.h. They are written into
+the SAME double-buffer bank whose frame counter is about to be bumped
+(buffer_cur_id; region-1 word = region-0 word | 0x10000), on ONE trigger frame
+with the dirty bits set — so the DSP reads them that frame and clears the mask;
+no re-assert, so a single clean click, not one per frame.
+
+Measured: input amp A -> DAC peak A-1 (a consistent -1-LSB fixed-point
+truncation; linear and unity otherwise) across A in {2000, 8192, 16000, 32000}.
+A 64-sample click yields exactly 64 contiguous non-zero output pairs, L==R,
+silence everywhere else, 0 underruns, exit 0. The DSP DMA fetches the buffer over
+AHBM (ahbm_reads 0 -> 32; dma.cpp SrcSpace 7 -> ahbm.Read16/32). Onset latency
+trigger->DAC is ~326 samples (~10 ms) — the DSP-mix + BTDMP-FIFO pipeline depth,
+noted for commit-3/4 IR alignment. This also settles commit-1's open question:
+the counter-bump + SetSemaphore(0x2000) "full" duty is what makes the DSP consume
+NEW SourceConfiguration — the click renders only under full.
+
+**Route a — YES.** Question: besides feeding the DAC (BTDMP), does the firmware
+also write the final mix back into ARM11-visible shared memory (Azahar HLE
+final_samples, region-table[6])? Method: snapshot BOTH banks of that region via
+GetDspMemory() every DSP frame (region-0 word 0x8540 -> byte 0x50A80; region-1 ->
+0x70A80; FinalMixSamples = s16 pcm16[160][2], 640 B, plain LE) and compare its
+peak to the DAC peak. Result: the region carries the click at the SAME amplitude
+as the DAC at every level (final_region_peak == btdmp_peak: 1999/1999, 8191/8191,
+15999/15999, 31999/31999), is silent in every frame except the ~2 the click spans
+(2 of 203), and is all-zero at idle. The DSP writes the mix into the bank it is
+NOT currently reading (observed bank 0 — the double-buffer "results into the other
+bank" rule), so both banks must be scanned. This confirms behaviourally, on the
+real firmware, what Citra's HLE only comments ("Final mixed output ... what you
+hear out of the speakers"). Route a of the analog-free capture program is now
+live: a Luma 3GX plugin can read final_samples from the just-retired bank each
+~4.9 ms frame for a bit-perfect digital console capture — no line-in, no
+resampling. Commit 3/4 (reverb) will read the SAME region, so the wet tail is
+capturable the same way.
+
+**Verification.** New dsp_oracle_config_smoke asserts the config byte-offsets and
+u32_dsp middle-endian without firmware (OK, exit 0); the teakra liveness smoke
+still passes; the idle capture is byte-identical to commit 1 (the idle path is
+untouched — all new behaviour is gated behind --click). Nothing outside
+tools/dsp-oracle/ was touched. Original caesar code; Azahar shared_memory.h used
+as protocol documentation only, cited line-level in src/shared_mem.h and
+src/PORT-NOTES.md §6. Committed 17b3b25. Next: commit 3 — engage reverb via the
+recovered 26-word ReverbEffect layout (replay the known-good config first, then
+sweep), capturing the wet tail from the same final_samples path.
+
+## Stage-2 constant recalibration — portamento + LPF (2026-07-16)
+
+The two remaining battery-capture fixes landed as player-only commits (`aafb2f3`,
+`e0b8713`), each gated on a warning-clean Release build, play-goldens re-pin, both
+New 3DS BGM console-tolerance captures PASS, and (once, after both) an ab-verify
+converter A/B byte-identical over 273,350 files.
+
+**Portamento** (`aafb2f3`): the `0xCF` glide was a fixed full-distance glide over
+`portaTime × samplesPerTick` (distance-independent, ~17× too fast). The battery
+measured a constant-rate, linear-in-cents glide of 2.841 st/s at time byte 48
+(0.352 s/semitone, R²=0.99998). Duration is now `|distance|/rate`; `glideOffset`
+was already linear so its trajectory was already correct. The `portaTime→rate`
+law is a provisional single-point fit — seconds-per-semitone linear in the time
+byte (rate ∝ 1/byte), anchored at byte 48, tempo-independent — chosen as the
+minimal reanchor of the old "duration ∝ portaTime" shape. Byte 0 stays instant.
+Effect unverified on a concrete corpus render (no stock portamento sequence
+identified; the golden set and both BGM captures don't glide) — battery v2's
+portamento SE capture closes this.
+
+**LPF** (`e0b8713`): the `0xD8` filter was an RBJ 2nd-order biquad at byte 48 =
+2,890 Hz / 12 dB/oct. The battery measured byte 48 ≈ 4.1 kHz with a ~6–7 dB/oct
+(1-pole) slope. The byte→corner curve was re-anchored on the measured point
+(187.5-cents/unit slope kept, flagged) and the topology switched to a
+bilinear-transform 1-pole reusing the biquad state (`b2 = a2 = 0`). Old-vs-new
+render measurement: `SE_NEW_SLIDE_MAP` +5.69 dB RMS / +4.83 dB peak,
+`SE_NEW_DRUM01` (no LPF) unchanged 0.00 dB — the slide-vs-drum gap closed from
+−13.31 to −7.62 dB (RMS). A new `lpf-slide` play-goldens witness now pins the LPF
+(it had no deterministic-net coverage before). The `--list` volume column shipped
+alongside as `eea57c1` (output-identical).
+
+## Console-capture harness built (2026-07-16)
+
+`tools/console-capture/` is the hands-free New-3DS audio capture pipeline the
+roadmap has wanted: independently-callable stages — preflight (ftpd + NTR health;
+Rosalina volume-override re-apply hook), deploy (ftp_put → ftp_get → sha256
+compare), navigate (data-driven plaza path with a pluggable screen-verifier),
+record (ffmpeg/dshow N passes → level/noise assertion: peak window, min-window
+noise floor, both channels present, loud fail on clip/silence), verdict (shells
+`console-tolerance`), and a one-shot NTR-on/off perturbation A/B. It reuses
+`n3ds-mcp` by import (no code copied) and runs entirely against the 3ds-mcp
+simulators + a fake ffmpeg/ftp in tests — 26 offline tests green. The exact
+capture command settled on is `ffmpeg -f dshow -i audio=<Focusrite> -t <s> -ac 2
+-ar 48000 -c:a pcm_s16le`, argv-list (device-name spaces safe). Offline dev
+tooling only; no caesar output touched. Open remainder = the live shakedown +
+two live-nav fill-ins (the Rosalina volume-override menu sequence + its chosen
+value → a rig constant; the HOME→plaza icon tap prefix). The ffmpeg dshow path,
+device presence, and a −76 dBFS-RMS quiet-environment noise floor with both
+channels matched were confirmed live on 2026-07-16 (rig healthy, cable connected).
+
+## 3GX DSP-tap plugin — scaffold + license verdict (2026-07-16)
+
+`tools/dsp-tap/` scaffolds the route-b console-capture side of the analog-free
+program: a Luma 3GX plugin that runs *inside* MiiPlaza's process, reads the DSP
+shared memory directly (DSP RAM already mapped at 0x1FF00000 via MiiPlaza's
+exheader; data at 0x1FF40000 + W*2; NO `dsp::DSP` session/`dspInit`, which would
+unload the running firmware and kill audio), snapshots the retired frame-parity
+bank (seqlock: read counter, copy, re-read, reject tears), and streams per-voice
+`SourceConfiguration` + `DspConfiguration` (+ `SourceStatus`; `final_samples`
+gated on route-a, now YES) to a 4 MiB lock-free SPSC SD ring each ~4.9 ms frame.
+**License verdict: barebones `.3gx`, not CTRPluginFramework** — the roadmap's
+premise was factually wrong in a load-bearing way: CTRPF is NOT GPL but a bespoke
+source-availability license, which under caesar's GPLv3 (GPLv3 §7 forbids added
+restrictions) would form a non-GPL licensing island in the repo. A barebones 3gx
+links only libctru (permissive/GPL-compatible), mirrors the teakra/MIT quarantine
+discipline, and is right-sized for a headless tap. A versioned dump-format
+contract (128-B header magic `DSPTAP01` binding firmware SHA + geometry; per-frame
+records 5108 B, or 5748 B with final_samples) is the same-repo contract with the
+future replay reader. devkitARM is an optional toolchain (detected, skips cleanly
+if absent), never in caesar_core/CI. Uncompiled scaffold — every device-dependent
+assumption is marked VERIFY (libctru link, barebones `_start`, `.plgInfo` keys,
+the 0x1FF40000+W*2 read not faulting, frame budget under SD latency). Full design
+in `tools/dsp-tap/DSP-TAP-DESIGN.md`.
+
+## 0xB6 bank-select — CONFIRMED-SLOT (2026-07-16)
+
+Disassembly of MiiPlaza's `code.bin` (base title, SDK-5.2, load base 0x00100000)
+settled the long-open `0xB6` semantics: the argument is a **slot index into the
+sound's own INFO bank slots** (MeetSound caps at 2), not a global `CbnkRecords`
+index. Byte-traced end to end: `CommandProc` 0xB6 arm (0x2E3390) stores the raw
+byte to `SeqTrack[+0x4D]`; `InitParam` (0x192028) zeroes it (default 0 = slot 0 =
+the sound's primary bank — which is why corpus data fit both readings); `NoteOn`
+(0x191BD0) reads it and dispatches through `[player+0x78]->vtable[2]`; the
+player's banks are a per-sound slot array loaded by `SeqPlayer::Setup` (0x193EB8)
+from the sound's own INFO (`StartInfo[+0x14 + i*0x30]`, count `[innerSeqPlayer+8]`,
+filled by bound-checked `GetBankRef`), capped at 2 slots for this build. No global
+bank table is consulted on the note-on path. This exactly predicts the silent
+`0xB6` battery (a BGM host with one bank kept the SE's stream selecting slot ≥1 →
+empty slot → NULL → note dropped), retiring the slot-vs-global battery diagnostic.
+caesar's current global reading is wrong for any sound with ≥2 bank slots that
+issues `0xB6 arg≥1`; the scoped fix (INFO parser reads all slots; player/VM treats
+the arg as a slot index) is filed in the roadmap and detailed in
+NW4C-disasm-handoff Session 6.

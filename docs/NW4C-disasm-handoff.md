@@ -507,6 +507,148 @@ recipe + analysis scripts: the stage-3 session records (HISTORY 2026-07-16).
 
 ---
 
+## Session 6 (2026-07-16) — the `0xB6` bank-select verdict: **CONFIRMED-SLOT**
+
+The open semantics question (ROADMAP battery-v2 bullet): is `0xB6 <arg>`'s argument a **global**
+index into the archive's `CbnkRecords`/INFO bank table (caesar's current reading, in both the
+player and convert-time handling), or an index into the **sound's own up-to-N INFO bank SLOTS**
+(caesar parses only slot 0)? **It is a SLOT index.** High confidence — the whole chain from the
+opcode handler to the per-sound bank array was byte-traced this session (capstone-only, gap-tolerant
+disassembly of MiiPlaza `code.bin`, load base `0x00100000`; the base title's SDK-5.2 MeetSound
+build, same binary as sessions 1–5). caesar's global reading is wrong the moment a track issues
+`0xB6` with `arg >= 1` on a sound that declares more than one bank.
+
+### Why the corpus couldn't tell them apart
+
+The `0xB6` argument's **default is 0** (`SeqTrack::InitParam` @ `0x192028` does
+`strb r5(=0), [track+0x4D]`), and slot 0 **is** the sound's primary bank — exactly the single bank
+id caesar reads from the SEQ INFO today. So for every sequence that never issues `0xB6`, or issues
+it only with `arg 0`, the slot reading and the global reading coincide. They diverge only when a
+track selects `arg >= 1` **and** the sound's INFO declares a second bank: caesar fetches global
+`CbnkRecords[arg]` (an unrelated archive bank → wrong instrument), where the engine fetches the
+sound's own bank **slot** `arg`.
+
+### The evidence chain (all byte-verified, `[self]`-re-disassembled)
+
+1. **The opcode just stashes a raw byte.** `MmlParser::CommandProc` (`0x2E32D4`; the dispatcher
+   from Session 4) resolves `r4 = track + 0x1C` (`0x2E32EC`) and `r0 = arg & 0xFF` (`r7 = arg`,
+   `0x2E32DC`/`0x2E32FC`). The `0xB6` arm is two instructions:
+   ```
+   0x2E3390  cmp   r2, #0xb6
+   0x2E3394  strbeq r0, [r4, #0x31]     ; SeqTrack[+0x4D] = arg & 0xFF   (the "bankNo" field)
+   0x2E3398  beq   0x2E3368             ; -> return
+   ```
+   No indexing, no bounds check at store time — it is a plain per-track byte. (Program-change `0x81`
+   is the neighbour: `0x2E3520` stores a u16 prgNo to `SeqTrack[+0x50]`.)
+
+2. **Note-on reads that byte and hands it to the resolver.** The note path in `MmlParser::Parse`
+   (`0x2E3B80`) virtual-calls `driver->vtable[1]` (thunk `0x2E3B44`) → the real
+   `SeqTrack::NoteOn` at **`0x191BD0`**. There:
+   ```
+   0x191CCC  ldr   r0, [r6, #0x50]      ; prgNo (into the note-on param block at sp)
+   0x191D00  ldrb  r1, [r6, #0x4d]      ; bankNo  (r6 = SeqTrack)
+   0x191D04  ldr   r0, [r6, #0xc0]      ; player  (SeqTrack[+0xC0] = owning player)
+   0x191D08  bl    0x1937EC            ; resolve -> returns a Channel (r5), or NULL -> note dropped
+   ```
+   `SeqTrack[+0xC0] = player` is corroborated by `CommandProc` (`ldr sb,[r1,#0xc0]`) and by the
+   track-attach helper `0x193A8C` (`str player, [track+0xC0]`).
+
+3. **The resolver dispatches to the per-sound note-on callback.** `0x1937EC` is a thin tailcall:
+   ```
+   ldr r0,[player+0x78]   ; the note-on callback (a per-sound object)
+   ldr r1,[r0]            ; its vtable
+   ldr r4,[r1,#8]         ; vtable[2]
+   ; -> callback->vtable[2](this=callback, r1=player, r2=bankNo, r3=paramBlock)
+   ```
+   So the argument reaches the callback as an integer `bankNo`. The callback lives at
+   `player+0x78`.
+
+4. **The player's banks are a PER-SOUND slot array, populated from the sound's own INFO.**
+   `SeqPlayer::Setup` (`0x193EB8`) sets `player+0x78 = StartInfo[+0xC]` (the callback) and then runs
+   the decisive copy loop:
+   ```
+   0x193EF0  ldr r0,[player+0x134]      ; the inner SeqPlayer
+   0x193EF8  ldr r0,[r0,#8]             ; numBanks  (a per-sound count)
+   ; for i in [0, numBanks):
+   0x193F18  ldr sl,[StartInfo + i*0x30 + 0x14]   ; the i-th resolved bank pointer (from the sound)
+   0x193F98  str sl,[player + i*0x30]             ; -> player bank SLOT i
+   ```
+   The `StartInfo` bank slots themselves are filled by the start-info builder `0x2E1F6C` from the
+   sound's **own** bank-reference table: it loops `i in [0, [accessor+0x14])` (the sound's declared
+   bank count) calling the bound-checked accessor `GetBankRef(i)` (`0x2E45EC`:
+   `cmp index, count; movls r0,#0` → NULL past the end) and stores each resolved bank into
+   `StartInfo + i*0x30 + 0x14`. This build **caps the stored slots at 2** (`0x2E1FDC cmp r4,#2`),
+   i.e. MeetSound (SDK 5.2) sequence sounds carry up to **2** banks; the format's field is wider
+   ("up to 4"), later SDKs may populate more, but the count is always data-driven from the INFO.
+
+5. **No global bank table is ever consulted on the note-on path.** Every bank the note-on can reach
+   was loaded into this player's slots from *this sound's* INFO. There is no archive-wide
+   `CbnkRecords`-style array indexed by a note-on `bankNo` anywhere in the chain. Ergo the argument
+   is a slot index into the sound's ≤N loaded banks. **CONFIRMED-SLOT.**
+
+### This also explains the silent `0xB6` battery — retire the diagnostic
+
+The `slot-vs-global open` battery diagnostic (`capture-cartridge/README.md`, "Why two tracks / no
+`0xB6`") is now settled by the disasm, not needed as a probe. Under slot semantics the silent
+battery is exactly the expected outcome: the cartridge hijacked a **BGM** INFO entry (which loads a
+single bank into slot 0) but kept the **SE's** command stream, whose `0xB6` selects slot `>= 1`.
+`GetBankRef`/the player slot for an index past the hijacked entry's `numBanks` returns NULL →
+`NoteOn`'s `0x1937EC` returns NULL (`0x191D0C movs r5,r0; beq bail`) → the note is dropped → silence.
+(The competing "global index at an unloaded bank" story predicts the same silence, which is why the
+battery was only ever weak evidence; the disasm is the decider.)
+
+### Key addresses (MiiPlaza `code.bin`, base `0x00100000`)
+
+| vaddr | what |
+|---|---|
+| `0x2E3390`–`0x2E3398` | `0xB6` handler: `strb (arg&0xFF) -> SeqTrack[+0x4D]` (bankNo), then return |
+| `0x2E32EC` | `CommandProc` sets `r4 = SeqTrack + 0x1C` (so `+0x31` = track `+0x4D`) |
+| `0x192028` | `SeqTrack::InitParam`: `strb 0 -> [+0x4D]` — **default bankNo = 0 = slot 0** |
+| `0x2E3520` | `0x81` prg-change: `str prgNo(u16) -> SeqTrack[+0x50]` (the sibling field) |
+| `0x191BD0` | `SeqTrack::NoteOn`: reads `[+0x4D]` bankNo, `[+0x50]` prgNo, `[+0xC0]` player |
+| `0x191D00`–`0x191D08` | the load of bankNo + the `bl 0x1937EC` resolve call |
+| `0x1937EC` | resolver: tailcall `[player+0x78]->vtable[2](player, bankNo, param)` |
+| `0x193EB8` | `SeqPlayer::Setup`: copies `numBanks` bank ptrs from `StartInfo` into player slots (`+i*0x30`) |
+| `0x193EF8` | `numBanks = [innerSeqPlayer+8]` — the per-sound bank count (loop bound) |
+| `0x2E1F6C` | start-info builder: loads the sound's bank refs into `StartInfo[+0x14 + i*0x30]`, cap 2 |
+| `0x2E45EC` | `GetBankRef(i)`: bound-checked (`index >= count → NULL`) accessor over the sound's bank table |
+| `0x1937EC`+`0x78` | player field `+0x78` = the note-on callback; `+0x134` = inner SeqPlayer (banks `+0`, count `+8`) |
+
+SeqTrack fields recovered here: bankNo `+0x4D`, prgNo(u16) `+0x50`, player back-ptr `+0xC0`;
+TrackParam sub-block base `+0x1C`. Offsets are MeetSound SDK-5.2; logic is SDK-invariant.
+
+### What must change in caesar if we act on this (SLOT wins) — scoped, not implemented
+
+Two edits, plus the convert-time cosmetic. The INFO parser and the player bank plumbing are the
+substance; both are load-bearing because the *default* already coincides, so only multi-bank sounds
+with `0xB6 arg>=1` are currently mis-rendered.
+
+- **INFO parser — read all bank slots, not just slot 0.** `src/Csar.cpp` (`ParseInfo`, the CSEQ
+  record loop ~L423-446) currently reads a *single* bank at the bank-reference sub-structure:
+  `pos += cseq.CbnkOffset; cseq.BankIndex = Ctx.ReadFixLen(pos, 2);`. The sub-structure is a table
+  of up to 4 bank `ItemId`s (the engine's `GetBankRef(i)` walks a counted array). Parse the count
+  and read each slot's `ItemId` into a small `std::vector<uint32_t> BankSlots` (resolve each `ItemId`
+  → `CbnkRecords` index the same way the current single read does). Keep `BankIndex` = slot 0 for
+  back-compat / default. (`CseqRecord` in `src/Csar.hpp` gains the vector.)
+- **Player/VM bank plumbing — treat `0xB6` as a slot index.** `src/play/SeqRuntime.cpp`: the `0xB6`
+  handler (~L1143) does `t.bankIndex = v;` treating `v` as a global `CbnkRecords` index, and
+  `getBank(arch, ev.bankIndex)` (`src/play/CaesarPlay.hpp`/`.cpp`) looks it up globally. Change so
+  the `0xB6` argument selects `arch.bankSlots[v]` (the per-sound slot list parsed above), i.e. store
+  the *resolved* `CbnkRecords` index for slot `v`, or clamp/drop when `v >= slotCount` (mirroring the
+  engine's `GetBankRef` NULL → note-dropped). `LoadedArchive`/`SequenceInfo` need to carry the
+  slot list (populate from the new `CseqRecord::BankSlots`). `defaultBankIndex` stays = slot 0.
+- **Convert-time `0xB6` (cosmetic).** `src/Cseq.cpp` (~L1697) still just warns "mid-sequence bank
+  select not implemented". If/when it emits CC0, the slot index must be mapped through the sound's
+  slot list to the resolved bank before co-designing CC0 with Cbnk's SF2 bank layout — do not emit
+  the raw `0xB6` arg as a bank number.
+
+Gate: this changes player output (and eventually `.mid`/SF2). Verify with the multi-bank sounds
+first (a corpus scan for entries whose SEQ INFO declares `slotCount >= 2` **and** whose sequence
+contains a `0xB6 arg>=1` finds the sounds that actually change); the vast default-only majority stays
+byte-identical.
+
+---
+
 ## Why the RE stops here — *for the SF2/MIDI exporter only*
 
 > **Scope correction (2026-07-09, later the same day).** Everything in this section is correct

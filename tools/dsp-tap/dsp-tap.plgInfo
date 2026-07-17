@@ -1,0 +1,24 @@
+# dsp-tap.plgInfo — metadata 3gxtool bakes into the .3gx header (_3gx_Infos +
+# _3gx_Targets). Field set/format follows PabloMK7/3gxtool; VERIFY exact keys
+# against the installed 3gxtool version before the first build.
+#
+# The Targets list restricts the plugin to MiiPlaza so the loader only injects it
+# there (belt-and-suspenders with the per-Title-ID install folder).
+
+Author: caesar
+Title: caesar DSP tap
+Summary: Streams DSP shared-memory frame state to SD
+Description: Headless capture plugin for the analog-free program (route-b). Copies
+ per-voice SourceConfiguration + DspConfiguration each audio frame to
+ /luma/plugins/<TitleID>/dsptap.bin for offline replay through dsp_oracle.
+
+# Title IDs this plugin is allowed to load into.
+Targets:
+  - 0004001000021800   # StreetPass Mii Plaza (US/EU/JP share this in practice; VERIFY per-region)
+
+# Flags (VERIFY names/semantics against 3gxtool): the tap manages its own
+# threads/events and needs no game swap-out.
+Flags:
+  EventsSelfManaged: true
+  SwapNotNeeded: true
+  MemoryRegionSize: 5    # MiB; ring (4) + code/stacks headroom. VERIFY enum units.

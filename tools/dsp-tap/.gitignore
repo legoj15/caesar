@@ -1,0 +1,5 @@
+# dsp-tap build artifacts (devkitARM output — never committed)
+build/
+*.3gx
+*.elf
+*.o
