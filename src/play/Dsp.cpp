@@ -33,11 +33,18 @@ namespace play
 
 		// --- The voice low-pass filter (C10, 0xD8 / 0xB4 / 0xB5) ------------------
 		//
-		// The disasm doc records NO filter topology, so this is a standard RBJ
-		// low-pass BIQUAD (Butterworth Q, FLAGGED). The 0xD8 cutoff byte follows the
-		// converter's model: 64 = fully open (no filtering), below it the cutoff drops
-		// 187.5 cents/unit, and the engine clamps the cutoff scale to [0,1] of Nyquist.
-		// Returns false (no filtering) at/above the open point.
+		// The disasm doc records NO filter topology. The console battery (2026-07-14)
+		// measured the 0xD8 filter at time byte 48: corner ~4.1 kHz with a ~6-7 dB/oct
+		// slope (a 1-POLE filter). This is therefore a bilinear-transform 1-pole
+		// low-pass -- NOT the earlier RBJ 2nd-order biquad, which placed byte 48 at
+		// 2,890 Hz with a 12 dB/oct slope (half an octave too dark AND twice too steep).
+		// The byte->corner curve is re-anchored on the measured point (byte 48 =
+		// 4.1 kHz) and keeps the converter's 187.5-cents/unit slope (UNMEASURED off
+		// byte 48, FLAGGED for battery v2); 64 = fully open (no filtering). The state is
+		// still the 5-coefficient Biquad with b2 = a2 = 0, so the render loop is unchanged.
+		constexpr double kLpfNyquistHz = static_cast<double>(kNativeRate) / 2.0;  // 16,364 Hz
+		constexpr double kLpfByte48Hz = 4100.0;   // console-measured corner @ byte 48 (battery 2026-07-14)
+
 		struct Biquad { double b0, b1, b2, a1, a2; };
 
 		bool lpfBiquad(float cutoffByte, Biquad& q)
@@ -49,22 +56,24 @@ namespace play
 
 			float c = cutoffByte < 0.0f ? 0.0f : cutoffByte;
 
-			// 187.5 cents per unit below the open point; the result is a fraction of
-			// Nyquist, clamped to (0, 1].
-			double octaves = (c - 64.0) * 187.5 / 1200.0;
-			double frac = pow(2.0, octaves);      // c=63 -> ~0.90, c=0 -> ~1/1024
+			// 187.5 cents/unit around the measured byte-48 anchor; the corner is a
+			// fraction of Nyquist, clamped to (0, 1].
+			double octaves = (c - 48.0) * 187.5 / 1200.0;
+			double frac = (kLpfByte48Hz / kLpfNyquistHz) * pow(2.0, octaves);
 			frac = frac < 1e-4 ? 1e-4 : (frac > 0.999 ? 0.999 : frac);
 
+			// 1-pole (6 dB/oct) low-pass via the bilinear transform, prewarped so the
+			// -3 dB point lands on the corner. y[n] = b0*x[n] + b1*x[n-1] - a1*y[n-1]
+			// (b2 = a2 = 0), exactly what the biquad difference equation below computes.
 			double w0 = kPi * frac;                // = 2*pi*(frac*Nyquist)/rate
-			double cw = cos(w0), sw = sin(w0);
-			double alpha = sw / (2.0 * 0.70710678);   // Q = 1/sqrt(2)
+			double k = tan(w0 / 2.0);
+			double norm = 1.0 / (k + 1.0);
 
-			double a0 = 1.0 + alpha;
-			q.b0 = (1.0 - cw) / 2.0 / a0;
-			q.b1 = (1.0 - cw) / a0;
-			q.b2 = q.b0;
-			q.a1 = (-2.0 * cw) / a0;
-			q.a2 = (1.0 - alpha) / a0;
+			q.b0 = k * norm;
+			q.b1 = k * norm;
+			q.b2 = 0.0;
+			q.a1 = (k - 1.0) * norm;
+			q.a2 = 0.0;
 
 			return true;
 		}

@@ -35,6 +35,19 @@ House rules:
 
 ### Fixed
 
+- **`caesar-play` — the voice low-pass filter is retuned and softened to
+  1-pole.** The `0xD8` LPF was an RBJ 2nd-order biquad placing byte 48 at
+  2,890 Hz with a 12 dB/oct slope. The console battery (2026-07-14) measured
+  byte 48 at **≈4.1 kHz with a ~6–7 dB/oct (1-pole) slope** — half an octave
+  too dark and twice too steep. The byte→corner curve is re-anchored on the
+  measured point (byte 48 = 4.1 kHz, the 187.5-cents/unit slope kept and
+  flagged for battery v2) and the topology is now a bilinear-transform 1-pole
+  low-pass (reusing the biquad state with `b2 = a2 = 0`). This lifts the
+  LPF'd `SE_NEW_SLIDE_MAP` **+5.7 dB RMS (+4.8 dB peak)** while the unfiltered
+  `SE_NEW_DRUM01` is unchanged (0.0 dB), closing most of the battery-A finding
+  that the slide rendered quiet relative to the drums. Changes `caesar-play` `.wav` renders only; converter
+  outputs identical (play-goldens re-pinned; both New 3DS console-tolerance
+  captures PASS).
 - **`caesar-play` — portamento is now a constant-rate, distance-proportional
   glide.** The `0xCF` glide was a fixed full-distance glide over
   `portaTime × samplesPerTick` (distance-independent, ~17× too fast on the

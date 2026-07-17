@@ -211,6 +211,13 @@ $Invocations = @(
     # notes (0 dropped) against the correct target banks -- where without them notes
     # drop (SEQ_M_ZUKAN_TEST_NG1: 12/12 dropped -> 0 once the switch loads its bank).
     @{ Name = 'bank-blackboard'; Mode = '--render'; Source = 'sounddata1'; Seq = 'SEQ_M_BLACKBOARD1';       Rate = 48000; MaxSeconds = 20;  ExpectExit = 0 }
+
+    # C10 — the LPF witness. SE_NEW_SLIDE_MAP is a monophonic slide SE that rides the
+    # 0xD8 voice low-pass, so its render pins BOTH the byte->corner mapping and the
+    # 1-pole topology (console battery 2026-07-14: byte 48 ~= 4.1 kHz, ~6-7 dB/oct).
+    # SE_NEW_DRUM01 in the same bank carries no LPF, so this render isolates the filter
+    # (the LPF retune lifted this SE +5.7 dB RMS while the drum was unchanged).
+    @{ Name = 'lpf-slide';      Mode = '--render'; Source = 'meetsound'; Seq = 'SE_NEW_SLIDE_MAP';         Rate = 48000; MaxSeconds = 15;  ExpectExit = 0 }
 )
 
 # ---------------------------------------------------------------------------
