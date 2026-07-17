@@ -401,9 +401,24 @@ Hardware-RE queue (New 3DS + CFW, feeds stages 2–3):
       Still open — filed anomalies: vel-96 reads ~1.2 dB low (single-point,
       orthogonal to the law); **BANK_MEET_SE_MAIN's reverb send is ~0 — the SE
       bank is genuinely dry on hardware** (useful stage-3 fact).
-- [ ] **Battery v2 — the four still-open constants** (one more capture
-      session; open the battery with a fixed pilot/reference note for
-      per-channel session normalization — see the rig bullet above):
+- [ ] **Battery v2 — the four still-open constants.** **Cartridge BUILT +
+      gated 2026-07-16** (`tools/capture-cartridge/build_cartridge_v2.py` +
+      `build-cartridge-v2.ps1` + `check_prediction_v2.py`; run-sheet in the
+      tool README, predictions on the recalibrated player). All-crafted probes
+      on the banks' shared prog-23 loop (pilot/sustain/release/decay/reverb/
+      pan/LPF/velocity/steal) + LEGEND prog-9 C4 tone (vibrato/portamento);
+      pilot tone `81 17 3C 7F 60` at tick 0 on both tracks. Track A (SE_MAIN,
+      36.1 s/pass), track B (LEGEND, 85.8 s/pass). Gate green: round-trip
+      byte-identical (78/0), both recalibrated renders, schedule checks, steal
+      24/24 +6 stolen. **Awaiting the capture session** (runs through
+      `tools/console-capture/`). Open risk: B1/B2/B1r use `0xD1/0xD3/0xD9`
+      sequence overrides (no MeetSound instrument has a non-127 release),
+      untested in the BGM-player path — a console instant-cut where the
+      prediction slopes is itself the answer. v3 owes: portamento
+      tempo-independence (item 5c, needs a tempo-aware assembler). Original
+      per-constant asks (one more capture session; open with a fixed pilot/
+      reference note for per-channel session normalization — see the rig
+      bullet above):
       a loud UNFADED sustain for the release table + reverb
       residual (KEY_FLY's internal fade buries both sub-floor); a fast
       pitch-vibrato instrument over many cycles for the LFO rate 5/64

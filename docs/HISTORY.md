@@ -5213,3 +5213,26 @@ caesar's current global reading is wrong for any sound with ≥2 bank slots that
 issues `0xB6 arg≥1`; the scoped fix (INFO parser reads all slots; player/VM treats
 the arg as a slot index) is filed in the roadmap and detailed in
 NW4C-disasm-handoff Session 6.
+
+## Battery v2 cartridge built (2026-07-16)
+
+Second surgically-patched MeetSound.bcsar closing the four still-open stage-2
+constants + recalibration follow-ups (`tools/capture-cartridge/build_cartridge_v2.py`;
+v1 left fully intact). Bank inspection (standalone Cbnk/Cwar/Cwav parsers) found
+every MeetSound instrument is the `A127 D127 S127 H0 R127` default, so
+release/decay probes must use sequence overrides (`0xD1`/`0xD3`), and prog 23 (the
+shared SE_MAIN sid7 / LEGEND sid9 1.512 s loop) is the only clean sustained tone
+in both banks — it carries the pilot (identical `81 17 3C 7F 60` bytes both
+tracks), pan, LPF, velocity, release, decay, reverb and steal probes; LEGEND prog
+9 (367-frame single-cycle, 261.7 Hz C4) carries vibrato + portamento
+(FM-demodulable, and two rates 48/96 sidestep the 6.5 Hz partial-beat trap). Track
+A (SE_MAIN, 36.1 s): pilot, pan 0/32/64/96/127, LPF 24/40/48/64, velocity 127…16,
+30-voice steal (24 survive/6 stolen). Track B (LEGEND, 85.8 s): pilot, release
+60/100/114/124 (114/124 = corrected DecayTable tail), R127 reverb residual, decay
+122, vibrato 3.75/7.5 Hz, portamento distance (+3/+12 @48) + byte-rate (+12 @24/@96).
+Windows 268/4693 and 177/4437 B (nothing dropped for budget). Gate all-green
+including byte-identical round-trip (78/0). Prediction-validated (recalibrated
+player): pan 32→+7.58 dB, velocity (vel/127)², release −20 dB after
+2.04/0.86/0.42/0.10 s, vibrato FM 3.67/7.33 Hz. Open risk carried to ROADMAP:
+`0xD1`/`0xD3`/`0xD9` override honoring in the BGM-player path is untested (B1r's
+natural-R127 reverb residual is override-free and always valid).
