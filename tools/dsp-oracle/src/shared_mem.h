@@ -9,6 +9,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 
 namespace dsp_oracle {
 
@@ -117,5 +118,139 @@ constexpr std::size_t kNumSources = 24;
 constexpr std::size_t kDspConfigSize = 196;
 constexpr std::size_t kReverbEffectSize = 52; // 26 DSP words, opaque
 constexpr std::size_t kFinalMixSamplesPerFrame = 160;
+
+// ---------------------------------------------------------------------------
+// COMMIT 2 — SourceConfiguration::Configuration byte map + dry-source builder
+// ---------------------------------------------------------------------------
+// Byte offsets within one 192-byte source slot, transcribed as PROTOCOL
+// DOCUMENTATION (layout facts only — no code copied) from Azahar
+// `src/audio_core/hle/shared_memory.h`, `struct SourceConfiguration::Configuration`
+// (lines 117-309; `ASSERT_DSP_STRUCT(..., 192)` line 309). Individual fields
+// cited by line inline. These offsets were also cross-checked by walking the
+// struct field-by-field against that layout.
+struct SrcCfgOffset {
+    static constexpr std::size_t dirty_raw = 0x00;       // u32 LE, dirty bitmask (ln 121-147)
+    static constexpr std::size_t gain = 0x04;            // float_le gain[3][4] (ln 156)
+    static constexpr std::size_t rate_multiplier = 0x34; // float_le (ln 161)
+    static constexpr std::size_t interpolation = 0x38;   // u8 InterpolationMode (ln 169)
+    static constexpr std::size_t filters_enabled = 0x3A; // u16 (ln 202-206)
+    static constexpr std::size_t buffers_dirty = 0x4A;   // u16 (ln 246)
+    static constexpr std::size_t buffers = 0x4C;         // Buffer[4], 20 B each (ln 247)
+    static constexpr std::size_t loop_related = 0x9C;    // u32_dsp (ln 251)
+    static constexpr std::size_t enable = 0xA0;          // u8 (ln 252)
+    static constexpr std::size_t sync_count = 0xA2;      // u16 (ln 254)
+    static constexpr std::size_t play_position = 0xA4;   // u32_dsp, samples (ln 255)
+    static constexpr std::size_t emb_phys_addr = 0xAC;   // u32_dsp, FCRAM phys (ln 262)
+    static constexpr std::size_t emb_length = 0xB0;      // u32_dsp, samples (ln 266)
+    static constexpr std::size_t emb_flags1 = 0xB4;      // u16 mono/stereo + format (ln 279-284)
+    static constexpr std::size_t emb_adpcm_ps = 0xB6;    // u16 (ln 287-291)
+    static constexpr std::size_t emb_adpcm_yn = 0xB8;    // u16[2] (ln 294)
+    static constexpr std::size_t emb_flags2 = 0xBC;      // u16 adpcm_dirty/is_looping (ln 296-300)
+    static constexpr std::size_t emb_buffer_id = 0xBE;   // u16 (ln 304)
+};
+
+// dirty_raw bit positions (Azahar shared_memory.h ln 121-147). The DSP re-reads
+// only the fields whose dirty bit is set, then clears the mask each frame.
+struct SrcDirty {
+    static constexpr std::uint32_t format = 1u << 0;
+    static constexpr std::uint32_t mono_stereo = 1u << 1;
+    static constexpr std::uint32_t enable = 1u << 16;
+    static constexpr std::uint32_t interpolation = 1u << 17;
+    static constexpr std::uint32_t rate = 1u << 18;
+    static constexpr std::uint32_t play_position = 1u << 21;
+    static constexpr std::uint32_t gain0 = 1u << 25;
+    static constexpr std::uint32_t gain1 = 1u << 26;
+    static constexpr std::uint32_t gain2 = 1u << 27;
+    static constexpr std::uint32_t embedded = 1u << 30;
+};
+
+// emb_flags1: mono_or_stereo = BitField<0,2> (Mono=1, ln 268-271); format =
+// BitField<2,2> (PCM16=1, ln 273-277).
+constexpr std::uint16_t kEmbFlags1_MonoPCM16 = (1u << 0) | (1u << 2); // 0x0005
+constexpr std::uint8_t kInterpNone = 2; // InterpolationMode::None (ln 163-167)
+
+// DspConfiguration byte map (Azahar shared_memory.h ln 326-432; sizeof==196
+// asserted ln 428, offsetof(sync_mode)==0xBC ln 431, offsetof(dirty2_raw)==0xC0
+// ln 432).
+struct DspCfgOffset {
+    static constexpr std::size_t dirty_raw = 0x00;         // u32 LE dirty bitmask (ln 329-352)
+    static constexpr std::size_t master_volume = 0x04;     // float_le (ln 356)
+    static constexpr std::size_t aux_return_volume = 0x08; // float_le[2] (ln 357)
+    static constexpr std::size_t output_format = 0x16;     // u16 OutputFormat (ln 368)
+    static constexpr std::size_t aux_bus_enable = 0x28;    // u16[2] (ln 378)
+    static constexpr std::size_t reverb_effect = 0x54;     // ReverbEffect[2], 52 B each (ln 414-418)
+    static constexpr std::size_t sync_mode = 0xBC;         // u16 (ln 420)
+};
+struct DspDirty {
+    static constexpr std::uint32_t aux_bus_enable0 = 1u << 8;
+    static constexpr std::uint32_t aux_bus_enable1 = 1u << 9;
+    static constexpr std::uint32_t reverb_effect0 = 1u << 12;
+    static constexpr std::uint32_t reverb_effect1 = 1u << 13;
+    static constexpr std::uint32_t master_volume = 1u << 16;
+    static constexpr std::uint32_t output_format = 1u << 26;
+};
+constexpr std::uint16_t kOutputFormatStereo = 1; // OutputFormat::Stereo (ln 362-366)
+
+// --- little-/middle-endian field writers into a raw byte buffer -------------
+inline void PutU16LE(std::uint8_t* p, std::uint16_t v) {
+    p[0] = static_cast<std::uint8_t>(v & 0xFF);
+    p[1] = static_cast<std::uint8_t>(v >> 8);
+}
+inline void PutU32LE(std::uint8_t* p, std::uint32_t v) {
+    p[0] = static_cast<std::uint8_t>(v & 0xFF);
+    p[1] = static_cast<std::uint8_t>((v >> 8) & 0xFF);
+    p[2] = static_cast<std::uint8_t>((v >> 16) & 0xFF);
+    p[3] = static_cast<std::uint8_t>((v >> 24) & 0xFF);
+}
+// u32_dsp: the DSP reads 32-bit values with the 16-bit halves swapped (middle-
+// endian). Azahar u32_dsp::Convert = (v<<16)|(v>>16), ln 56-58; store that
+// swapped value little-endian so the firmware reads back the true u32.
+inline void PutU32Dsp(std::uint8_t* p, std::uint32_t v) {
+    PutU32LE(p, (v << 16) | (v >> 16));
+}
+inline void PutF32LE(std::uint8_t* p, float f) {
+    std::uint32_t bits;
+    std::memcpy(&bits, &f, sizeof(bits));
+    PutU32LE(p, bits);
+}
+
+// Build one dry, unity-gain, PCM16-mono source that plays an embedded buffer at
+// the native rate (no SRC) straight to the MAIN mixer's front L/R — reverb/aux
+// buses left at zero. `out` must have >= kSourceConfigStride bytes.
+//   phys_addr      — FCRAM physical byte address of the PCM16 buffer.
+//   length_samples — number of PCM16 samples in that buffer.
+inline void BuildDrySourceConfig(std::uint8_t* out, std::uint32_t phys_addr,
+                                 std::uint32_t length_samples) {
+    std::memset(out, 0, kSourceConfigStride);
+    PutU32LE(out + SrcCfgOffset::dirty_raw,
+             SrcDirty::format | SrcDirty::mono_stereo | SrcDirty::enable |
+                 SrcDirty::interpolation | SrcDirty::rate | SrcDirty::play_position |
+                 SrcDirty::gain0 | SrcDirty::gain1 | SrcDirty::gain2 | SrcDirty::embedded);
+    // gain[mixer][channel]: mixer 0 = MAIN (feeds the final DAC mix directly);
+    // mixers 1,2 are the aux/effect buses. Front L = [0][0], front R = [0][1].
+    // Leave rear ([0][2],[0][3]) and the aux mixers at 0 -> no reverb/aux path.
+    PutF32LE(out + SrcCfgOffset::gain + 0 * 4, 1.0f); // gain[0][0] front L
+    PutF32LE(out + SrcCfgOffset::gain + 1 * 4, 1.0f); // gain[0][1] front R
+    PutF32LE(out + SrcCfgOffset::rate_multiplier, 1.0f);
+    out[SrcCfgOffset::interpolation] = kInterpNone;
+    out[SrcCfgOffset::enable] = 1;
+    PutU32Dsp(out + SrcCfgOffset::play_position, 0);
+    PutU32Dsp(out + SrcCfgOffset::emb_phys_addr, phys_addr);
+    PutU32Dsp(out + SrcCfgOffset::emb_length, length_samples);
+    PutU16LE(out + SrcCfgOffset::emb_flags1, kEmbFlags1_MonoPCM16);
+    PutU16LE(out + SrcCfgOffset::emb_buffer_id, 1); // non-zero id
+}
+
+// Build a minimal DspConfiguration: master volume unity, stereo out, aux/effect
+// buses OFF (reverb bypassed). `out` must have >= kDspConfigSize bytes.
+inline void BuildDryDspConfig(std::uint8_t* out) {
+    std::memset(out, 0, kDspConfigSize);
+    PutU32LE(out + DspCfgOffset::dirty_raw,
+             DspDirty::master_volume | DspDirty::output_format |
+                 DspDirty::aux_bus_enable0 | DspDirty::aux_bus_enable1);
+    PutF32LE(out + DspCfgOffset::master_volume, 1.0f);
+    PutU16LE(out + DspCfgOffset::output_format, kOutputFormatStereo);
+    // aux_bus_enable[0]=aux_bus_enable[1]=0 (memset) -> effect buses disabled.
+}
 
 } // namespace dsp_oracle

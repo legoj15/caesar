@@ -2,8 +2,9 @@
 
 Standalone LLE harness that boots the real 3DS DSP1 (Teak) firmware under Teakra
 and captures the final stereo mix. This file records the protocol facts the port
-depends on, with line-level citations into the reference sources, and the road to
-commits 2 and 3.
+depends on, with line-level citations into the reference sources. Commit 1 boots
+to the audio callback (§1-§5); commit 2 renders a dry click and answers route-a
+(§6); commit 3 engages reverb (§7).
 
 **Sources cited** (all read at the pinned versions in this session):
 - `lle.cpp` = Azahar `src/audio_core/lle/lle.cpp` — the transport (load, boot
@@ -194,32 +195,70 @@ exit 0.
 6. **No UnloadComponent finalize** (the `0x8000` on channel 2, `lle.cpp:364-374`).
    The oracle just exits; add it if a clean DSP teardown is ever needed.
 
-## 6. Road to commit 2 (dry source at the final mix)
+## 6. Commit 2 — dry source at the final mix (DONE) + THE route-a answer
 
-- Write one `SourceConfiguration::Configuration` (192 B, `shared_memory.h:117`)
-  at `table[1]` (word 0x9E92) for source 0: `enable=1`, `gain[3][4]`,
-  `rate_multiplier=1.0`, `interpolation_mode`, and an **embedded buffer**
-  (`physical_address`, `length`, format PCM16, mono) pointing at an impulse we
-  place in the AHBM backing. Set the matching **dirty bits** in `dirty_raw`
-  (`enable_dirty` b16, `embedded_buffer_dirty` b30, `gain_*_dirty`,
-  `rate_multiplier_dirty`, `play_position_dirty`) — the DSP clears them each
-  frame (`shared_memory.h:119-147`).
-- **Middle-endian trap:** `physical_address`, `length`, `play_position`,
-  `loop_related` are `u32_dsp` (16-bit halves swapped, `shared_memory.h:46-67`);
-  the `gain` floats and the `final_mix` s16 are plain little-endian.
-- **Map real FCRAM:** fill `ahbm_backing` at some offset with the impulse PCM and
-  set `physical_address = 0x20000000 + offset`. The DSP fetches it over AHBM
-  (`AHBMRead16/32`); replace the zero-guard reads with the real buffer.
-- **Double-buffer discipline (the frame-parity trap, `shared_mem.h`):** write the
-  config into the *write* bank for the current parity (`frame_id & 1`), bump that
-  bank's counter, `SetSemaphore(0x2000)`. Getting the parity wrong = DSP reads
-  stale config, impulse never mixes.
-- **Capture** the dry result straight from the audio callback (it is the final
-  stereo mix) — simpler than reading `final_mix` (word 0x8540). Proof: output ==
-  input impulse.
-- **Open question this settles:** whether `drain`-only suffices once config
-  changes, or the counter-bump + `SetSemaphore(0x2000)` is required for the DSP
-  to pick up new SourceConfiguration (hypothesis from `ndsp.c`: it is required).
+`--click` injects one synthetic voice and captures it at the final mix. The
+per-voice `SourceConfiguration::Configuration` (192 B, Azahar
+`shared_memory.h:117-309`) and a minimal `DspConfiguration` (196 B,
+`shared_memory.h:326-432`) are built byte-for-byte in `shared_mem.h`
+(`BuildDrySourceConfig` / `BuildDryDspConfig`) — every field offset, dirty bit
+and encoding is cited inline there. What the source does:
+
+- **Embedded buffer, PCM16 mono, no SRC.** `enable=1`,
+  `gain[0][0]=gain[0][1]=1.0` (front L/R of the MAIN mixer; `gain[1]`/`gain[2]`
+  are the aux/effect buses, left at 0 so nothing routes to reverb),
+  `rate_multiplier=1.0`, `interpolation_mode=None`, `format=PCM16`, `mono`.
+  The pulse (`--click-len` samples of `--click-amp`) is placed in the AHBM
+  backing at FCRAM offset 0x8000; `physical_address = 0x20000000 + 0x8000`. The
+  DSP fetches it over AHBM — confirmed: `ahbm_reads` goes 0 → 32 for a 64-sample
+  buffer (the sample DMA, `dma.cpp:53/90` → `ahbm.Read16/32` → the oracle's
+  `read_external*`).
+- **Middle-endian trap handled:** `physical_address`, `length`, `play_position`
+  are written via `PutU32Dsp` (halves swapped, `shared_memory.h:46-67`); gains,
+  floats and the s16 final-mix stay plain little-endian.
+- **Frame-parity discipline:** the config is written into the SAME bank whose
+  counter is about to be bumped (`buffer_cur_id`; region-0 word or `| 0x10000`
+  for region 1), on ONE trigger frame with the dirty bits set. The DSP reads
+  that bank that frame and clears the dirty mask; no re-assert afterward → a
+  single clean click, not one per frame.
+
+**Measured (MiiPlaza firmware, `--click`, unity gain):** input amp A → DAC peak
+`A−1` for A ∈ {2000, 8192, 16000, 32000} — a consistent −1-LSB fixed-point
+truncation in the mixer; linear and unity otherwise. A 64-sample click yields
+exactly 64 non-zero, contiguous output pairs, `L==R`, silence everywhere else;
+0 underruns; exit 0. Onset latency trigger→DAC ≈ **326 samples (~10 ms)** — the
+DSP-mix + BTDMP-FIFO pipeline depth, useful for commit-3/4 IR alignment.
+
+**Settles the commit-1 open question:** the counter-bump + `SetSemaphore(0x2000)`
+"full" duty DOES make the DSP consume *new* SourceConfiguration — the click only
+renders because config lands in the freshly-counted bank. Hypothesis confirmed.
+
+### THE route-a answer — **YES.**
+
+**Question:** besides feeding the DAC (BTDMP), does the firmware ALSO write the
+final mix back into ARM11-visible shared memory (Azahar HLE `final_samples`,
+region-table[6])?
+
+**Method:** each DSP frame, snapshot BOTH banks of the final_samples region via
+`GetDspMemory()` (region-0 word 0x8540 → byte 0x50A80; region-1 → 0x70A80;
+`FinalMixSamples = s16 pcm16[160][2]`, 640 B, plain LE — `shared_memory.h:448-453`)
+and compare its peak to the DAC peak.
+
+**Result: YES.** The region carries the click at the SAME amplitude as the DAC at
+every tested level (`final_region_peak == btdmp_peak`: 1999/1999, 8191/8191,
+15999/15999, 31999/31999), and is silent in every frame except the ~2 the click
+spans (2 of 203); at idle it stays all-zero. The DSP writes the mix into the bank
+it is NOT currently reading (observed bank 0 — the double-buffer "results go into
+the *other* bank" rule), so both banks must be scanned. This confirms the Azahar
+comment on the region ("Final mixed output … what you hear out of the speakers",
+`shared_memory.h:448-449`) **behaviourally, on the real firmware** — not assumed
+from HLE.
+
+**Consequence:** route a is LIVE for the analog-free capture program. A Luma 3GX
+plugin can read `final_samples` from the just-retired bank each ~4.9 ms frame for
+a bit-perfect digital capture of console output — no line-in, no resampling.
+Commit 3/4 (reverb) will read the SAME region, so the wet tail is capturable the
+same way.
 
 ## 7. Road to commit 3 (engage reverb)
 
@@ -241,8 +280,10 @@ exit 0.
 ## 8. Unresolved / to watch
 
 - drain(4) vs full(303) `frame_events`: draining alone avoids underrun but yields
-  far fewer DSP→ARM signals; commit-2 must confirm the counter/semaphore is what
-  makes the DSP consume *new* config.
+  far fewer DSP→ARM signals. **Answered by commit-2:** the "full" counter-bump +
+  `SetSemaphore(0x2000)` is what makes the DSP consume *new* config (the click
+  renders only under full). Whether drain-alone could also latch a one-shot
+  config change was not separately tested — full is the deliverable path.
 - 1025 frame events over ~1022 frames (slight excess) — likely occasional
   double-signals; harmless, note if it grows.
 - teakra prints BTDMP-underrun / unhandled-MMIO lines to stdout (32 MMIO lines at

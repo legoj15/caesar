@@ -23,6 +23,15 @@ add_subdirectory(external/teakra)
 add_executable(dsp_oracle_smoke smoke/smoke.cpp)
 target_link_libraries(dsp_oracle_smoke PRIVATE teakra)
 
+# --- dsp_oracle_config_smoke: always built -------------------------------
+# Firmware-free correctness check for the commit-2 config byte builders in
+# src/shared_mem.h (struct offsets + u32_dsp middle-endian). No teakra needed;
+# it just needs the src/ include path for the header.
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src/shared_mem.h")
+    add_executable(dsp_oracle_config_smoke smoke/config_smoke.cpp)
+    target_include_directories(dsp_oracle_config_smoke PRIVATE src)
+endif()
+
 # --- dsp_oracle: guarded ---------------------------------------------------
 # The real oracle. Its sources live in src/ and are authored by a separate
 # lane; guard the target so THIS tree configures/builds even before they land.

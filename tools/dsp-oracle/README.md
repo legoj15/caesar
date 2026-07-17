@@ -32,6 +32,9 @@ Targets:
 - **`dsp_oracle`** — the oracle proper (`build/Release/dsp_oracle.exe`).
 - **`dsp_oracle_smoke`** — liveness check: instantiates Teakra, steps the core,
   prints `OK`. Useful when re-vendoring.
+- **`dsp_oracle_config_smoke`** — firmware-free correctness check for the
+  commit-2 SourceConfiguration/DspConfiguration byte builders (struct offsets +
+  u32_dsp middle-endian). Prints `OK`. No firmware needed.
 
 ## Extract firmware
 
@@ -53,6 +56,8 @@ reverb-bearing firmware, whose title's archives are the project's own reverb rep
 ```sh
 dsp_oracle firmware/MiiPlaza_dspfirm.cdc [--seconds N | --frames N] [--out out.wav]
            [--service none|drain|full] [-v]
+           [--click [--click-amp N] [--click-len N] [--click-frame N]
+                    [--region-wav out.wav]]
 ```
 
 Boots the firmware (`recv_data_on_start` handshake on channels 0/1/2, then
@@ -67,6 +72,16 @@ Exit codes: 0 ok, 2 usage, 3 file read, 4 parse, 5 boot/handshake, 6 pipe/init,
 Healthy idle boot (commit-1 baseline): `cycles/sample : 4096.00`, `implied_rate_hz :
 32728.3`, `nonzero_samples : 0`, `stalled_out : no`, `audio_callback_fired : YES`,
 exit 0.
+
+`--click` (commit 2) injects one dry PCM16-mono source: a `--click-len`-sample
+pulse of `--click-amp` (default 64 samples @ 8192) placed in AHBM-backed FCRAM,
+enabled at frame `--click-frame` (default 8), routed unity-gain to the main mix
+with no SRC and effects off. It renders at the final mix (a click at unity gain,
+silence elsewhere) and reports the **route-a** verdict: whether the firmware also
+writes the final mix back into the ARM11-visible `final_samples` region (word
+0x8540). Verdict on MiiPlaza: **YES** — the region peak equals the DAC peak at
+every amplitude. `--region-wav` additionally dumps that region readback as its
+own WAV. See [src/PORT-NOTES.md §6](src/PORT-NOTES.md).
 
 ## Vendored Teakra
 

@@ -55,18 +55,31 @@ enum class ServiceMode {
 struct Options {
     std::string firmware_path;
     std::string out_path = "dsp_oracle_out.wav";
+    std::string region_wav_path; // if set (click mode), dump the final_samples-region capture
     double seconds = 5.0;
     long frames = -1; // if >=0, overrides seconds
     bool verbose = false;
     ServiceMode service = ServiceMode::Full;
+
+    // Commit-2: inject one dry synthetic source (a click) and answer route-a.
+    bool click = false;
+    int click_amp = 8192;      // PCM16 sample value of the pulse (~ -12 dBFS)
+    int click_len = 64;        // pulse length in samples (~2.0 ms @ 32728 Hz)
+    long click_trigger = 8;    // frame_event index at which the source is enabled
 };
 
 void PrintUsage(const char* argv0) {
     std::fprintf(stderr,
                  "usage: %s <firmware.cdc> [--seconds N | --frames N] [--out out.wav]\n"
                  "          [--service full|drain|none] [-v]\n"
+                 "          [--click [--click-amp N] [--click-len N] [--click-frame N]\n"
+                 "                   [--region-wav out.wav]]\n"
                  "  Boots the DSP1 firmware, captures the final stereo mix to a WAV.\n"
-                 "  --service selects the per-frame ARM11 duty (default full).\n",
+                 "  --service selects the per-frame ARM11 duty (default full).\n"
+                 "  --click injects one dry PCM16 source (a click) via AHBM-backed FCRAM,\n"
+                 "          captures it at the final mix, and reports the route-a verdict\n"
+                 "          (does the firmware also write final_samples back to shared mem).\n"
+                 "  --region-wav dumps the final_samples-region readback as its own WAV.\n",
                  argv0);
 }
 
@@ -95,6 +108,25 @@ bool ParseArgs(int argc, char** argv, Options& opt) {
             const char* v = next("--out");
             if (!v) return false;
             opt.out_path = v;
+        } else if (a == "--click") {
+            opt.click = true;
+        } else if (a == "--click-amp") {
+            const char* v = next("--click-amp");
+            if (!v) return false;
+            opt.click_amp = std::atoi(v);
+        } else if (a == "--click-len") {
+            const char* v = next("--click-len");
+            if (!v) return false;
+            opt.click_len = std::atoi(v);
+        } else if (a == "--click-frame") {
+            const char* v = next("--click-frame");
+            if (!v) return false;
+            opt.click_trigger = std::atol(v);
+        } else if (a == "--region-wav") {
+            const char* v = next("--region-wav");
+            if (!v) return false;
+            opt.region_wav_path = v;
+            opt.click = true; // implies click mode
         } else if (a == "--service") {
             const char* v = next("--service");
             if (!v) return false;
@@ -121,6 +153,20 @@ bool ParseArgs(int argc, char** argv, Options& opt) {
     if (opt.firmware_path.empty()) {
         std::fprintf(stderr, "error: firmware path required\n");
         return false;
+    }
+    if (opt.click) {
+        if (opt.click_len < 1 || opt.click_len > 4096) {
+            std::fprintf(stderr, "error: --click-len must be 1..4096 samples\n");
+            return false;
+        }
+        if (opt.click_amp < -32768 || opt.click_amp > 32767) {
+            std::fprintf(stderr, "error: --click-amp must be a signed 16-bit value\n");
+            return false;
+        }
+        if (opt.click_trigger < 1) {
+            std::fprintf(stderr, "error: --click-frame must be >= 1\n");
+            return false;
+        }
     }
     return true;
 }
@@ -224,17 +270,46 @@ int main(int argc, char** argv) {
     };
     teakra.SetAHBMCallback(ahbm);
 
+    // --- commit-2 dry source: click PCM into AHBM-backed FCRAM + configs ------
+    // Place a PCM16-mono rectangular pulse into the AHBM backing at a fixed,
+    // aligned FCRAM offset; the DSP DMA will fetch it over AHBM once the source
+    // is enabled. physical_address = FCRAM base + offset (what the firmware sees).
+    constexpr std::uint32_t kClickFcramOffset = 0x8000; // 32 KiB in, well-aligned
+    const std::uint32_t click_phys = kFcramBase + kClickFcramOffset;
+    std::array<std::uint8_t, dsp_oracle::kSourceConfigStride> src_cfg{};
+    std::array<std::uint8_t, dsp_oracle::kDspConfigSize> dsp_cfg{};
+    if (opt.click) {
+        for (int i = 0; i < opt.click_len; ++i) {
+            std::int16_t v = static_cast<std::int16_t>(opt.click_amp);
+            std::memcpy(&ahbm_backing[kClickFcramOffset + static_cast<std::size_t>(i) * 2], &v,
+                        sizeof(v));
+        }
+        dsp_oracle::BuildDrySourceConfig(src_cfg.data(), click_phys,
+                                         static_cast<std::uint32_t>(opt.click_len));
+        dsp_oracle::BuildDryDspConfig(dsp_cfg.data());
+    }
+
     // Audio capture. The BTDMP fires this once per stereo sample once the
     // firmware enables I2S transmit. We gate capture to the measured run so boot
     // silence doesn't skew the stats.
     std::vector<std::int16_t> pcm; // interleaved L,R
     std::atomic<bool> capturing{false};
     std::uint64_t nonzero_samples = 0;
+    int btdmp_peak = 0;                                     // max |sample| in the captured mix
+    std::uint64_t first_nonzero_out = static_cast<std::uint64_t>(-1); // sample-pair index of onset
     teakra.SetAudioCallback([&](std::array<std::int16_t, 2> s) {
         if (!capturing.load(std::memory_order_relaxed)) return;
         pcm.push_back(s[0]);
         pcm.push_back(s[1]);
-        if (s[0] != 0 || s[1] != 0) ++nonzero_samples;
+        if (s[0] != 0 || s[1] != 0) {
+            if (first_nonzero_out == static_cast<std::uint64_t>(-1))
+                first_nonzero_out = pcm.size() / 2 - 1;
+            ++nonzero_samples;
+        }
+        int a0 = s[0] < 0 ? -s[0] : s[0];
+        int a1 = s[1] < 0 ? -s[1] : s[1];
+        if (a0 > btdmp_peak) btdmp_peak = a0;
+        if (a1 > btdmp_peak) btdmp_peak = a1;
     });
 
     // --- boot handshake --------------------------------------------------
@@ -344,6 +419,36 @@ int main(int argc, char** argv) {
         40ull * kSamplesPerFrame * kCyclesPerSample;
     bool stalled_out = false;
 
+    // --- route-a probe state (click mode) --------------------------------
+    // The question: besides feeding the DAC (BTDMP), does the firmware also
+    // write the final mix back into the ARM11-visible final_samples region
+    // (Azahar HLE `final_samples`, region-table[6])? We snapshot BOTH banks of
+    // that region every DSP frame and track whether it ever carries the click.
+    bool triggered = false;
+    std::uint64_t trigger_out_sample = 0;
+    int final_region_peak = 0;                                       // max |sample| in final_samples region
+    std::uint64_t final_region_nonzero_frames = 0;                   // frames where the region was non-silent
+    std::uint64_t first_region_nonzero_frame = static_cast<std::uint64_t>(-1);
+    int first_region_nonzero_bank = -1;
+    std::vector<std::int16_t> region_pcm; // final_samples readback, one frame per DSP frame
+    std::vector<std::int16_t> probe_b0, probe_b1;
+    auto probe_final_mix = [&](bool bank1, std::vector<std::int16_t>& dst) -> int {
+        const std::uint32_t word = region_table[dsp_oracle::kIdxFinalMixSamples] |
+                                   (bank1 ? dsp_oracle::kRegion1WordOr : 0u);
+        const std::uint8_t* base =
+            teakra.GetDspMemory() + dsp_oracle::kDspDataOffset + word * 2u;
+        dst.resize(dsp_oracle::kFinalMixSamplesPerFrame * 2);
+        int peak = 0;
+        for (std::size_t i = 0; i < dst.size(); ++i) {
+            std::int16_t s;
+            std::memcpy(&s, base + i * 2, sizeof(s));
+            dst[i] = s;
+            int a = s < 0 ? -s : s;
+            if (a > peak) peak = a;
+        }
+        return peak;
+    };
+
     double next_log_s = 0.5;
     while (pcm.size() / 2 < target_samples) {
         teakra.Run(kTeakraSlice);
@@ -366,7 +471,56 @@ int main(int argc, char** argv) {
                     debug_drained += avail;
                 } else if (pipe == 2 && side == 0) {
                     ++frame_events;
+
+                    // Route-a probe: snapshot both banks of the final_samples
+                    // region this frame. The DSP writes results into the bank it
+                    // is NOT currently reading, so scan both and take the louder.
+                    if (opt.click) {
+                        int p0 = probe_final_mix(false, probe_b0);
+                        int p1 = probe_final_mix(true, probe_b1);
+                        const bool use1 = p1 > p0;
+                        const int p = use1 ? p1 : p0;
+                        if (p > final_region_peak) final_region_peak = p;
+                        if (p > 0) {
+                            ++final_region_nonzero_frames;
+                            if (first_region_nonzero_frame == static_cast<std::uint64_t>(-1)) {
+                                first_region_nonzero_frame = frame_events;
+                                first_region_nonzero_bank = use1 ? 1 : 0;
+                            }
+                        }
+                        const std::vector<std::int16_t>& chosen = use1 ? probe_b1 : probe_b0;
+                        region_pcm.insert(region_pcm.end(), chosen.begin(), chosen.end());
+                    }
+
                     if (opt.service == ServiceMode::Full) {
+                        // Trigger the dry source on the chosen frame: write the
+                        // SourceConfiguration (source 0) and DspConfiguration into
+                        // the SAME bank whose counter we are about to bump, so the
+                        // DSP reads them this frame (frame-parity trap, shared_mem.h).
+                        if (opt.click && !triggered &&
+                            frame_events == static_cast<std::uint64_t>(opt.click_trigger)) {
+                            const std::uint32_t cur = buffer_cur_id;
+                            const std::uint32_t src_word =
+                                region_table[dsp_oracle::kIdxSourceConfiguration] |
+                                (cur ? dsp_oracle::kRegion1WordOr : 0u);
+                            const std::uint32_t dsp_word =
+                                region_table[dsp_oracle::kIdxDspConfiguration] |
+                                (cur ? dsp_oracle::kRegion1WordOr : 0u);
+                            std::uint8_t* m = teakra.GetDspMemory();
+                            // source 0 is at offset 0 within the source_config array.
+                            std::memcpy(m + dsp_oracle::kDspDataOffset + src_word * 2u,
+                                        src_cfg.data(), src_cfg.size());
+                            std::memcpy(m + dsp_oracle::kDspDataOffset + dsp_word * 2u,
+                                        dsp_cfg.data(), dsp_cfg.size());
+                            triggered = true;
+                            trigger_out_sample = pcm.size() / 2;
+                            std::printf("click: source 0 enabled at frame_event %llu (write bank %u), "
+                                        "phys=0x%08X len=%d amp=%d, trigger_out_sample=%llu\n",
+                                        static_cast<unsigned long long>(frame_events), cur,
+                                        click_phys, opt.click_len, opt.click_amp,
+                                        static_cast<unsigned long long>(trigger_out_sample));
+                        }
+
                         // Per-frame ARM11 duty (ndspThreadMain): bump the counter
                         // in the current write bank, then signal the DSP.
                         WriteDataU16(teakra,
@@ -449,6 +603,55 @@ int main(int argc, char** argv) {
     const bool audio_flowed = sample_pairs > 0 && !stalled_out;
     std::printf("audio_callback_fired: %s\n", audio_flowed ? "YES" : "NO");
 
+    // --- click render + route-a verdict ----------------------------------
+    bool click_rendered = false;
+    if (opt.click) {
+        const std::uint64_t none = static_cast<std::uint64_t>(-1);
+        const std::uint64_t onset_delay =
+            (first_nonzero_out != none && first_nonzero_out >= trigger_out_sample)
+                ? first_nonzero_out - trigger_out_sample
+                : 0;
+        const std::uint32_t fmix_word = region_table[dsp_oracle::kIdxFinalMixSamples];
+        click_rendered = btdmp_peak > 0;
+        const bool route_a = final_region_peak > 0;
+
+        std::printf("\n=== click / route-a ===\n");
+        std::printf("triggered           : %s\n", triggered ? "YES" : "NO");
+        std::printf("btdmp_peak          : %d (input click amp %d)\n", btdmp_peak, opt.click_amp);
+        std::printf("btdmp_onset_sample  : %lld (%llu samples after trigger)\n",
+                    first_nonzero_out == none ? -1LL
+                                              : static_cast<long long>(first_nonzero_out),
+                    static_cast<unsigned long long>(onset_delay));
+        std::printf("ahbm_reads          : %llu (0 => sample DMA never fetched the buffer)\n",
+                    static_cast<unsigned long long>(ahbm_reads.load()));
+        std::printf("final_region_word   : 0x%04X (byte r0 0x%05X / r1 0x%05X)\n", fmix_word,
+                    dsp_oracle::kDspDataOffset + fmix_word * 2u,
+                    dsp_oracle::kDspDataOffset + (fmix_word | dsp_oracle::kRegion1WordOr) * 2u);
+        std::printf("final_region_peak   : %d\n", final_region_peak);
+        std::printf("final_region_frames : %llu non-silent (first at frame_event %lld, bank %d)\n",
+                    static_cast<unsigned long long>(final_region_nonzero_frames),
+                    first_region_nonzero_frame == none
+                        ? -1LL
+                        : static_cast<long long>(first_region_nonzero_frame),
+                    first_region_nonzero_bank);
+        if (!click_rendered) {
+            std::printf("route_a_final_samples: INCONCLUSIVE (click never reached the DAC)\n");
+        } else {
+            std::printf("route_a_final_samples: %s\n", route_a ? "YES" : "NO");
+        }
+
+        if (!opt.region_wav_path.empty()) {
+            if (!dsp_oracle::WriteWav16Stereo(opt.region_wav_path, region_pcm, kNativeSampleRate)) {
+                std::fprintf(stderr, "error: failed to write region wav '%s'\n",
+                             opt.region_wav_path.c_str());
+                return 8;
+            }
+            std::printf("wrote %s (final_samples-region readback, %llu sample-pairs)\n",
+                        opt.region_wav_path.c_str(),
+                        static_cast<unsigned long long>(region_pcm.size() / 2));
+        }
+    }
+
     // --- write wav -------------------------------------------------------
     if (!dsp_oracle::WriteWav16Stereo(opt.out_path, pcm, kNativeSampleRate)) {
         std::fprintf(stderr, "error: failed to write wav '%s'\n", opt.out_path.c_str());
@@ -458,5 +661,8 @@ int main(int argc, char** argv) {
                 static_cast<unsigned long long>(sample_pairs),
                 sample_pairs / static_cast<double>(kNativeSampleRate));
 
-    return audio_flowed ? 0 : 7;
+    // Success: audio flowed, and (in click mode) the click actually rendered so
+    // the route-a question could be answered.
+    const bool ok = audio_flowed && (!opt.click || click_rendered);
+    return ok ? 0 : 7;
 }
