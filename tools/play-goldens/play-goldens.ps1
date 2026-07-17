@@ -200,10 +200,15 @@ $Invocations = @(
     # re-attack and zero steals — the both-edges-release tie semantics.
     @{ Name = 'tie-warpstar';   Mode = '--render'; Source = 'torte';     Seq = 'SE_Map_WarpstarUp2';       Rate = 48000; MaxSeconds = 15;  ExpectExit = 0 }
 
-    # C9 — the LFO witness. SEQ_M_ZELDA1 drives the persistent track LFO (depth 0xCA
-    # / rate 0xCB / delay 0xE0) on its melody, so the render carries periodic pitch
-    # modulation (controlled proof: rate linear in the commanded value at 5/64 Hz per
-    # unit, peak deviation = depth x range cents; targets 0/1/2 route pitch/vol/pan).
+    # C9 — the LFO plumbing witness. SEQ_M_ZELDA1 drives the persistent track LFO
+    # (depth 0xCA / rate 0xCB / delay 0xE0), but its notes are short and the 0xE0
+    # mod-delay gates the LFO off within each one, so this render pins the LFO
+    # PLUMBING (the commands parse + route; targets 0/1/2 -> pitch/vol/pan) yet is
+    # INERT to the rate constant — byte-identical across the 2026-07-15 5.11x
+    # kLfoRateHz correction. The deterministic LFO-RATE coverage is ramp-kaen +
+    # bgm-den-result: sustained notes whose LFO passes its delay and modulates, so
+    # both moved when kLfoRateHz became the 0.3995 Hz/unit (byte/512-cycle-per-frame,
+    # console battery v2) closed form.
     @{ Name = 'vibrato-zelda';  Mode = '--render'; Source = 'sounddata1'; Seq = 'SEQ_M_ZELDA1';            Rate = 48000; MaxSeconds = 20;  ExpectExit = 0 }
 
     # C10 — the mid-sequence bank-switch witness. SEQ_M_BLACKBOARD1 fires 5 0xB6

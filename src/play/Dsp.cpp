@@ -21,14 +21,18 @@ namespace play
 		// --- The track LFO (C9) --------------------------------------------------
 		//
 		// The disasm doc records NO LFO/sine/rate address (session 4 stopped at the
-		// variable VM), so the LFO uses the NW4R precedent and every constant below is
-		// FLAGGED for the console capture. rate -> Hz is anchored so a mid rate (~64)
-		// gives a musical ~5 Hz vibrato; the exact scaling is one constant to
-		// recalibrate. A continuous four-quadrant sine stands in for NW4R's 32-step
-		// quarter-sine table (its high-resolution limit; the table quantisation is
-		// inaudible here and is the flagged detail). Pitch cents = depth x range (the
-		// vibrato-gating memory), clamped to +/-1 octave defensively.
-		constexpr float kLfoRateHz = 5.0f / 64.0f;     // Hz per rate unit (anchored, flagged)
+		// variable VM), so there is no disasm corroboration for this constant. The
+		// rate -> Hz constant is now CONSOLE-MEASURED: battery v2 (2026-07-15, two
+		// independent agents, FM-sideband spacing, blind-cross-verified) read 19.17 Hz
+		// at rate byte 48 and 38.31 Hz at byte 96 -- rate proportional to the byte (an
+		// exact 2x doubling), 5.11x faster than the old 5/64 anchor. It has a clean
+		// closed form: the LFO advances byte/512 of a cycle per 160-sample DSP frame at
+		// 32728 Hz, so Hz/unit = kNativeRate / (512 * kFrameSamples) = 32728/81920 =
+		// 0.39951 (predicts 19.176/38.35 Hz at byte 48/96, <= 0.04% error). A continuous
+		// four-quadrant sine stands in for NW4R's 32-step quarter-sine table (inaudible
+		// quantisation; still flagged). Pitch cents = depth x range (the vibrato-gating
+		// memory), clamped to +/-1 octave defensively.
+		constexpr float kLfoRateHz = static_cast<float>(kNativeRate) / (512.0f * static_cast<float>(kFrameSamples));  // Hz/unit; byte/512 cycle per frame (console battery v2)
 		constexpr float kLfoMaxCents = 1200.0f;        // defensive clamp on depth x range
 
 		// --- The voice low-pass filter (C10, 0xD8 / 0xB4 / 0xB5) ------------------

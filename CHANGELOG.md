@@ -57,6 +57,18 @@ House rules:
 
 ### Fixed
 
+- **`caesar-play` — the LFO rate constant is ~5.11× faster (console battery
+  v2).** `kLfoRateHz` was a flagged `5/64` (0.078 Hz/unit) NW4R-precedent guess.
+  Battery v2 (2026-07-15, two independent agents, FM-sideband spacing,
+  blind-cross-verified) measured vibrato at **19.17 Hz at rate byte 48 and
+  38.31 Hz at byte 96** — rate ∝ byte (exact 2× doubling) but 5.11× faster than
+  the model. The constant is now the exact closed form `kNativeRate ÷ (512 ×
+  kFrameSamples)` = 32728/81920 = **0.3995 Hz/unit** (the LFO advances byte/512
+  of a cycle per 160-sample DSP frame at 32728 Hz; predicts 19.176/38.35 Hz at
+  byte 48/96, ≤0.04% error). The rate ∝ byte law is unchanged; only the
+  constant. Changes vibrato/LFO-modulated `caesar-play` `.wav` renders (CC1/
+  pitch/etc. gated on the `0xCC` LFO target); converter outputs identical
+  (play-goldens re-pinned; both New 3DS console-tolerance captures PASS).
 - **`caesar-play` — the `0xD8` low-pass byte-48 corner is re-anchored to
   ~5.15 kHz (battery v2).** The shipped byte-48 anchor of 4.1 kHz came from
   battery v1, which undershot. Battery v2 (2026-07-15 stereo) reads the byte-48
