@@ -57,6 +57,18 @@ House rules:
 
 ### Fixed
 
+- **`caesar-play` — the portamento byte→rate law is now `1/byte²` (console
+  battery v2).** The `aafb2f3` provisional law made the glide rate `∝ 1/byte`
+  (anchored byte 48 = 2.841 st/s). Battery v2 (2026-07-15, both agents,
+  blind-cross-verified) pinned the law at **three** points — byte 24/48/96 =
+  **11.49/2.84/0.713 st/s** — which is rate **∝ 1/byte²** (byte²·rate ≈ 6578,
+  constant to ±0.6%); the `1/byte` form predicts 5.68/1.42 st/s at byte 24/96
+  (2× wrong). The law is now `rate = 2.841·(48/byte)²` st/s (time-per-semitone
+  ∝ byte²). The distance law (duration ∝ pitch distance) and the byte-48 = 2.841
+  st/s anchor were already confirmed — only the byte→rate exponent changes. Byte
+  0 (portamento off) stays instant. Changes portamento `caesar-play` `.wav`
+  renders only; converter outputs identical (play-goldens byte-identical — no
+  pinned sequence uses portamento; both New 3DS console-tolerance captures PASS).
 - **`caesar-play` — the LFO rate constant is ~5.11× faster (console battery
   v2).** `kLfoRateHz` was a flagged `5/64` (0.078 Hz/unit) NW4R-precedent guess.
   Battery v2 (2026-07-15, two independent agents, FM-sideband spacing,

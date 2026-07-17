@@ -400,22 +400,22 @@ namespace play
 			return (cap > start) ? (cap - start) : gate;   // never lifts: hold to the cap
 		}
 
-		// Portamento rate anchor (console battery 2026-07-14, KEY_FLY glide): time
-		// byte 48 glides at 2.841 st/s (0.352 s/semitone, R^2=0.99998).
+		// Portamento rate anchor: time byte 48 glides at 2.841 st/s (0.352 s/semitone,
+		// R^2=0.99998; console battery 2026-07-14 KEY_FLY, re-confirmed battery v2).
 		constexpr double kPortaRateByte = 48.0;
 		constexpr double kPortaRateStPerSec = 2.841;
 
-		// The portamento glide DURATION for a 0xCF time byte, in samples. The battery
-		// measured a CONSTANT-RATE, linear-in-cents glide, so the duration is
-		// DISTANCE-PROPORTIONAL (duration = |distance| / rate) -- NOT the old fixed
-		// full-distance glide (portaTime x samplesPerTick), which was ~17x too fast on
-		// the measured interval. PROVISIONAL single-point law: seconds-per-semitone is
-		// LINEAR in the time byte (rate proportional to 1/byte), anchored so byte 48 =
-		// 2.841 st/s; monotonic (a bigger "time" byte = a longer glide) and tempo-
-		// independent (a wall-clock st/s rate, exactly as measured). The byte->rate
-		// SHAPE and the tempo-independence are unconstrained off byte 48 -- battery v2's
-		// second capture point (a different interval or time byte) firms both up. Byte 0
-		// (portamento off) stays instant: no glide.
+		// The portamento glide DURATION for a 0xCF time byte, in samples. The glide is
+		// CONSTANT-RATE and linear-in-cents, so the duration is DISTANCE-PROPORTIONAL
+		// (duration = |distance| / rate). Battery v2 (2026-07-15, both agents,
+		// blind-cross-verified) pinned the byte->rate law at THREE points -- byte
+		// 24/48/96 = 11.49/2.84/0.713 st/s -- which is rate proportional to 1/byte^2
+		// (byte^2 * rate ~= 6578, constant to +/-0.6%), NOT the earlier PROVISIONAL
+		// 1/byte (which predicts 5.68/1.42 st/s at byte 24/96 -- 2x wrong). So
+		// rate = 2.841 * (48/byte)^2 st/s (time-per-semitone proportional to byte^2),
+		// anchored at byte 48 = 2.841 st/s and tempo-independent (a wall-clock rate).
+		// The distance law and the byte-48 anchor were already confirmed; only the
+		// byte->rate EXPONENT changes here. Byte 0 (portamento off) stays instant.
 		uint32_t portaDurationSamples(int portaTime, float distanceSemis)
 		{
 			double dist = distanceSemis < 0.0f ? -static_cast<double>(distanceSemis) : static_cast<double>(distanceSemis);
@@ -425,8 +425,10 @@ namespace play
 				return 0;
 			}
 
-			// seconds/semitone = portaTime * (1 / rate@48) / 48; duration = |distance| x that.
-			double secPerSemi = static_cast<double>(portaTime) / kPortaRateStPerSec / kPortaRateByte;
+			// rate = rate@48 * (48/byte)^2  ->  seconds/semitone = byte^2 / (rate@48 * 48^2);
+			// duration = |distance| x that.
+			double secPerSemi = static_cast<double>(portaTime) * static_cast<double>(portaTime)
+				/ (kPortaRateStPerSec * kPortaRateByte * kPortaRateByte);
 			double durSamples = dist * secPerSemi * static_cast<double>(kNativeRate);
 
 			return static_cast<uint32_t>(durSamples + 0.5);
