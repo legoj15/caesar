@@ -23,3 +23,9 @@ tools/ab-verify/
 
 # Python bytecode (tools)
 __pycache__/
+
+# Console line-in captures (copyrighted-adjacent audio; kept local, never committed)
+*_console.wav
+*_stereo.wav
+BATTERY_*.wav
+*.readback.bcsar

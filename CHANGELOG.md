@@ -49,6 +49,19 @@ House rules:
   streams per-frame DSP config to an SD ring; versioned dump-format contract in
   `DSP-TAP-DESIGN.md`. Uncompiled scaffold, optional devkitARM, never in
   caesar_core/CI; output-identical.
+- **Battery-v2 console-capture analysis scripts** (`tools/capture-cartridge/`):
+  `analyze_capture_v2.py` (pilot-normalized pan L/R split + law/direction,
+  LPF corner, velocity, steal tie-order), `analyze_capture_v2_trackB.py`
+  (release/decay slopes, LFO FM-demod, portamento rate law, reverb residual),
+  and `verify_lfo_porta.py` (independent blind re-measure). Offline analysis
+  tooling; output-identical.
+- **`tools/surround-probe/partb/` — Surround Part B stimulus + register reader
+  (scaffold).** A span-sweep (`0xD7`)/`front_bypass` stimulus cartridge
+  (`build_partb_cartridge.py`, byte-identical stage-1 round-trip gated) and a
+  one-shot Rosalina GDB-RSP client (`gdb_read.py`, reads the current-bank
+  `SourceConfiguration.gain[3][4]` IEEE-754 floats; 24/24 offline tests) to
+  bind `span` to the DSP rear gain lanes. Live run pending a physical GDB-stub
+  enable. Offline dev tooling; output-identical.
 - **`caesar-play --list` now prints each entry's INFO volume byte.** The list
   already loaded the per-sound volume byte but never showed it; `doList` gains
   a `vol` column between `start` and `name`. Output-identical everywhere else
