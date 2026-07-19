@@ -161,10 +161,11 @@ verdict exit-code mapping, and the NTR on/off perturbation A/B. **32 tests.**
   its next capture, ideally with a screen checkpoint on the highlighted row.
 - **Auto-ftpd deploy flow** for pushing new cartridges hands-free (navigate
   Homebrew Utils → FTPD, push on :5000, exit) — today that leg is manual.
-  ⚠ Do not "fix" this by widening the boot-time file service's write prefix:
-  its 2 MiB `FS_MAX_WRITE_BYTES` is far under the ~6 MB cartridge and `FS_DoStor`
-  truncates the target *before* transferring, so that route would destroy the
-  on-console cartridge. See the ROADMAP hardware-RE queue for the correct scope.
+  As of 2026-07-19 the file service has a STOR-only `/luma/titles/` lane with a
+  16 MiB ceiling, and STOR no longer truncates the target (temp + rename), so
+  this leg can move onto it — **but that firmware has not been flashed or
+  hardware-tested**; the largest write ever proven on the console is 51 KB.
+  Until a ~6 MB STOR runs for real, keep using ftpd.
 
 ## Notes
 

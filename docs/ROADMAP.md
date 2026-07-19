@@ -295,27 +295,30 @@ blockers across two repos):
       hard-wired to `self.ntr_client()` and feeds `verify()` at *every* NavStep,
       so the new source must be per-step opt-in, never a global swap.
 - [ ] **Deploying a modified cartridge without hands** — supersedes the
-      "auto-ftpd deploy leg". Premise still true: the boot-time file service is
-      write-confined to `/luma/staging/` (`fileservice.c:275`, one prefix).
-      **⚠ Larger blocker found 2026-07-19 — a widened allowlist alone is
-      DESTRUCTIVE.** `FS_MAX_WRITE_BYTES` is 2 MiB (`fileservice.h:37`) and the
-      cartridge is 6,110,784 B — 2.9× over. `FS_DoStor` truncates with
-      `IFile_SetSize(&file, 0)` (`:290`) *before* the transfer, and the cap is
-      only enforced inside the recv loop (`:323`), so widening the prefix without
-      raising the ceiling would zero the console's working cartridge, write
-      2 MiB, and abort — recoverable only via the ftpd leg it was meant to
-      retire. The constant also bounds the commit channel (`:771`), so it cannot
-      simply be raised. Correct scope: a *separate* content-write ceiling + a
-      `/luma/titles/` write prefix (never bare `/luma/` — payloads and
-      sysmodules execute at boot) + proving a ~6 MB STOR on hardware (largest
-      write ever verified is 51 KB). Note `FS_WriteAllowed` gates STOR *and*
-      DELE (`:433`), so a second prefix also grants remote deletion under it —
-      take an op parameter if that is unwanted. There is no MKD/RNFR:
-      replace-bytes-at-an-existing-path only. Until then ftpd on :5000 stays the
-      deploy path and needs one manual launch. Firmware edit + sim tests are
-      OFFLINE — **but re-pin `sim_fileservice.py`'s 512 KiB cap
-      (`sim_fileservice.py:45`) to the firmware's 2 MiB first, or an offline
-      green certifies a destructive change.**
+      "auto-ftpd deploy leg". **Firmware side DONE 2026-07-19, hardware
+      verification REMAINS** (n3ds-mcp `7aa48e7`, Luma3DS `35e5371`, vendored as
+      patch 0020). The file service now has a second write lane:
+      `/luma/titles/`, STOR-only, under its own 16 MiB `FS_MAX_CONTENT_BYTES` —
+      a separate constant because `FS_MAX_WRITE_BYTES` (2 MiB) also bounds the
+      commit packet's length field and could not be raised to fit the
+      6,110,784 B cartridge. `FS_WriteAllowed` took an op parameter, since it
+      gates STOR and DELE alike and adding the prefix without it would have
+      granted remote deletion of game content for free. Bare `/luma/` stays
+      refused (payloads and sysmodules under it execute at boot).
+      The destructive-truncation hazard recorded here on 2026-07-19 is **fixed,
+      not merely documented**: STOR streams into `<target>.n3dstmp` and
+      publishes by delete-then-rename, so a dropped link mid-transfer leaves the
+      cartridge intact. That matters at ~6 MB over 3DS WiFi, where the old
+      truncate-first shape made any drop destroy the working copy. Publishing is
+      not atomic — a failure between delete and rename loses the old file — but
+      the window is two filesystem calls with no network in it.
+      **What remains is entirely on-console:** the largest write ever proven on
+      hardware is 51 KB, so the ~6 MB STOR, the rename publish and the 16 MiB
+      ceiling are all unexercised. The build is not flashed and `boot.firm` is
+      deliberately not re-vendored. Until that runs, ftpd on :5000 stays the
+      deploy path and needs one manual launch. Still no MKD/RNFR:
+      replace-bytes-at-an-existing-path only, so the LayeredFS directory tree
+      must already exist on the SD.
 - [ ] **Battery B's track-list DDOWN count** — "Find Mii - Dark Room", well
       below the Main Themes. **NEEDS CONSOLE**; nothing offline advances it.
       Both prior captures (2026-07-16, 2026-07-18 take 7) walked it with session
