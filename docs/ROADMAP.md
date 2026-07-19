@@ -278,6 +278,15 @@ blockers across two repos):
       is already implemented (`console_capture.py:561`); the missing piece is
       *reference data* — every plaza `ExpectScreen` carries prose-only `note`
       hints, no `mean_rgb`. **NEEDS CONSOLE** for the reference frames only.
+      **Offline prerequisite DONE 2026-07-19:** the per-step `ScreenSource` seam
+      shipped — a `RosalinaScreenshotSource` (menu → screenshot → close → fetch
+      newest `/luma/screenshots/*.bmp` by set-difference, surviving the
+      bogus-future-dated SD litter) that a NavStep opts into per-step (NTR stays
+      default), guarded to refuse mid-record and unless the step declares
+      `menu_leak_safe`. **The reference-frame capture is now content-gated, not
+      tooling-blocked:** the 2026-07-19 fresh plaza launch showed *no* announcement
+      cards (pending-StreetPass-gated, none queued), so the boundary could not be
+      observed — capture the frames whenever cards next appear.
       **Correction to the 2026-07-18 conclusion:** this does *not* require the
       standalone NTR-owning configuration. The fork has an NTR-free eye —
       Rosalina "Take screenshot" dumps the frozen app framebuffers to
@@ -329,26 +338,37 @@ blockers across two repos):
       scratch files there are permanent). Still no MKD/RNFR:
       replace-bytes-at-an-existing-path only, so the LayeredFS directory tree
       must already exist on the SD.
-      Remaining for this bullet: wire `console_capture.deploy` onto the titles
-      lane (it still routes through ftpd) — pure host-side work.
-- [ ] **Battery B's track-list DDOWN count** — "Find Mii - Dark Room", well
-      below the Main Themes. **NEEDS CONSOLE**; nothing offline advances it.
-      Both prior captures (2026-07-16, 2026-07-18 take 7) walked it with session
-      eyes, so no count was ever recorded. Capture it *with* a screen checkpoint
-      on the highlighted row, not on its own.
-- [ ] **Codify the player-change regression gate** — the console-tolerance net
-      itself is DONE (shipped 2026-07-14, `tools/console-tolerance/`; runs
-      offline in ~1 min against archived WAVs, already used by hand as a
-      per-commit gate twice — see the 2026-07-16 entries below). What is missing
-      is all offline: no orchestrator across the five `.ps1` nets (`ab-verify`,
+      **Host-side wiring DONE 2026-07-19:** `console_capture.deploy` now pushes
+      over the 4952 titles lane directly (ftpd:5000 no longer needed for deploy),
+      with a client-side 16 MiB pre-transfer refusal and a missing-LayeredFS-dir
+      hint. **This bullet is closed** — the deploy was exercised live pushing the
+      6.1 MB Part B cartridge byte-exact (~45 s). A hard constraint surfaced and
+      is now guarded: **NTR-HR streaming and a sustained STOR are mutually
+      exclusive** (any large write dies within seconds while NTR streams; RETR is
+      unaffected) — `deploy()` refuses to write while the stream is up and tells
+      the operator to stop it / reboot first. See
+      [HISTORY.md](HISTORY.md#the-deploy-leg-moved-onto-the-file-service-titles-lane--and-a-hard-ntrstor-constraint).
+- [x] **Battery B's track-list DDOWN count — DONE 2026-07-19.** "Find Mii - Dark
+      Room" is **22 DDOWN from the Music Player list top** (Entrance 0; Main
+      Theme 1–6; Salesbunny; StreetPass Birthdays; VIP Room; Puzzle Swap ×4;
+      Find Mii Title/Palace Theme/Kidnapped!/Captive Mii/Venture Forth/To Battle
+      Heroes!/Current Results/Fight On Heroes!/**Dark Room**), walked with a
+      screenshot checkpoint on the highlighted row.
+- [x] **Codify the player-change regression gate — DONE 2026-07-19.**
+      `tools/gate/gate.ps1` orchestrates the five offline nets (`ab-verify`,
       `play-goldens`, `diag-goldens`, `roundtrip-verify`, `console-tolerance`)
-      despite a shared 0/1/2 exit contract; no gate line in `CLAUDE.md`; no
-      sha256/provenance manifest for the goldens, which are scattered gitignored
-      across three directories, so a missing WAV silently shrinks the net to a
-      smaller PASS; and the four battery captures gate nothing —
-      `analyze_capture_v2.py` is measurement-only and has no pass/fail exit.
-      **NEEDS CONSOLE** only for net breadth: four of the six manifest rows (the
-      SE captures) have never been recorded.
+      cheapest-first as isolated `pwsh` children honouring the 0/1/2 (+ab-verify's
+      3) exit contract, into one summary table with a FULL PASS / FAILED / ERROR /
+      REDUCED verdict; `-SkipCorpus` forces a loud REDUCED and a missing binary
+      fails fast BLOCKED with the build command (it never builds). A checked-in
+      `tools/gate/goldens-manifest.json` (hashes/provenance only) is verified
+      first, so a missing/altered gate-critical golden marks its net DEGRADED —
+      killing the silent-shrink hole. A gate line was added to `CLAUDE.md`. The
+      **"four SE captures NEEDS CONSOLE" gap is retired, not filled:** those
+      isolated-SE captures are physically impossible (the SEs only fire during
+      music) and their calibration is subsumed by the present battery-v2 A/B rows,
+      so the manifest rows were reframed `never-recorded` → `obsolete-superseded`.
+      Full write-up in [HISTORY.md](HISTORY.md#the-rest-of-the-console-capture-host-trio-the-regression-gate-and-the-manifest-reconciliation).
 - [ ] **Longer-view enablers.**
       (a) *Sound-test captures from arbitrary titles* — blocked on navigation
       generality, therefore strictly downstream of the card-boundary item; not
@@ -379,12 +399,17 @@ blockers across two repos):
 Memory read stays routed through the analog-free program (3GX plugin for
 streams, Rosalina GDB stub for snapshots; classic-NTR read-mem retracted
 2026-07-16).
-- [ ] **Capture-rig v2 — repeatability** (decided 2026-07-16; interface
-      confirmed **2nd-gen 2i2** — true analog knobs, no software gain
-      control, so the 4th-gen software escape hatch is unavailable and the
-      knobs stay welded at the max rail, +0.045 dB known constant).
-      ADOPTED — **both parts shipped and hardware-verified with battery v2
-      (2026-07-16/18); this bullet looks closable, left open pending sign-off.**
+- [x] **Capture-rig v2 — repeatability: SIGNED OFF 2026-07-19.** (Decided
+      2026-07-16; interface confirmed **2nd-gen 2i2** — true analog knobs, no
+      software gain control, so the 4th-gen software escape hatch is unavailable
+      and the knobs stay welded at the max rail, +0.045 dB known constant.)
+      Both parts shipped and hardware-verified with battery v2 (2026-07-16/18)
+      and the rig was re-confirmed live 2026-07-19 (a test capture returned real
+      console audio). The pilot tone + Rosalina volume override are delivered;
+      the sign-off is complete. **Does not retire with the analog-free program**
+      — item 5 there makes the rig the digital tap's validator, after which it
+      demotes to arbitrary-title spot checks and one-time DAC validation (jobs
+      the per-title 3GX tap structurally cannot do).
       (1) **pilot tone** — every battery
       opens with a fixed reference note; analysis normalizes each channel
       to it per-session, so constant rig gain (slider, knobs, temperature)
@@ -455,12 +480,18 @@ streams, Rosalina GDB stub for snapshots; classic-NTR read-mem retracted
          would form a non-GPL island in this GPLv3 repo; a barebones plugin
          links only libctru (GPL-compatible).** Versioned dump-format
          contract + mechanism in `tools/dsp-tap/DSP-TAP-DESIGN.md`.
-         One-shot register snapshots (Surround Part B's `gain[3][4]`) can
-         use the Rosalina GDB stub meanwhile. Remaining: first devkitARM
-         build + on-console bring-up (the plugin is uncompiled scaffold,
-         every device-dependent assumption marked VERIFY). devkitARM stays
-         optional, never in caesar_core/CI; n3ds-mcp only deploys/toggles
-         it; plugins are per-title — MiiPlaza hosts both cartridge and tap.
+         One-shot register snapshots (Surround Part B's `gain[3][4]`) use
+         the Rosalina GDB stub meanwhile — **that path is now live-proven
+         (2026-07-19): the Part B dual-dump read the per-voice
+         `SourceConfiguration` off the console over the stub and settled the
+         span binding + the gain address.** Remaining for the streaming tap:
+         first devkitARM build + on-console bring-up (the plugin is uncompiled
+         scaffold, every device-dependent assumption marked VERIFY). **Blocked
+         on toolchain: devkitPro is not installed on the dev machine** (no
+         `/c/devkitPro`, no `3dslink` on PATH) — installing devkitARM is the
+         next concrete step. devkitARM stays optional, never in caesar_core/CI;
+         n3ds-mcp only deploys/toggles it; plugins are per-title — MiiPlaza
+         hosts both cartridge and tap.
       4. **Replay harness**: dumped command stream → dsp_oracle → rendered
          WAV. What the matrix buys: a command-stream diff isolates "is
          caesar's ARM11 runtime model right?" (the stage-2 heart) from "is
@@ -471,29 +502,18 @@ streams, Rosalina GDB stub for snapshots; classic-NTR read-mem retracted
       5. **Perturbation A/B**: dumper-on vs dumper-off analog captures must
          match (the analog rig validates the digital tap; it then demotes
          to arbitrary-title spot checks and one-time DAC validation).
-- [ ] **Surround Part B — tie the opcode to the register** (hardware-RE,
-      follow-up now that Part A is confirmed). **Offline prep DONE 2026-07-16
-      (`tools/surround-probe/partb/`):** span-sweep stimulus cartridge
-      (`build_partb_cartridge.py`, held-note + retrigger/front_bypass
-      differential, byte-identical stage-1 round-trip gated) + a one-shot
-      Rosalina GDB-RSP reader (`gdb_read.py`, offline unit-tested 24/24). Dumps
-      the live `SourceConfiguration.gain[3][4]` while the span-sweeping `.bcseq`
-      plays, binding `span`/`front_bypass` to the rear lanes. Feeds suite stage
-      3's Surround virtualization model. **Live run remains — no longer blocked.**
-      (The former blocker, "InputRedirection can't drive the Rosalina overlay",
-      was dissolved 2026-07-18 by the closed console-automation bullet above:
-      the closed-loop `RosalinaMenuDriver` navigates the overlay against the
-      UDP-4951 text readout. The *Debugger options → Enable debugger* walk
-      specifically is untested, but it is ordinary menu navigation now, not a
-      physical-presence requirement. This path is available **today** — do not
-      re-gate it on the analog-free program, whose plugin is still uncompiled
-      scaffold.) **KNOWN-ADDRESS CORRECTION (disasm Session 7):** the reader's
-      gain address (`f32 @ slot+0x04`, from the Azahar HLE model) does NOT match
-      the real ARM11 driver, which writes **s16 gains at `slot+0x3c`** (front-L
-      first at +0x3c, front-R +0x3e, rear +0x40..; channel order L-before-R is
-      confirmed). Reconcile whether `slot+0x3c` is the DSP shared-mem struct or
-      an ARM11 intermediate before the live read (tracked under
-      [Known bugs](#known-bugs-open)).
+- [x] **Surround Part B — tie the opcode to the register: DONE 2026-07-19.**
+      The live New 3DS read bound `span` (0xD7) to `SourceConfiguration.gain[0][2]`/`[0][3]`
+      (the MAIN-bus rear lanes): on the sustained span-sweep voice the rear gains
+      grew monotonically with span through a constant-power front↔rear crossfade
+      (0.7071/0.0000 → 0.6108/0.3563 → 0.3452/0.6171, front²+rear² = 0.500
+      throughout), `output_format` = 2 (Surround). The same dual-dump **settled
+      the gain-address question**: Candidate A (f32 @ slot+0x04) is the live DSP
+      shared-memory layout; Candidate B (s16 @ slot+0x3c) is disproven as the
+      shared-mem field (a fixed constant in every voice, never tracking span) —
+      it is the ARM11 intermediate the disasm found. `dsp_gain_geometry.h` flipped
+      to settled = Candidate A. Full write-up in
+      [HISTORY.md](HISTORY.md#hardware-re-session--surround-part-b-bound-the-gain-address-settled-the-console-in-the-loop-legs-closed-2026-07-19).
 - [x] **Decay-table console spot-check — CLOSED 2026-07-16.** The corrected
       decay values (2026-07-08 fix) are exercised on hardware for the first time
       by battery-v2 track B's decay-byte-122 probe: console/prediction plateau
@@ -606,18 +626,6 @@ Fixed bugs and their verification stories are in
 [Remaining converter scope](#remaining-converter-scope) above, not here — this
 list is the known defect tail.
 
-- **The `SourceConfiguration` gain address is wrong in two tools at once
-  (hardware-RE blocker for Surround Part B).** `tools/surround-probe/partb/gdb_read.py`
-  and `tools/dsp-oracle/src/shared_mem.h` (`SrcCfgOffset::gain`) both carry
-  `f32 @ slot+0x04`, inherited from the Azahar HLE model. Disasm Session 7 found
-  the real ARM11 driver writes **s16 gains at `slot+0x3c`** (front-L +0x3c,
-  front-R +0x3e, rear +0x40..; L-before-R confirmed). Unresolved: whether
-  `slot+0x3c` is the DSP shared-mem struct itself or an ARM11 intermediate — if
-  it is an intermediate, the DSP-side tap cannot observe it at all and only the
-  GDB path can. Fix upstream in one place: `dsp_regions.h` /`shared_mem.h` feed
-  both the partb reader and `tools/dsp-tap`'s dump geometry, so a per-tool patch
-  would re-diverge. Blocks the Part B live read; the tap dumps raw bytes so both
-  candidate offsets land in every record either way.
 - **Bank/WARC/GROUP naming shares the symbol-collision hazard structurally.**
   The sequence-side collision fix (2026-07-12) covers `.bcseq`/`.mid` only;
   bank, wave-archive and group outputs are still named from the symbol alone

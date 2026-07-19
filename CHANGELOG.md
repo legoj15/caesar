@@ -66,13 +66,42 @@ House rules:
   (release/decay slopes, LFO FM-demod, portamento rate law, reverb residual),
   and `verify_lfo_porta.py` (independent blind re-measure). Offline analysis
   tooling; output-identical.
-- **`tools/surround-probe/partb/` — Surround Part B stimulus + register reader
-  (scaffold).** A span-sweep (`0xD7`)/`front_bypass` stimulus cartridge
-  (`build_partb_cartridge.py`, byte-identical stage-1 round-trip gated) and a
-  one-shot Rosalina GDB-RSP client (`gdb_read.py`, reads the current-bank
-  `SourceConfiguration.gain[3][4]` IEEE-754 floats; 24/24 offline tests) to
-  bind `span` to the DSP rear gain lanes. Live run pending a physical GDB-stub
-  enable. Offline dev tooling; output-identical.
+- **`tools/surround-probe/partb/` — Surround Part B stimulus + register reader,
+  live run DONE (2026-07-19).** A span-sweep (`0xD7`)/`front_bypass` stimulus
+  cartridge (`build_partb_cartridge.py`, byte-identical stage-1 round-trip gated)
+  and a one-shot Rosalina GDB-RSP client (`gdb_read.py`, dual-dumps both candidate
+  gain layouts + raw slot bytes; 36 offline checks). The live New 3DS read **bound
+  `span` (0xD7) to the DSP MAIN rear gain lanes** (`SourceConfiguration.gain[0][2]`/`[0][3]`,
+  a constant-power front↔rear crossfade) and **settled the gain address**:
+  Candidate A (f32 @ slot+0x04) is the live shared-memory layout; Candidate B
+  (s16 @ slot+0x3c) is disproven (an ARM11 intermediate). Offline dev tooling;
+  output-identical.
+- **`tools/dsp-shared/dsp_gain_geometry.h` — one cross-tool authority for the
+  per-voice DSP gain geometry.** The gain offset (previously duplicated and
+  diverged across `gdb_read.py`, `shared_mem.h`, `dsp_regions.h`) now lives once;
+  the C/C++ consumers `#include` it and the Python reader parses it, so they cannot
+  re-diverge. Flipped to settled = Candidate A by the Part B live read. Offline
+  dev tooling; output-identical.
+- **`tools/gate/` — the player-change regression-gate orchestrator.** `gate.ps1`
+  runs the five offline nets (`ab-verify`, `play-goldens`, `diag-goldens`,
+  `roundtrip-verify`, `console-tolerance`) as isolated `pwsh` children honouring
+  the shared 0/1/2 (+ab-verify's 3) exit contract, into one FULL PASS / FAILED /
+  ERROR / REDUCED verdict; `-SkipCorpus` forces a loud REDUCED and a missing
+  binary fails fast BLOCKED (it never builds). A checked-in `goldens-manifest.json`
+  (sha256/provenance, never content) is verified first so a missing/altered
+  gate-critical golden marks its net DEGRADED (killing the silent-shrink hole,
+  proven live: a poisoned hash → exit 3 even though the net itself passed).
+  Offline dev tooling; output-identical.
+- **`tools/console-capture` — deploy moved onto the file-service titles lane,
+  a per-step `ScreenSource` seam, and a `SoundTestProfile` (offline, 51 tests).**
+  `deploy()` now pushes over the 4952 `/luma/titles/` STOR lane (ftpd:5000 no
+  longer needed for cartridge deploy), refuses an over-16-MiB cartridge before
+  any transfer, and — new hard constraint proven live — **refuses to write while
+  the NTR-HR stream is up** (a sustained STOR dies within seconds during NTR
+  streaming; RETR is unaffected). A `RosalinaScreenshotSource` gives a per-step
+  NTR-free eye (menu → screenshot → fetch newest BMP by set-difference), and
+  `SoundTestProfile` lifts the plaza navigation constants (HOME→plaza corrected
+  to the 3rd tile). Offline dev tooling; output-identical.
 - **`caesar-play --list` now prints each entry's INFO volume byte.** The list
   already loaded the per-sound volume byte but never showed it; `doList` gains
   a `vol` column between `start` and `name`. Output-identical everywhere else

@@ -5454,3 +5454,130 @@ expensive work than was actually required.
 
 Not a retraction of the entry above; HISTORY records what was believed at the
 time. The roadmap bullet has been corrected.
+
+## Hardware-RE session — Surround Part B bound, the gain address settled, the console-in-the-loop legs closed (2026-07-19)
+
+The New 3DS drove the whole session over `n3ds-mcp`: screenshot-eye orientation,
+a cartridge deploy over the new file-service titles lane, the Surround Part B
+live register read, and a Stereo-restore on the way out. Four offline workstreams
+landed alongside it (three Opus agents + orchestrator edits), each adversarially
+reviewed before commit.
+
+### Surround Part B — `span` (0xD7) IS the DSP MAIN rear gain lanes, and the gain address is Candidate A
+
+Part A proved (2026-07-11) that `span` is *audible* in Surround. Part B binds the
+opcode to the register. The `build/partb` span-sweep stimulus cartridge
+(`MeetSound.bcsar`, sha `bba32a3f`, byte-identical stage-1 round-trip gated) was
+deployed to the real LayeredFS path, the console switched to **Surround**, the
+Rosalina GDB stub enabled, MiiPlaza attached on **port 4000**, and
+`gdb_read.py`'s dual-dump fired against the sustained span-sweep voice (voice 0).
+
+The read is decisive on **both** open questions at once:
+
+| span phase | MAIN frontL/R (f32 @ +0x04) | MAIN rearL/R | front²+rear² |
+|---|---|---|---|
+| span = 0 | 0.7071 | 0.0000 | 0.500 |
+| span ~ mid | 0.6108 | 0.3563 | 0.500 |
+| span ~ high | 0.3452 | 0.6171 | 0.500 |
+
+The rear lanes `gain[0][2]/[0][3]` grow monotonically with `span` while the front
+lanes fall, conserving power (= 0.7071² at every point) — a textbook
+constant-power front↔rear crossfade. `output_format` read **2 (Surround)**
+(the intermittent 0/Mono reads are a double-buffer race on the `output_format`
+word alone — it is written to one bank per frame; the gains are stable across
+banks). **Binding: `span` (0xD7) → `SourceConfiguration.gain[0][2]`/`[0][3]`,
+the MAIN-bus rear lanes.**
+
+The same dump settled the standing **"gain address is wrong in two tools"** bug.
+On every voice, the s16 lanes at slot+0x3c (Candidate B, disasm Session 7) were a
+*fixed constant* (FL=FR=0, RL=59910, RR=11793) that never tracked `span` and
+failed the pan-law signature (FL+FR ≠ 32768), while the f32 gains at slot+0x04
+(Candidate A, Azahar HLE) carried the entire constant-power signal. **Candidate A
+(f32 @ slot+0x04) is the live DSP shared-memory gain layout; Candidate B (+0x3c)
+is disproven as the shared-mem field — it is the ARM11-side intermediate the
+disasm found, which the DSP-region read sees only as stale bytes.** This confirms
+the oracle's own unity-click prediction (`dsp-oracle/PORT-NOTES.md` §6) and
+vindicates the warning that Session 7's "DSP-RAM" label was an untraced-base
+inference. The cross-tool authority `tools/dsp-shared/dsp_gain_geometry.h` was
+flipped to `DSP_SRC_GAIN_SETTLED=1`, canonical = Candidate A,
+`DSP_SRC_GAIN_DRV_DISPROVEN=1`; `shared_mem.h`, `dsp_regions.h`,
+`DSP-TAP-DESIGN.md` and the partb README were reconciled to the settled verdict.
+
+**Mechanism facts recorded for future GDB reads.** The Rosalina stub only halts a
+process on the *first* connect after arming — selecting the process in the list
+freezes it "waiting"; on GDB detach it runs free, so a later reconnect reads a
+*running* process (garbage / `E0e` read error). Each snapshot therefore needs a
+re-arm (deselect→reselect in the process list). Enabling the debugger requires
+the process list to show `( )` checkboxes; if it shows bare names, "Enable
+debugger" was reset (a dead process drops it) and `A` opens the memory viewer
+instead of arming — re-enable it first.
+
+### The deploy leg moved onto the file-service titles lane — and a hard NTR⊥STOR constraint
+
+`console_capture.deploy()` now pushes over the boot file-service `/luma/titles/`
+STOR lane (port 4952), retiring the ftpd:5000 dependency for cartridge deploy. It
+refuses an over-16-MiB cartridge **client-side before any transfer** (an oversize
+STOR is only rejected after streaming the whole file — ~149 s for 16 MiB), keeps
+verify-first semantics (RETR+sha256, skip-if-identical, push-then-re-verify), and
+on a STOR failure probes the parent directory to name a missing LayeredFS tree
+(the lane has no MKD). The 6,110,784 B Part B cartridge round-tripped byte-exact
+in ~45 s at 131 KB/s.
+
+A new hard constraint surfaced live and is now guarded + documented: **while
+NTR-HR streams video, any sustained STOR to the console dies within seconds**
+(measured: the 6.1 MB push aborted at 8 KB, a 1 MB push at ~144 KB, WinError
+10053 both; RETR of 6 MB is unaffected; small ~16 B STORs succeed). On a quiet
+radio (post-reboot, no NTR) the same 6.1 MB STOR completed in 45.6 s. `deploy()`
+now inspects the *existing* NTR client (never constructing one — that would itself
+start streaming) and fails fast with a "stop the stream / reboot first" message
+when a write is needed; the verify-only path (identical bytes → RETR) still
+succeeds with NTR up. A second quirk: **NTR-HR does not survive a System Settings
+launch** (the stream froze on the app-close and never recovered until BootNTR was
+relaunched).
+
+### The rest of the console-capture host trio, the regression gate, and the manifest reconciliation
+
+Two more host-side seams landed (offline, 51 tests): a per-step **`ScreenSource`**
+abstraction (NTR default; a `RosalinaScreenshotSource` that opens the menu, takes
+a screenshot, closes, and fetches the newest `/luma/screenshots/*.bmp` by
+set-difference of the directory listing to survive the bogus-future-dated litter
+confirmed on the SD this session — with guards refusing it mid-record and unless a
+step declares `menu_leak_safe`), and a **`SoundTestProfile`** dataclass lifting the
+plaza constants (the HOME→plaza prefix corrected to the **3rd tile / 2× DRIGHT**
+per the live layout; the banner checkpoint is the real guard).
+
+The **regression gate** (`tools/gate/gate.ps1`) orchestrates the five offline nets
+(ab-verify, play-goldens, diag-goldens, roundtrip-verify, console-tolerance)
+cheapest-first as isolated `pwsh` children honouring the 0/1/2 (+ab-verify's 3)
+exit contract, into one summary table with a 0/1/2/3 verdict (FULL PASS / FAILED /
+ERROR / REDUCED). `-SkipCorpus` forces a loud REDUCED; a missing binary fails
+fast BLOCKED with the exact VS 18 build command (it never builds); a
+missing/altered gate-critical golden marks its net DEGRADED so
+`console-tolerance`'s silent-skip can't shrink into a smaller PASS. A checked-in
+`goldens-manifest.json` (hashes/provenance only) is verified first. A gate line
+was added to `CLAUDE.md`.
+
+The four "SE capture" manifest rows were **reconciled from `never-recorded` to
+`obsolete-superseded`**: the isolated-note plan was abandoned 2026-07-14 because
+those SEs only fire inside a music sequence, so a standalone isolated-SE WAV is
+not physically capturable — their calibration targets are already exercised by the
+present battery-v2 A/B rows (each obsolete row now names its `subsumedBy`). The
+rig was confirmed live this session (a test capture returned real audio, clipping
+at 0 dBFS because the 65 % volume override was not set), so the reframing is not a
+capability gap — the isolation is impossible by construction. `gate.ps1` gained an
+`obsolete` counter so the report stays honest and no longer emits a false "NEEDS
+CONSOLE" gap for them.
+
+### Battery B's track index, and the card boundary (content-gated)
+
+Battery B ("Find Mii - Dark Room") is **22 DDOWN from the Music Player list top**
+(Entrance 0, Main Theme 1–6, Salesbunny, StreetPass Birthdays, VIP Room, Puzzle
+Swap ×4, then Find Mii Title/Palace Theme/Kidnapped!/Captive Mii/Venture Forth/To
+Battle Heroes!/Current Results/Fight On Heroes!/**Dark Room**), walked with a
+screenshot checkpoint on the highlighted row.
+
+The **card-boundary reference frames** could not be captured: the fresh plaza
+launch showed **no announcement cards** (they are pending-StreetPass-gated and
+none were queued). The `ScreenSource` screenshot-eye is built and offline-tested,
+ready to consume the frames whenever cards next appear — the item is content-gated,
+not tooling-blocked.
