@@ -268,20 +268,102 @@ Hardware-RE queue (New 3DS + CFW, feeds stages 2–3):
 - [x] **Console-in-the-loop automation (`n3ds-mcp` + line-in rig)** — live
       shakedown PASSED 2026-07-18, all `tools/console-capture` stages proven on
       hardware; full story in [HISTORY.md](HISTORY.md#console-in-the-loop-automation--the-live-shakedown-2026-07-18).
-- [ ] **Console-capture follow-ups** (from the 2026-07-18 shakedown):
-      real screen verification for the plaza announcement-card boundary
-      (RegionMean/template hints from reference frames — the card count is
-      genuinely variable per entry and blind counts mis-navigate into
-      StreetPass games; requires the standalone NTR-owning configuration),
-      the auto-ftpd deploy leg for pushing *new* cartridges (the boot-time
-      file service is write-confined to `/luma/staging/`), battery B's
-      track-list DDOWN count, and the longer-view enablers: routine
-      console-goldens regression per player change (tolerance-net only),
-      sound-test captures from arbitrary titles, and same-size CWAV payload
-      pokes as stage-3 stimulus injection (unproven: needs fixed-size
-      DSP-ADPCM re-encode). Memory read stays routed through the analog-free
-      program (3GX plugin for streams, Rosalina GDB stub for snapshots;
-      classic-NTR read-mem retracted 2026-07-16).
+Console-capture follow-ups (from the 2026-07-18 shakedown; re-scoped
+2026-07-19 — the original single bullet mixed six items with three different
+blockers across two repos):
+
+- [ ] **Screen-verification predicates for the plaza card boundary** — the
+      announcement-card count is variable per entry; blind A-presses
+      mis-navigate into StreetPass games (2026-07-18 take 6). `RegionMeanVerifier`
+      is already implemented (`console_capture.py:561`); the missing piece is
+      *reference data* — every plaza `ExpectScreen` carries prose-only `note`
+      hints, no `mean_rgb`. **NEEDS CONSOLE** for the reference frames only.
+      **Correction to the 2026-07-18 conclusion:** this does *not* require the
+      standalone NTR-owning configuration. The fork has an NTR-free eye —
+      Rosalina "Take screenshot" dumps the frozen app framebuffers to
+      `/luma/screenshots/`, fetchable over the file service (n3ds-mcp
+      `firmware/README.md`, "Eyes without NTR", documented 2026-07-18 19:36,
+      2h34m *before* this bullet was written; it was never cross-checked).
+      Uncompressed BMP is *higher* fidelity than the JPEG-80 NTR stream
+      `RegionMeanVerifier` was built to tolerate. Three constraints to encode
+      first: menu-open freezes the app, so it is unusable mid-record; the open
+      combo leaks its buttons into the app underneath (DDOWN is inert at the
+      card boundary — "D-pad dead during cards" — but L/SELECT there are
+      unverified); and it runs on UDP 4951, one reader at a time, so it
+      relocates the single-bind exclusivity off NTR rather than removing it.
+      Offline prerequisite: a `ScreenSource` seam — `_wait_frame` (`:1091`) is
+      hard-wired to `self.ntr_client()` and feeds `verify()` at *every* NavStep,
+      so the new source must be per-step opt-in, never a global swap.
+- [ ] **Deploying a modified cartridge without hands** — supersedes the
+      "auto-ftpd deploy leg". Premise still true: the boot-time file service is
+      write-confined to `/luma/staging/` (`fileservice.c:275`, one prefix).
+      **⚠ Larger blocker found 2026-07-19 — a widened allowlist alone is
+      DESTRUCTIVE.** `FS_MAX_WRITE_BYTES` is 2 MiB (`fileservice.h:37`) and the
+      cartridge is 6,110,784 B — 2.9× over. `FS_DoStor` truncates with
+      `IFile_SetSize(&file, 0)` (`:290`) *before* the transfer, and the cap is
+      only enforced inside the recv loop (`:323`), so widening the prefix without
+      raising the ceiling would zero the console's working cartridge, write
+      2 MiB, and abort — recoverable only via the ftpd leg it was meant to
+      retire. The constant also bounds the commit channel (`:771`), so it cannot
+      simply be raised. Correct scope: a *separate* content-write ceiling + a
+      `/luma/titles/` write prefix (never bare `/luma/` — payloads and
+      sysmodules execute at boot) + proving a ~6 MB STOR on hardware (largest
+      write ever verified is 51 KB). Note `FS_WriteAllowed` gates STOR *and*
+      DELE (`:433`), so a second prefix also grants remote deletion under it —
+      take an op parameter if that is unwanted. There is no MKD/RNFR:
+      replace-bytes-at-an-existing-path only. Until then ftpd on :5000 stays the
+      deploy path and needs one manual launch. Firmware edit + sim tests are
+      OFFLINE — **but re-pin `sim_fileservice.py`'s 512 KiB cap
+      (`sim_fileservice.py:45`) to the firmware's 2 MiB first, or an offline
+      green certifies a destructive change.**
+- [ ] **Battery B's track-list DDOWN count** — "Find Mii - Dark Room", well
+      below the Main Themes. **NEEDS CONSOLE**; nothing offline advances it.
+      Both prior captures (2026-07-16, 2026-07-18 take 7) walked it with session
+      eyes, so no count was ever recorded. Capture it *with* a screen checkpoint
+      on the highlighted row, not on its own.
+- [ ] **Codify the player-change regression gate** — the console-tolerance net
+      itself is DONE (shipped 2026-07-14, `tools/console-tolerance/`; runs
+      offline in ~1 min against archived WAVs, already used by hand as a
+      per-commit gate twice — see the 2026-07-16 entries below). What is missing
+      is all offline: no orchestrator across the five `.ps1` nets (`ab-verify`,
+      `play-goldens`, `diag-goldens`, `roundtrip-verify`, `console-tolerance`)
+      despite a shared 0/1/2 exit contract; no gate line in `CLAUDE.md`; no
+      sha256/provenance manifest for the goldens, which are scattered gitignored
+      across three directories, so a missing WAV silently shrinks the net to a
+      smaller PASS; and the four battery captures gate nothing —
+      `analyze_capture_v2.py` is measurement-only and has no pass/fail exit.
+      **NEEDS CONSOLE** only for net breadth: four of the six manifest rows (the
+      SE captures) have never been recorded.
+- [ ] **Longer-view enablers.**
+      (a) *Sound-test captures from arbitrary titles* — blocked on navigation
+      generality, therefore strictly downstream of the card-boundary item; not
+      blocked by 3GX's per-title constraint (that is *why* this job lives on the
+      analog rig) and not by cartridge deploy (a stock-audio capture writes
+      nothing). Offline: lift the plaza-specific constants — `PLAZA_TRACKS`,
+      `DEFAULT_HOME_TO_PLAZA_TAPS`, `STOP_PLAYBACK_TAP` (`:984`, hardcoded into
+      `stop_playback` with no override — "A stops" is a plaza law, not a
+      universal one), and the battery-specific `seconds_per_pass` — into a
+      `SoundTestProfile`.
+      (b) *Same-size CWAV payload pokes as stage-3 stimulus injection* — **the
+      "needs fixed-size DSP-ADPCM re-encode" framing was wrong (2026-07-19).**
+      DSP-ADPCM is constant-bitrate at exactly 8 B per 14 samples
+      (`Cwav.cpp:187-203`), so holding the sample count makes same-size free;
+      there is no bit-budget problem. A click/step is emittable in closed form by
+      zeroing the 16 per-channel DSP coefficients (the predictor drops out and
+      `scaled == scal * adpcm` exactly), but only at amplitudes of the form
+      `n·2^e`, `n` ∈ [-8,7], one exponent per 14-sample block — arbitrary
+      waveforms are *not* reachable this way. Encoder-free alternative: flip the
+      INFO codec byte to PCM16 and shorten the sample count, leaving the DATA
+      window size untouched. caesar still has no ADPCM encoder of any kind, so
+      this is genuinely unbuilt — but the real blocker is the `/luma/titles`
+      delivery leg above, not the codec. The offline DSP oracle already pushes a
+      stimulus through the real firmware, so this poke is not the only stimulus
+      path; its unique value is validating the *game's own runtime* reverb
+      config end-to-end.
+
+Memory read stays routed through the analog-free program (3GX plugin for
+streams, Rosalina GDB stub for snapshots; classic-NTR read-mem retracted
+2026-07-16).
 - [ ] **Capture-rig v2 — repeatability** (decided 2026-07-16; interface
       confirmed **2nd-gen 2i2** — true analog knobs, no software gain
       control, so the 4th-gen software escape hatch is unavailable and the

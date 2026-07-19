@@ -5432,3 +5432,25 @@ pre-inversion direction (it was written before player fix `9769a96` flipped
 pan to the console-confirmed byte-0→RIGHT law) and failed the correct render.
 The check now asserts the monotone-*increasing* L−R split; the build passes
 all gates again.
+
+### Addendum 2026-07-19 — the card-boundary conclusion named a prerequisite it did not have
+
+Take 6 above concludes that RegionMean/template verification "requires the
+standalone NTR-owning configuration." That conclusion was not wrong about the
+*need* for screen verification — it was wrong about the cost. An NTR-free eye
+already existed when it was written: Rosalina "Take screenshot" dumps the frozen
+app framebuffers to `/luma/screenshots/`, fetchable over the boot-time file
+service, documented in n3ds-mcp's `firmware/README.md` ("Eyes without NTR") at
+2026-07-18 19:36 — 2h34m before this entry was filed. It was never cross-checked
+against the shakedown's conclusion. Uncompressed BMP is in fact *higher* fidelity
+than the JPEG-80 NTR stream `RegionMeanVerifier` was built to tolerate.
+
+Left as a standing lesson, since it is the second instance of the same failure in
+this project (the other: Surround Part B carried a "a human must hold the console"
+blocker for a day after the menu became machine-drivable). **When a conclusion
+names a prerequisite, re-check the dependency repo's log before the conclusion
+hardens into a roadmap gate.** Both errors pointed the same way — toward more
+expensive work than was actually required.
+
+Not a retraction of the entry above; HISTORY records what was believed at the
+time. The roadmap bullet has been corrected.

@@ -11,8 +11,10 @@ success/failure and a machine-readable ``data`` payload:
                     Rosalina text readout; live-verified 2026-07-18).
   2. deploy      -- ftp_put a cartridge .bcsar to the Luma path, ftp_get it back
                     and hash-compare to confirm the push landed intact.
-  3. navigate    -- screenshot-verified plaza navigation to a named track, driven
-                    by InputRedirection input + NTR frame verification per step.
+  3. navigate    -- frame-liveness-verified plaza navigation to a named track,
+                    driven by InputRedirection input + a per-step NTR frame
+                    check. NOTE: screen *identity* is unchecked by default (see
+                    AcceptingVerifier) -- that gap is what caused take 6.
   4. record      -- ffmpeg/dshow capture of N passes' worth of seconds, then a
                     level/noise assertion (peak window, noise floor, both
                     channels present; fail loudly on clipping or silence).
@@ -835,8 +837,10 @@ class RosalinaMenuDriver:
 # Music-player track order in the plaza: Entrance, Main Theme 1 (= battery A),
 # Main Theme 2, ... The value is the number of DDOWN presses from the top of
 # the list to that track. Battery B displays as "Find Mii - Dark Room", well
-# below the Main Themes -- its DDOWN count has not been walked yet; fill it in
-# (same screenshot-verified way) the next time battery B is captured.
+# below the Main Themes -- its DDOWN count has not been walked yet. The counts
+# below were read with session eyes on the track list, NOT verified by tooling;
+# fill battery B's in the same way (ideally with a screen checkpoint on the
+# highlighted row) the next time it is captured.
 PLAZA_TRACKS: dict[str, int] = {
     "Entrance": 0,
     "Main Theme 1": 1,   # = capture-cartridge battery A (BGM_MAIN_Mii_Only_One)
@@ -1416,7 +1420,7 @@ def _build_cli():
     d = sub.add_parser("deploy", help="Push a cartridge .bcsar and hash-verify it.")
     d.add_argument("bcsar")
 
-    n = sub.add_parser("navigate", help="Navigate to a plaza track (screenshot-verified).")
+    n = sub.add_parser("navigate", help="Navigate to a plaza track (frame-liveness-verified; screen identity unchecked).")
     n.add_argument("--track", default="Main Theme 1", choices=sorted(PLAZA_TRACKS))
 
     r = sub.add_parser("record", help="Record N passes and level-check.")

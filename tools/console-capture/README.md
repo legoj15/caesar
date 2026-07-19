@@ -156,10 +156,15 @@ verdict exit-code mapping, and the NTR on/off perturbation A/B. **32 tests.**
   brittle pixels). For true screen identification — e.g. catching a third
   announcement card — drop in `RegionMeanVerifier` (region mean-RGB, tolerant)
   or a template matcher via the `ExpectScreen.hints` interface.
-- **Battery B's DDOWN count** in the plaza track list (fill in the same
-  screenshot-verified way on its next capture).
+- **Battery B's DDOWN count** in the plaza track list. The existing counts were
+  read with session eyes, not verified by tooling; fill B's in the same way on
+  its next capture, ideally with a screen checkpoint on the highlighted row.
 - **Auto-ftpd deploy flow** for pushing new cartridges hands-free (navigate
   Homebrew Utils → FTPD, push on :5000, exit) — today that leg is manual.
+  ⚠ Do not "fix" this by widening the boot-time file service's write prefix:
+  its 2 MiB `FS_MAX_WRITE_BYTES` is far under the ~6 MB cartridge and `FS_DoStor`
+  truncates the target *before* transferring, so that route would destroy the
+  on-console cartridge. See the ROADMAP hardware-RE queue for the correct scope.
 
 ## Notes
 
