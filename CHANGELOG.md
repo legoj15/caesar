@@ -24,6 +24,16 @@ House rules:
 
 ### Added
 
+- **`tools/console-capture` live-shakedown hardening (console-in-the-loop
+  automation shipped).** The capture pipeline is now live-proven end-to-end on
+  the New 3DS (console-tolerance PASS): a closed-loop `RosalinaMenuDriver`
+  pins the console volume override (rig constant 65%) verified against the
+  Rosalina text readout; deploy is verify-first (hash the on-console cartridge
+  read-only; push only when bytes differ — the boot-time file service is
+  write-confined to `/luma/staging/`); the plaza navigation path is the
+  live-verified route (HOME-tile walk, Y/switch-icons, touch-select). Offline
+  tests 26 → 32. Tooling only; output-identical.
+
 - **`tools/dsp-oracle` — the stage-3 DSP oracle (offline measuring
   instrument).** Vendors the teakra Teak-DSP interpreter (MIT, pinned commit,
   no patches) and adds a standalone `dsp_oracle` that boots the console's real
@@ -38,6 +48,7 @@ House rules:
   `final_samples` region (word 0x8540) — region peak equals DAC peak at every
   amplitude. New `dsp_oracle_config_smoke` target. Offline measuring instrument
   only, out of caesar_core and CI; output-identical.
+
 - **`tools/console-capture/` — hands-free New-3DS audio capture harness.**
   Independently-callable stages (preflight / deploy / navigate / record /
   verdict / perturbation-A-B) reusing `n3ds-mcp` by import; 26 offline tests
@@ -70,6 +81,11 @@ House rules:
 
 ### Fixed
 
+- **`tools/capture-cartridge/check_prediction_v2.py` pan gate un-staled.** The
+  track-A pan check predated the console-confirmed pan-direction inversion
+  (player fix `9769a96`, byte 0 → RIGHT) and failed correct renders; it now
+  asserts the monotone-increasing L−R split. Verification tooling only;
+  output-identical.
 - **`caesar-play` — the portamento byte→rate law is now `1/byte²` (console
   battery v2).** The `aafb2f3` provisional law made the glide rate `∝ 1/byte`
   (anchored byte 48 = 2.841 st/s). Battery v2 (2026-07-15, both agents,

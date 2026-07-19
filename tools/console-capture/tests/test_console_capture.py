@@ -29,6 +29,7 @@ from console_capture import (
     ConsoleCaptureSession,
     ExpectScreen,
     NavStep,
+    RosalinaMenuDriver,
     Tap,
     analyze_levels,
     assert_capture_levels,
@@ -39,6 +40,7 @@ from console_capture import (
 
 from n3ds_mcp.input_redirect import InputClient
 from n3ds_mcp.ntr import NTRClient
+from n3ds_mcp.rosalina_read import RosalinaRow, RosalinaScreen
 from sim_input import SimInputSink
 from sim_ntr import SimNTR
 
@@ -107,10 +109,12 @@ class FakeFtp:
         self.store: dict[str, bytes] = {}
         self.corrupt = corrupt
         self.unreachable = unreachable
+        self.puts = 0
 
     def put(self, ip, local, remote, port=5000):
         if self.unreachable:
             raise RuntimeError("Could not reach ftpd")
+        self.puts += 1
         data = Path(local).read_bytes()
         self.store[remote] = data + (b"\x00" if self.corrupt else b"")
         return remote
@@ -179,6 +183,121 @@ class FailAtVerifier:
         if self._i == self.fail_index:
             return False, f"forced failure at step '{step.name}'"
         return True, "ok"
+
+
+class FakeRosalinaMenu:
+    """Offline state machine of the Rosalina overlay's volume walk.
+
+    Implements BOTH collaborator surfaces of :class:`RosalinaMenuDriver` -- the
+    reader (``read_once``; the driver polls it directly and never calls the
+    library's ``wait_for_change``) and the input client (``press`` /
+    ``set_state`` / ``neutral``) -- so the REAL driver code runs end-to-end
+    against it. Mirrors the live-observed layout (2026-07-18): the
+    root cursor resets to the top entry on open, "System configuration..." leads
+    to a submenu whose first entry is "Control volume", Y toggles ENABLED (the
+    Value row only exists while enabled), DLEFT/DRIGHT step +/-10 and DUP/DDOWN
+    +/-1 (clamped 0..100), A applies and shows "Success!", and the MENU_CLOSE
+    interface bit closes from any depth.
+    """
+
+    ROOT = ["Take screenshot", "Screen filters...", "Cheats...",
+            "Plugin Loader: [Disabled]", "New 3DS menu...", "Process list",
+            "Debugger options...", "System configuration...",
+            "Miscellaneous options...", "n3ds-mcp development mode",
+            "Save settings", "Return To HOME Menu", "Power off / reboot",
+            "System info", "Credits", "Debug info"]
+    SYSCONFIG = ["Control volume", "Control Wireless connection", "Toggle LEDs",
+                 "Toggle Wireless", "Toggle Power Button",
+                 "Toggle power to card slot", "Change screen brightness"]
+
+    def __init__(self, enabled: bool = False, value: int = 85) -> None:
+        self.state = "closed"   # closed | root | sysconfig | volume
+        self.cursor = 0
+        self.enabled = enabled
+        self.value = value
+        self.success = False
+        self.epoch = 100
+        self.press_log: list[frozenset] = []
+
+    # -- input-client surface ----------------------------------------------- #
+    def press(self, buttons, hold_ms: int = 120) -> None:
+        keys = {str(b).upper() for b in buttons}
+        self.press_log.append(frozenset(keys))
+        self._apply(keys)
+
+    def set_state(self, pressed=frozenset(), touch=None, circle=(0.0, 0.0),
+                  cstick=(0.0, 0.0), interface=frozenset()) -> None:
+        if "MENU_CLOSE" in interface and self.state != "closed":
+            self.state = "closed"
+            self.epoch += 1
+
+    def neutral(self) -> None:
+        pass
+
+    def _apply(self, keys: set) -> None:
+        if self.state == "closed":
+            if {"L", "DDOWN", "SELECT"} <= keys:
+                self.state = "root"
+                self.cursor = 0
+                self.epoch += 1
+            return
+        self.epoch += 1
+        if self.state == "root":
+            if "DDOWN" in keys:
+                self.cursor = min(self.cursor + 1, len(self.ROOT) - 1)
+            elif "DUP" in keys:
+                self.cursor = max(self.cursor - 1, 0)
+            elif "A" in keys and self.ROOT[self.cursor] == "System configuration...":
+                self.state = "sysconfig"
+                self.cursor = 0
+        elif self.state == "sysconfig":
+            if "DDOWN" in keys:
+                self.cursor = min(self.cursor + 1, len(self.SYSCONFIG) - 1)
+            elif "DUP" in keys:
+                self.cursor = max(self.cursor - 1, 0)
+            elif "A" in keys and self.SYSCONFIG[self.cursor] == "Control volume":
+                self.state = "volume"
+                self.success = False
+        elif self.state == "volume":
+            if "Y" in keys:
+                self.enabled = not self.enabled
+                self.success = False
+            elif self.enabled and keys & {"DLEFT", "DRIGHT", "DUP", "DDOWN"}:
+                step = (10 if "DRIGHT" in keys else -10 if "DLEFT" in keys
+                        else 1 if "DUP" in keys else -1)
+                self.value = max(0, min(100, self.value + step))
+                self.success = False
+            elif "A" in keys:
+                self.success = True
+
+    # -- reader surface ------------------------------------------------------ #
+    def read_once(self, planes: int = 0, **kw) -> RosalinaScreen:
+        rows: list[RosalinaRow] = []
+        if self.state == "root":
+            rows.append(RosalinaRow(10, "   Rosalina menu"))
+            for i, e in enumerate(self.ROOT):
+                rows.append(RosalinaRow(30 + 11 * i,
+                                        ("  >  " if i == self.cursor else "     ") + e))
+        elif self.state == "sysconfig":
+            rows.append(RosalinaRow(10, "   System configuration menu"))
+            for i, e in enumerate(self.SYSCONFIG):
+                rows.append(RosalinaRow(30 + 11 * i,
+                                        ("  >  " if i == self.cursor else "     ") + e))
+        elif self.state == "volume":
+            rows.append(RosalinaRow(10, "   System configuration menu"))
+            rows.append(RosalinaRow(30, "  Y: Toggle volume slider override."))
+            rows.append(RosalinaRow(41, "  DPAD/CPAD: Adjust the volume level."))
+            rows.append(RosalinaRow(52, "  A: Apply"))
+            rows.append(RosalinaRow(63, "  B: Go back"))
+            rows.append(RosalinaRow(85, "  Current status: "
+                                    + ("ENABLED" if self.enabled else "DISABLED")))
+            if self.enabled:
+                rows.append(RosalinaRow(96, f"     Value: [{self.value}%]"))
+            if self.success:
+                rows.append(RosalinaRow(107, "  Success!"))
+        return RosalinaScreen(overlay_active=self.state != "closed",
+                              epoch=self.epoch, torn=False,
+                              rows_overflowed=False, truncated=False, rows=rows)
 
 
 def free_udp_port() -> int:
@@ -350,6 +469,34 @@ def test_deploy_missing_local_file_fails(tmp_path):
     assert "not found" in res.message.lower()
 
 
+def test_deploy_verify_first_skips_push_when_identical(tmp_path):
+    # The boot-time file service is write-confined to /luma/staging/, so an
+    # already-installed identical cartridge must verify WITHOUT a push.
+    ftp = FakeFtp()
+    cfg = _cfg(tmp_path)
+    local = _write_bcsar(tmp_path)
+    ftp.store[cfg.luma_bcsar_path] = local.read_bytes()  # pre-installed, identical
+    sess = ConsoleCaptureSession(cfg, ftp_put=ftp.put, ftp_get=ftp.get, ftp_list=ftp.list)
+    res = sess.deploy(local)
+    assert res.ok, res.message
+    assert res.data["pushed"] is False
+    assert "no push needed" in res.message
+    assert ftp.puts == 0
+
+
+def test_deploy_staging_refusal_gets_actionable_hint(tmp_path):
+    class StagingFtp(FakeFtp):
+        def put(self, ip, local, remote, port=5000):
+            raise RuntimeError("550 Writes are only permitted under /luma/staging/")
+
+    ftp = StagingFtp()
+    sess = ConsoleCaptureSession(_cfg(tmp_path), ftp_put=ftp.put, ftp_get=ftp.get,
+                                 ftp_list=ftp.list)
+    res = sess.deploy(_write_bcsar(tmp_path))
+    assert not res.ok
+    assert "N3DS_FTP_PORT=5000" in res.message
+
+
 # =========================================================================== #
 # Stage 3: navigate (against the real sims)
 # =========================================================================== #
@@ -394,14 +541,23 @@ def test_navigate_checkpoint_failure_aborts(tmp_path):
 
 def test_plaza_path_structure_for_battery_a():
     # "Main Theme 1" is battery A -> one DDOWN into the track list.
-    path = plaza_path_for_track("Main Theme 1", dleft_to_music_player=6)
+    path = plaza_path_for_track("Main Theme 1")
     names = [s.name for s in path]
-    assert names == ["launch-plaza", "clear-modals", "to-music-player",
+    assert names == ["select-plaza-tile", "launch-plaza", "enter-plaza",
+                     "clear-modals", "switch-icons", "select-music-player",
                      "open-music-player", "select-track", "play"]
-    # HOME opens the menu; the selector walks left with DLEFT; the track is one DDOWN
-    all_buttons = [tap.buttons for s in path for tap in s.taps]
+    all_taps = [tap for s in path for tap in s.taps]
+    all_buttons = [tap.buttons for tap in all_taps]
+    # HOME opens the menu; DLEFT saturates to the leftmost tile; 3x DRIGHT
+    # lands on the plaza tile (live-verified layout, 2026-07-18)
     assert ("HOME",) in all_buttons
-    assert sum(1 for b in all_buttons if b == ("DLEFT",)) == 6
+    assert sum(1 for b in all_buttons if b == ("DLEFT",)) == 12
+    assert sum(1 for b in all_buttons if b == ("DRIGHT",)) == 3
+    # Y switches the bottom grid to features; the Music Player is a touch tap
+    assert sum(1 for b in all_buttons if b == ("Y",)) == 1
+    touches = [tap.touch for tap in all_taps if tap.touch is not None]
+    assert touches == [cc.MUSIC_PLAYER_TOUCH_XY]
+    # the track is one DDOWN
     assert sum(1 for b in all_buttons if b == ("DDOWN",)) == 1
 
     # "Entrance" is the top of the list -> no select-track step (0 DDOWN)
@@ -479,38 +635,102 @@ def test_verdict_harness_error_is_not_a_pass(tmp_path):
 
 
 # =========================================================================== #
-# Stage 1: preflight
+# Stage 1: preflight + the Rosalina volume-override walk
 # =========================================================================== #
-def test_preflight_healthy(tmp_path):
+def test_preflight_healthy_skips_volume_when_unconfigured(tmp_path):
     ftp = FakeFtp()
     ntr = FakeNTR()
-    sess = ConsoleCaptureSession(_cfg(tmp_path), ntr_client=ntr, ftp_list=ftp.list)
+    # rosalina_volume=None -> the analog slider is authoritative; the re-apply
+    # SKIPS with a notice and never fails the preflight.
+    sess = ConsoleCaptureSession(_cfg(tmp_path, rosalina_volume=None),
+                                 ntr_client=ntr, ftp_list=ftp.list)
     res = sess.preflight()
     assert res.ok, res.message
-    # volume re-apply is a documented TODO until the live sequence is recorded
-    assert res.data["volume"]["todo"] is True
+    assert res.data["volume"]["skipped"] is True
     assert res.data["volume"]["applied"] is False
 
 
-def test_preflight_ftpd_unreachable_fails(tmp_path):
+def test_preflight_file_service_unreachable_fails(tmp_path):
     ftp = FakeFtp(unreachable=True)
     sess = ConsoleCaptureSession(_cfg(tmp_path), ntr_client=FakeNTR(), ftp_list=ftp.list)
     res = sess.preflight()
     assert not res.ok
-    assert "ftpd unreachable" in res.message.lower()
+    assert "file service unreachable" in res.message.lower()
 
 
-def test_preflight_applies_volume_when_configured(tmp_path):
-    cfg = _cfg(tmp_path, rosalina_volume=80,
-               rosalina_volume_taps=(Tap((*cc.ROSALINA_MENU_CHORD,), hold_ms=5, wait_ms=2),))
-    with SimRig() as rig:
-        assert rig.wait_first_frame()
-        sess = ConsoleCaptureSession(cfg, input_client=rig.input, ntr_client=rig.ntr,
-                                     ftp_list=FakeFtp().list)
-        res = sess.preflight()
-        assert res.ok, res.message
-        assert res.data["volume"]["applied"] is True
-        assert res.data["volume"]["volume"] == 80
+def _no_deadzone(monkeypatch):
+    # the post-close input deadzone is a live-console fact; don't sleep in tests
+    monkeypatch.setattr(cc, "POST_MENU_CLOSE_DEADZONE_S", 0.0)
+
+
+def test_preflight_applies_volume_when_configured(tmp_path, monkeypatch):
+    _no_deadzone(monkeypatch)
+    menu = FakeRosalinaMenu(enabled=False, value=85)
+    cfg = _cfg(tmp_path, rosalina_volume=80)
+    sess = ConsoleCaptureSession(cfg, ntr_client=FakeNTR(), ftp_list=FakeFtp().list,
+                                 rosalina_driver=RosalinaMenuDriver(menu, menu))
+    res = sess.preflight()
+    assert res.ok, res.message
+    assert res.data["volume"]["applied"] is True
+    assert res.data["volume"]["volume"] == 80
+    # the fake console really was walked there: enabled, pinned, and closed
+    assert menu.enabled is True
+    assert menu.value == 80
+    assert menu.success is True
+    assert menu.state == "closed"
+
+
+def test_volume_walk_from_arbitrary_start(monkeypatch):
+    _no_deadzone(monkeypatch)
+    # already ENABLED at 42 -> no Y press, closed-loop step to 65
+    menu = FakeRosalinaMenu(enabled=True, value=42)
+    drv = RosalinaMenuDriver(menu, menu)
+    out = drv.set_volume_override(65)
+    assert out == {"value": 65, "enabled": True, "applied": True}
+    assert menu.value == 65 and menu.state == "closed"
+    # no Y was pressed (it was already enabled)
+    assert frozenset({"Y"}) not in menu.press_log
+
+
+def test_volume_walk_closes_overlay_even_on_failure(monkeypatch):
+    _no_deadzone(monkeypatch)
+
+    class BrokenApply(FakeRosalinaMenu):
+        def _apply(self, keys):
+            # the A on the volume screen never confirms (no Success! row)
+            if self.state == "volume" and "A" in keys:
+                self.epoch += 1
+                return
+            super()._apply(keys)
+
+    menu = BrokenApply(enabled=True, value=65)
+    drv = RosalinaMenuDriver(menu, menu)
+    with pytest.raises(RuntimeError, match="apply not confirmed"):
+        drv.set_volume_override(65)
+    # the overlay must NOT be left open (the console would stay frozen)
+    assert menu.state == "closed"
+
+
+def test_volume_step_buttons_minimal_walks():
+    f = RosalinaMenuDriver.volume_step_buttons
+    assert f(65, 65) == []
+    assert f(85, 65) == ["DLEFT", "DLEFT"]
+    assert f(60, 65) == ["DUP"] * 5
+    # -5: plain ones beat a tens overshoot (5 presses, not 6)
+    assert f(70, 65) == ["DDOWN"] * 5
+    # +17: overshoot by tens then walk back (5 presses, not 8)
+    assert f(48, 65) == ["DRIGHT", "DRIGHT", "DDOWN", "DDOWN", "DDOWN"]
+
+
+def test_parse_volume_screen():
+    parse = RosalinaMenuDriver.parse_volume_screen
+    menu = FakeRosalinaMenu(enabled=True, value=65)
+    menu.state = "volume"
+    assert parse(menu.read_once()) == (True, 65)
+    menu.enabled = False
+    assert parse(menu.read_once()) == (False, None)  # no Value row while disabled
+    menu.state = "root"
+    assert parse(menu.read_once()) == (None, None)   # not the volume screen
 
 
 # =========================================================================== #

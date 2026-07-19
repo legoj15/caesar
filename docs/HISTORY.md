@@ -5314,3 +5314,121 @@ at the 5 probed bytes but the curve may deviate elsewhere → a pan-fidelity fol
 (b) the real driver writes **s16** gains at `slot+0x3c`, NOT the Azahar-HLE-modeled
 `f32 gain[3][4]` at `slot+0x04` — the Surround Part B reader address needs reconciling
 (channel order L-before-R is unchanged).
+
+---
+
+## Console-in-the-loop automation — the live shakedown (2026-07-18)
+
+The `tools/console-capture` harness (built offline 2026-07-16) had its live
+shakedown, closing the roadmap's console-in-the-loop bullet: **every pipeline
+stage ran against the real New 3DS, ending in a console-tolerance PASS** —
+capture peaks −6.1/−6.2 dBFS, verdict "within tolerance (reverb tail
+excepted)" against `PREDICTION_battery_A.wav`. Both live-nav fill-ins are now
+measured constants, and the session banked a set of hard-won operational facts.
+Offline test suite grew 26 → 32, all green throughout.
+
+**The new console leg.** The n3ds-mcp fork now exposes the console *at boot*:
+the Rosalina file service (TCP 4952, replaces launching ftpd), the Rosalina
+**text readout** (UDP 4951 — reads the overlay as text with cursor + epoch,
+which the video stream can never see because the menu freezes the GPU), and a
+remote **menu-close pulse** (the `MENU_CLOSE` interface bit; never B at the
+menu root — upstream Luma bug #1852 can hard-freeze the console). Session
+prelude: three stale n3ds-mcp server pairs from earlier sessions were holding
+UDP 8001 and had to be killed before the stream would bind.
+
+**Fill-in 1 — the Rosalina volume override (rig constant: 65%).** The walk:
+open chord → root cursor always resets to the top → `System configuration...`
+→ `Control volume` → `Y` toggles ENABLED (the `Value:` row only exists while
+enabled), DLEFT/DRIGHT step ±10, DUP/DDOWN ±1, `A` applies → `Success!`.
+Measured on battery-v2 track A's vel-127 pilot with the **Windows recording
+volume at 100%** (which now never needs touching — the override replaces both
+the analog slider and the Windows-side attenuation):
+
+| override | pilot peak |
+|---|---|
+| 70% | −4.10 dBFS |
+| **65%** | **−6.39 dBFS** ← chosen (target −6 ± 3) |
+| 60% | −7.60 dBFS |
+
+Taper ≈ 0.35 dB/% (linear-in-dB); channels matched ≤ 0.09 dB; astats flat
+factor 0 everywhere (no analog clipping). The harness's
+`reapply_rosalina_volume()` was rewritten from the planned blind `Tap` list to
+a **closed-loop `RosalinaMenuDriver`**: every press is verified from the
+readout's cursor text, the value is read back from the `Value: [NN%]` row, and
+the walk self-heals across menu reorderings (`seek_cursor`) — which also
+retired the old "verify via an NTR frame region" TODO with something strictly
+better. A `FakeRosalinaMenu` state machine in the tests lets the *real* driver
+walk end-to-end offline.
+
+**Fill-in 2 — the HOME→plaza prefix + the music-player path.** The HOME
+layout had drifted from the calibration memory: leftmost is now an **NTR CFW**
+tile, with StreetPass Mii Plaza the 4th tile. Encoded robustly: saturate
+DLEFT ×12, DRIGHT ×3, verify the top-screen banner *before* the launching A.
+The in-plaza path was corrected from the placeholder DLEFT-walk to the real
+route: fresh launch (splash + "Please wait" ~11 s) → "Careful!" modal → A →
+announcement cards (ONE A each) → **Y "Switch Icons"** (the games grid never
+contains the Music Player) → **touch (52, 172)** (selects + names the tile on
+the top screen without launching; `Tap` gained touch support) → A → track
+list → DDOWN ×1 = "Main Theme 1" (battery A) → A plays.
+
+**Input hazards measured live (all encoded as harness constants/comments):**
+the open chord *leaks its DDOWN* into the app underneath; for ~1 s after the
+close pulse the resuming app *drops inputs* (`POST_MENU_CLOSE_DEADZONE_S =
+1.2`); the plaza *suspend animation swallows* an X sent ~1.5 s after HOME; and
+a Y sent ~2.4 s after a card-dismiss A is swallowed by the dismissal animation
+(the clear-modals settle is now 4 s and load-bearing).
+
+**The six takes — what each failure taught.**
+1–2. Preflight died with "No response from 4951". Diagnosis chased a wrong
+   theory (file-service starvation — refuted by experiment) before take 5
+   caught the real one.
+3. Preflight PASSED (first full closed-loop walk in the pipeline); deploy died
+   with `550 Writes are only permitted under /luma/staging/` — **the boot-time
+   file service is write-confined by design** (the fork's firmware-safety
+   allowlist). Deploy was reworked to **verify-first**: hash the remote via
+   read-back; identical bytes = "already deployed + verified, no push" (works
+   at boot); differing bytes push then re-verify, and a staging refusal gets
+   an actionable ftpd hint. Bonus fact: the freshly rebuilt cartridge hashed
+   identical to the SD copy — `build_cartridge_v2.py` is byte-deterministic.
+4. Navigate "passed" its stub checkpoints but the Y had been swallowed — the
+   whole tail ran against the games grid, and the record stage captured the
+   *walkable plaza's ambient BGM* (itself battery-patched, loud enough to pass
+   the level gate). The verdict stage refused (exit 2: the venv lacked numpy —
+   installed). Also proven here: the record level gate passes real content at
+   the pinned override (−4.3/−5.6 dBFS).
+5. The 4951 transient finally reproduced under instrumentation: **a
+   concurrent `console_status` query from the MCP session collided with the
+   walk** — the command channel serves one reader at a time, and the loser
+   starves past `read_once`'s internal 3-try budget. Fix: an outer retry
+   deadline on every driver read (`read(timeout_s=4)`), plus the standing rule
+   *never query 4951 from the session while a walk is in flight*.
+6. Full pipeline: preflight ✓ (clean walk), deploy ✓ (verified, no push),
+   navigate ✓ blind, record ✓ (−7.5/−7.3 dBFS)… but the console was sitting in
+   **Slot Car Rivals**: this entry drew a *different announcement-card count*,
+   and with the D-pad dead during cards, the surplus A landed on the games
+   grid (whose cursor position compounds across sessions). **The verdict gate
+   correctly rejected the imposter audio ("out of tolerance")** — a
+   mis-navigation cannot produce a false PASS. Conclusion filed on the
+   roadmap: the modal boundary is un-navigable blind; it needs RegionMean/
+   template verification, which requires the standalone NTR-owning
+   configuration.
+7. (Closing run.) Navigation driven with session eyes over the proven path,
+   then harness `record` (78.2 s with a 6 s lead-in) + `stop_playback` +
+   `verdict`: **PASS**. All three verdict exits (0/1/2) were exercised live
+   across takes 4/6/7.
+
+**Architecture facts for future runs.** The console streams NTR video to host
+UDP 8001 only — a single bind — so the harness and an interactive n3ds-mcp
+session can never both own frames. Shared-stream mode = inject a stub NTR eye
+and let the session verify screens (the underlying `NTRClient` is the identical
+class the MCP server runs live); standalone mode owns the stream and can run
+real screen verification. Battery-v2 pass lengths are now module constants
+(`SECONDS_PER_PASS_V2`: A 36.1 s, B 85.8 s). Close-suspended-software is
+HOME → X → A.
+
+**Collateral fix.** Rebuilding the v2 cartridge from a clean tree exposed a
+stale gate: `check_prediction_v2.py`'s pan check still expected the
+pre-inversion direction (it was written before player fix `9769a96` flipped
+pan to the console-confirmed byte-0→RIGHT law) and failed the correct render.
+The check now asserts the monotone-*increasing* L−R split; the build passes
+all gates again.

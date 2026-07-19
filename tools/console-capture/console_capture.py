@@ -6,8 +6,9 @@ navigate -> record -> hand over WAVs) into a scriptable pipeline. Every stage is
 independently callable and returns a :class:`StageResult` with an explicit
 success/failure and a machine-readable ``data`` payload:
 
-  1. preflight   -- ftpd reachable + NTR stream healthy, and re-apply the
-                    Rosalina volume-override pin (parameterised; see the TODO).
+  1. preflight   -- file service reachable + NTR stream healthy, and re-apply
+                    the Rosalina volume-override pin (closed-loop against the
+                    Rosalina text readout; live-verified 2026-07-18).
   2. deploy      -- ftp_put a cartridge .bcsar to the Luma path, ftp_get it back
                     and hash-compare to confirm the push landed intact.
   3. navigate    -- screenshot-verified plaza navigation to a named track, driven
@@ -21,12 +22,14 @@ success/failure and a machine-readable ``data`` payload:
                     stream doesn't perturb the DAC).
 
 This module REUSES ``n3ds_mcp`` (E:\\GitHub\\3ds-mcp) by import, never by copy:
-InputClient (input_redirect), NTRClient (ntr), ftp_put/ftp_get/ftp_list
-(devtools), and Config (config). The only in-process dependency beyond n3ds_mcp
-is the standard library; numpy is used ONLY as an optional accelerator for the
-level analysis and is never required (the console-tolerance verdict, which does
-need numpy, runs as a subprocess). Rig constants and the plaza navigation path
-are transcribed from the ``capture-rig-calibration`` memory (2026-07-15).
+InputClient (input_redirect), NTRClient (ntr), RosalinaReader (rosalina_read),
+ftp_put/ftp_get/ftp_list (devtools), and Config (config). The only in-process
+dependency beyond n3ds_mcp is the standard library; numpy is used ONLY as an
+optional accelerator for the level analysis and is never required (the
+console-tolerance verdict, which does need numpy, runs as a subprocess). Rig
+constants and the plaza navigation path are transcribed from the
+``capture-rig-calibration`` memory and live-verified 2026-07-18 (the volume
+override, the HOME->plaza prefix and the Y/switch-icons music-player path).
 
 OFFLINE-safe: nothing here sends to a live console until a stage method is
 called with real clients. Every stage takes injectable dependencies so the whole
@@ -38,6 +41,7 @@ from __future__ import annotations
 import hashlib
 import math
 import os
+import re
 import subprocess
 import sys
 import time
@@ -86,9 +90,10 @@ def _bootstrap_n3ds_mcp() -> None:
 _bootstrap_n3ds_mcp()
 
 from n3ds_mcp import devtools  # noqa: E402
-from n3ds_mcp.config import Config, config_from_env  # noqa: E402
+from n3ds_mcp.config import DEFAULT_FTP_PORT, Config, config_from_env  # noqa: E402
 from n3ds_mcp.input_redirect import InputClient  # noqa: E402
 from n3ds_mcp.ntr import NTRClient  # noqa: E402
+from n3ds_mcp.rosalina_read import RosalinaReader, RosalinaScreen  # noqa: E402
 
 
 # =========================================================================== #
@@ -118,28 +123,51 @@ NOISE_FLOOR_MAX_DBFS = -55.0  # quietest-window RMS must sit below this (hum gua
                               # measured floor -67.8 gives ~13 dB headroom)
 KNOB_MISMATCH_DB = 0.045      # constant L/R gain offset; subtract only if needed
 
-# One battery pass, seconds. Battery A ("Main Theme 1") loops ~23.5 s (roadmap:
-# "passes exactly 23.50 s apart"); battery B ~23 s.
+# One battery pass, seconds, per cartridge generation. v1: both tracks ~23.5 s
+# (roadmap: "passes exactly 23.50 s apart"). Battery v2 lengthened the tracks:
+# A ~36.1 s, B ~85.8 s (console-confirmed loop periods 35.9 / 85.79 s) -- the
+# CLI resolves these via `record --battery A|B`; API callers pass
+# seconds_per_pass=SECONDS_PER_PASS_V2[letter].
 SECONDS_PER_PASS = 23.5
+SECONDS_PER_PASS_V2 = {"A": 36.1, "B": 85.8}
 
-# --- Rosalina volume override (rig v2; NOT yet console-measured) ------------ #
-# TODO(main session): the digitally-exact volume override that replaces the
-# frozen analog slider. Two things must be filled in from the live console:
-#   * ROSALINA_VOLUME_OVERRIDE -- the chosen 0..100 (%) value that lands peaks in
-#     the target window; becomes a rig constant in the calibration memory once
-#     measured. None here means "not yet measured" and the preflight step SKIPS
-#     the re-apply with a clear notice instead of failing.
-#   * ROSALINA_VOLUME_TAPS -- the InputRedirection tap sequence that opens the
-#     Rosalina menu (L+DDOWN+SELECT) and walks to the volume-override slider,
-#     setting it to ROSALINA_VOLUME_OVERRIDE. Left empty until the menu path is
-#     captured on hardware; encoded as a data-driven Tap list (below) so it drops
-#     straight into reapply_rosalina_volume() with no code change.
-# The camera-shutter path can silently reset the override, which is exactly why
-# the capture preflight re-applies it every run.
-ROSALINA_VOLUME_OVERRIDE: Optional[int] = None
-# Placeholder for the menu-open chord; the walk-to-slider steps are appended by
-# the main session once observed on the NTR stream.
-ROSALINA_MENU_CHORD: tuple[str, ...] = ("L", "DDOWN", "SELECT")
+# --- Rosalina volume override (rig v2; console-measured 2026-07-18) --------- #
+# The digitally-exact volume override that replaces the frozen analog slider.
+# Measured live (plaza music player, battery-v2 track A -- its vel-127 pilot is
+# the loudest battery element -- with the Windows recording volume at 100%,
+# which now never needs touching):
+#     override 70% -> pilot peak -4.10 dBFS
+#     override 65% -> pilot peak -6.39 dBFS   <-- chosen (target -6.0 +/- 3.0)
+#     override 60% -> pilot peak -7.60 dBFS
+# Taper ~0.35 dB/% in this region (linear-in-dB); channels matched to <=0.09 dB;
+# astats flat factor 0 at every point (no analog clipping). The camera-shutter
+# path can silently reset the override, which is exactly why the capture
+# preflight re-applies it every run.
+ROSALINA_VOLUME_OVERRIDE: Optional[int] = 65
+
+# The overlay menu walk (Luma3DS v13.5, n3ds-mcp fork; verified live): the open
+# chord brings up the root menu with the cursor RESET to the top entry, then
+# "System configuration..." -> A lands the cursor on "Control volume" -> A opens
+# the volume screen ("Y: Toggle volume slider override", "Current status:",
+# "Value: [NN%]"). Y enables the override, DLEFT/DRIGHT step the value +/-10 and
+# DUP/DDOWN +/-1, A applies (the screen shows "Success!"). The walk is driven
+# CLOSED-LOOP against the Rosalina text readout (RosalinaReader, the fork's UDP
+# command channel): every press is confirmed from the actual cursor/row text and
+# the applied value is read back from the "Value:" row -- which retires both the
+# old blind-tap-list design and its "verify via an NTR frame region" TODO
+# (get_screen cannot see the overlay at all; the menu freezes the GPU).
+ROSALINA_SYSCONFIG_ENTRY = "System configuration..."
+ROSALINA_VOLUME_ENTRY = "Control volume"
+
+# Two live-measured input hazards around the overlay (2026-07-18):
+#   * the open chord LEAKS its DDOWN into the app underneath (the plaza music
+#     player's list cursor moved down one entry) -- navigation state must be
+#     re-anchored after any menu round-trip, never assumed. The preflight runs
+#     while the console sits on the HOME menu, where the leak is harmless, and
+#     the HOME->plaza prefix re-anchors with a DLEFT saturation anyway.
+#   * for ~1 s after the close pulse the resuming app DROPS inputs (a play tap
+#     vanished without a trace); POST_MENU_CLOSE_DEADZONE_S waits it out.
+POST_MENU_CLOSE_DEADZONE_S = 1.2
 
 
 # =========================================================================== #
@@ -165,14 +193,18 @@ class StageResult:
 
 @dataclass
 class Tap:
-    """One button tap in a navigation step. ``buttons`` may include HID buttons
+    """One input tap in a navigation step. ``buttons`` may include HID buttons
     (A, DLEFT, DDOWN, ...) and/or interface strings (HOME, POWER) -- InputClient
-    routes each to the correct wire field. ``wait_ms`` is the settle delay AFTER
-    the release, before the next tap (menu animations)."""
+    routes each to the correct wire field. ``touch`` is an optional bottom-screen
+    (x, y) tap sent BEFORE the buttons (the plaza feature grid is selected by
+    touch: touching a tile selects + names it on the top screen without
+    launching). ``wait_ms`` is the settle delay AFTER the release, before the
+    next tap (menu animations)."""
 
     buttons: tuple[str, ...]
     hold_ms: int = 80
     wait_ms: int = 350
+    touch: Optional[tuple[int, int]] = None
 
 
 @dataclass
@@ -222,9 +254,12 @@ class LevelReport:
 class CaptureConfig:
     """Everything the harness needs, composed over the n3ds-mcp Config.
 
-    The n3ds ``Config`` carries the console IP + ports (input UDP 4950, NTR
-    control TCP 8000, video UDP 8001, ftpd 5000). The capture-specific rig
-    constants default from the calibration memory and are all overridable.
+    The n3ds ``Config`` carries the console IP + ports (input UDP 4950, the
+    fork's command/readout channel UDP 4951, NTR control TCP 8000, video UDP
+    8001, and the file service TCP 4952 -- the Rosalina file service is on at
+    boot in dev mode; legacy ftpd needs N3DS_FTP_PORT=5000). The
+    capture-specific rig constants default from the calibration memory and are
+    all overridable.
     """
 
     n3ds: Config = field(default_factory=config_from_env)
@@ -247,9 +282,9 @@ class CaptureConfig:
     noise_floor_max_dbfs: float = NOISE_FLOOR_MAX_DBFS
     ab_level_tol_db: float = 1.0   # perturbation A/B: max |dRMS|,|dPeak| per channel
 
-    # Rosalina volume override (see the module TODO)
+    # Rosalina volume override (rig constant, measured 2026-07-18). None
+    # disables the re-apply (the preflight then SKIPS it with a notice).
     rosalina_volume: Optional[int] = ROSALINA_VOLUME_OVERRIDE
-    rosalina_volume_taps: tuple[Tap, ...] = ()
 
     # external tools
     ffmpeg_exe: str = "ffmpeg"
@@ -565,83 +600,372 @@ class RegionMeanVerifier:
 
 
 # =========================================================================== #
-# Plaza navigation path (transcribed from the calibration memory, 2026-07-15)
+# Rosalina overlay driver (closed-loop over the fork's text readout)
 # =========================================================================== #
 
-# Music-player track order in the plaza (memory): Entrance, Main Theme 1
-# (= battery A), Main Theme 2, then the den tracks. The value is the number of
-# DDOWN presses from the top of the list to that track.
+class RosalinaMenuDriver:
+    """Drives the Rosalina overlay via InputClient + the text readout.
+
+    The overlay freezes the game AND the GPU, so the NTR stream stalls and
+    frame-based verification is impossible while it is open -- the fork's text
+    readout (RosalinaReader, UDP command channel) is the only eye. Every press
+    here is verified against it: press -> wait_for_change(epoch) -> check the
+    cursor/rows, so a dropped input or a menu-layout surprise fails loudly at
+    the exact step instead of a blind tap list silently running to the end.
+
+    Closing NEVER presses B at the menu root (a remote B there can hard-freeze
+    the console, upstream Luma bug #1852); it sends the fork's MENU_CLOSE
+    interface bit, which closes from any depth.
+    """
+
+    def __init__(self, input_client, reader,
+                 menu_combo: Sequence[str] = ("L", "DDOWN", "SELECT")) -> None:
+        self._ic = input_client
+        self._reader = reader
+        self._combo = tuple(menu_combo)
+
+    # -- primitives --------------------------------------------------------- #
+    def read(self, timeout_s: float = 4.0) -> RosalinaScreen:
+        """read_once with an OUTER retry deadline on top of the reader's own.
+
+        The command channel can go quiet for >1 s -- during overlay open/close
+        transitions, and when a concurrent reader claims the reply tick (both
+        live-observed 2026-07-18; an n3ds-mcp session's console_status query
+        collided with a walk and starved it past read_once's internal 3-try
+        budget). A missing reply inside the deadline means "ask again", not
+        "channel dead".
+        """
+        deadline = time.monotonic() + timeout_s
+        while True:
+            try:
+                return self._reader.read_once()
+            except RuntimeError:
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.25)
+
+    def _read_tolerant(self, deadline: float) -> Optional[RosalinaScreen]:
+        """Like :meth:`read`, but returns None at ``deadline`` instead of
+        raising (for open/close polls that have their own failure message)."""
+        while time.monotonic() < deadline:
+            try:
+                return self.read(timeout_s=max(0.3, min(1.0, deadline - time.monotonic())))
+            except RuntimeError:
+                time.sleep(0.2)
+        return None
+
+    def _wait_change(self, after_epoch: int, timeout_s: float = 2.0) -> RosalinaScreen:
+        """Poll (tolerantly) until the epoch moves past ``after_epoch``.
+
+        Inner reads are scoped to the remaining budget so a stalled channel
+        cannot blow the caller's timeout via read()'s own larger default.
+        """
+        deadline = time.monotonic() + timeout_s
+        scr = self.read(timeout_s=timeout_s)
+        while scr.epoch == after_epoch and time.monotonic() < deadline:
+            time.sleep(0.05)
+            scr = self.read(timeout_s=max(0.3, deadline - time.monotonic()))
+        return scr
+
+    def press_and_wait(self, buttons: Sequence[str], timeout_s: float = 2.0,
+                       after_epoch: Optional[int] = None) -> RosalinaScreen:
+        """One verified press: press, then wait for the redraw past the epoch.
+
+        Callers that already hold the current screen pass its epoch via
+        ``after_epoch`` to skip the redundant pre-press read (one UDP
+        round-trip per press adds up over a 15+-press walk).
+        """
+        if after_epoch is None:
+            after_epoch = self.read().epoch
+        self._ic.press(list(buttons), hold_ms=80)
+        return self._wait_change(after_epoch, timeout_s=timeout_s)
+
+    def open(self, timeout_s: float = 6.0) -> RosalinaScreen:
+        """Open the overlay with the menu chord (idempotent; one re-send).
+
+        NOTE: the chord leaks its DDOWN into the app underneath -- callers must
+        re-anchor any app-side navigation after the round-trip.
+        """
+        scr = self.read()
+        if scr.overlay_active:
+            return scr
+        deadline = time.monotonic() + timeout_s
+        resend_at = time.monotonic() + timeout_s / 2.0
+        self._ic.press(list(self._combo), hold_ms=150)
+        while time.monotonic() < deadline:
+            # Poll only up to the resend point so a quiet channel can't hold
+            # the loop past it -- otherwise the one re-send below never fires
+            # in exactly the lost-packet case it exists for.
+            scr = self._read_tolerant(min(resend_at, deadline))
+            if scr is not None and scr.overlay_active:
+                return scr
+            if time.monotonic() >= resend_at:
+                # UDP input is fire-and-forget; one lost chord packet must not
+                # fail the walk. Re-send once at half the deadline.
+                resend_at = deadline
+                self._ic.press(list(self._combo), hold_ms=150)
+            time.sleep(0.1)
+        raise RuntimeError("Rosalina overlay did not open on the menu chord")
+
+    def close(self, timeout_s: float = 3.0) -> None:
+        """MENU_CLOSE pulse (fork feature), then wait out the input deadzone."""
+        self._ic.set_state(interface=frozenset({"MENU_CLOSE"}))
+        time.sleep(0.2)
+        self._ic.neutral()
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            scr = self._read_tolerant(deadline)
+            if scr is not None and not scr.overlay_active:
+                # The resuming app drops inputs for ~1 s -- wait it out so the
+                # caller's next tap actually lands (live-measured 2026-07-18).
+                time.sleep(POST_MENU_CLOSE_DEADZONE_S)
+                return
+            time.sleep(0.1)
+        raise RuntimeError(
+            "Rosalina overlay still active after the close pulse -- is the "
+            "n3ds-mcp Luma3DS fork installed? (Stock Luma ignores the bit.)"
+        )
+
+    def seek_cursor(self, entry: str, max_steps: int = 20) -> RosalinaScreen:
+        """DDOWN until the cursor sits on ``entry`` (prefix match), one verified
+        press at a time -- self-healing across menu reorderings.
+
+        ``cursor_text`` keeps the readout's leading ">" marker (the live wire
+        format is e.g. '>  Take screenshot'), so strip it before matching.
+        """
+        scr = self.read()
+        for _ in range(max_steps):
+            cur = scr.cursor_text
+            if cur is not None and cur.lstrip("> ").startswith(entry):
+                return scr
+            scr = self.press_and_wait(("DDOWN",), after_epoch=scr.epoch)
+        raise RuntimeError(f"cursor never reached {entry!r} within {max_steps} DDOWN steps")
+
+    # -- the volume-override walk ------------------------------------------- #
+    @staticmethod
+    def parse_volume_screen(scr: RosalinaScreen) -> tuple[Optional[bool], Optional[int]]:
+        """(enabled, value%) from the volume screen's rows; None when absent."""
+        enabled: Optional[bool] = None
+        value: Optional[int] = None
+        for row in scr.rows:
+            m = re.search(r"Current status:\s*(ENABLED|DISABLED)", row.text)
+            if m:
+                enabled = m.group(1) == "ENABLED"
+            m = re.search(r"Value:\s*\[(\d+)%\]", row.text)
+            if m:
+                value = int(m.group(1))
+        return enabled, value
+
+    @staticmethod
+    def volume_step_buttons(current: int, target: int) -> list[str]:
+        """The minimal D-pad walk from one value to another.
+
+        DLEFT/DRIGHT step +/-10, DUP/DDOWN +/-1 (live-verified). Chooses the
+        tens count that minimises total presses (e.g. +15 = 2x DRIGHT + 5x
+        DDOWN over 1x DRIGHT + 5x DUP -- both 10-adjacent splits are tried).
+        """
+        delta = target - current
+        best: Optional[list[str]] = None
+        for tens in (delta // 10, -((-delta) // 10)):  # floor and ceil of delta/10
+            ones = delta - tens * 10
+            steps = ["DRIGHT" if tens > 0 else "DLEFT"] * abs(tens)
+            steps += ["DUP" if ones > 0 else "DDOWN"] * abs(ones)
+            if best is None or len(steps) < len(best):
+                best = steps
+        return best or []
+
+    def set_volume_override(self, target: int) -> dict:
+        """Open the overlay, walk to Control volume, pin the override to
+        ``target`` %, apply, verify from the readout, and close.
+
+        Returns {"value", "enabled", "applied"} on success; raises RuntimeError
+        with the exact failing step otherwise. Root-menu fact (live-verified):
+        the cursor RESETS to the top entry on a fresh open, and seek_cursor
+        re-verifies it per press anyway.
+        """
+        if not (0 <= target <= 100):
+            raise ValueError(f"volume override must be 0..100, got {target}")
+        try:
+            self.open()
+            scr = self.seek_cursor(ROSALINA_SYSCONFIG_ENTRY)
+            scr = self.press_and_wait(("A",), after_epoch=scr.epoch)
+            scr = self.seek_cursor(ROSALINA_VOLUME_ENTRY)
+            scr = self.press_and_wait(("A",), after_epoch=scr.epoch)
+            enabled, value = self.parse_volume_screen(scr)
+            if enabled is None:
+                raise RuntimeError(
+                    f"did not land on the volume screen (rows: {scr.text!r})")
+            if not enabled:
+                # While DISABLED there is no "Value:" row (live-observed); Y
+                # enables the override and the row appears with its last value.
+                scr = self.press_and_wait(("Y",), after_epoch=scr.epoch)
+                enabled, value = self.parse_volume_screen(scr)
+                if not enabled or value is None:
+                    raise RuntimeError("Y did not ENABLE the volume override")
+            if value is None:
+                raise RuntimeError(
+                    f"override ENABLED but no Value row (rows: {scr.text!r})")
+            for b in self.volume_step_buttons(value, target):
+                scr = self.press_and_wait((b,), after_epoch=scr.epoch)
+            _, value = self.parse_volume_screen(scr)
+            if value != target:
+                raise RuntimeError(
+                    f"stepped to {value}%, wanted {target}% -- readout disagrees")
+            scr = self.press_and_wait(("A",), after_epoch=scr.epoch)  # Apply -> "Success!"
+            _, value = self.parse_volume_screen(scr)
+            if "Success!" not in scr.text or value != target:
+                raise RuntimeError(
+                    f"apply not confirmed (value {value}%, text {scr.text!r})")
+        except BaseException:
+            # Never leave the console frozen -- but a secondary close failure
+            # must not mask the original walk error.
+            try:
+                self.close()
+            except Exception:
+                pass
+            raise
+        self.close()
+        return {"value": value, "enabled": True, "applied": True}
+
+
+# =========================================================================== #
+# Plaza navigation path (live-verified on the console, 2026-07-18)
+# =========================================================================== #
+
+# Music-player track order in the plaza: Entrance, Main Theme 1 (= battery A),
+# Main Theme 2, ... The value is the number of DDOWN presses from the top of
+# the list to that track. Battery B displays as "Find Mii - Dark Room", well
+# below the Main Themes -- its DDOWN count has not been walked yet; fill it in
+# (same screenshot-verified way) the next time battery B is captured.
 PLAZA_TRACKS: dict[str, int] = {
     "Entrance": 0,
     "Main Theme 1": 1,   # = capture-cartridge battery A (BGM_MAIN_Mii_Only_One)
     "Main Theme 2": 2,
 }
 
-# TODO(main session): the HOME-menu -> launch-plaza tap prefix. The exact icon
-# position (how many DRIGHT from the HOME cursor, then A) is console-specific and
-# was never written down; observe it on the NTR stream and fill this in. Until
-# then the default is HOME (open menu) + a single A, and navigate() will still
-# report exactly which checkpoint first fails so the gap is obvious on a dry run.
+# The HOME-menu -> plaza-tile prefix, live-verified 2026-07-18. The HOME menu
+# layout TODAY (it shifts when software is added/moved): leftmost tile =
+# "NTR CFW", then the Homebrew Utils folder, a blank tile, then StreetPass Mii
+# Plaza as the 4th tile. The prefix is layout-robust up to the DRIGHT count:
+# saturate DLEFT (12 exceeds any plausible row length; extra presses no-op at
+# the edge), then 3x DRIGHT -- and the checkpoint verifies the TOP screen shows
+# the plaza banner (selecting a tile names it there) BEFORE the A that
+# launches. Start-state contract (v0): HOME menu with NO suspended software --
+# a fresh launch shows splash -> "Please wait" -> the "Careful!" modal ("Play"
+# preselected); resuming a suspended plaza skips all three, which this path
+# does not model.
 DEFAULT_HOME_TO_PLAZA_TAPS: tuple[Tap, ...] = (
-    Tap(("HOME",), wait_ms=800),
-    Tap(("A",), wait_ms=3000),  # placeholder: select+launch the plaza icon
+    Tap(("HOME",), wait_ms=1500),
+) + tuple(
+    Tap(("DLEFT",), wait_ms=250) for _ in range(12)
+) + tuple(
+    Tap(("DRIGHT",), wait_ms=250) for _ in range(3)
 )
+
+# Live-measured navigation timings (2026-07-18) -- named next to the other
+# calibrated waits so a future retune finds them all in one place.
+PLAZA_LAUNCH_WAIT_MS = 12000    # splash + "Please wait" took ~11 s live
+MODAL_CLEAR_SETTLE_MS = 4000    # shakedown take-4: a Y sent ~2.4 s after the
+                                # last card-dismiss A was SWALLOWED by the
+                                # dismissal animation -- this settle is
+                                # load-bearing, not cosmetic
+
+# The Music Player tile on the plaza FEATURES grid (4x3, bottom screen):
+# row 3 col 1 (bottom-left, the music note) -> touch center. The features grid
+# only exists after Y ("Switch Icons") toggles away from the StreetPass GAMES
+# grid -- the games grid never contains the Music Player. Touching a tile
+# selects + names it on the top screen WITHOUT launching (the reliable
+# identify trick); the following A opens it.
+MUSIC_PLAYER_TOUCH_XY: tuple[int, int] = (52, 172)
 
 
 def plaza_music_player_path(
     ddown_count: int,
     *,
     launch_taps: Sequence[Tap] = DEFAULT_HOME_TO_PLAZA_TAPS,
-    modal_clear_a_presses: int = 3,
-    dleft_to_music_player: int = 6,
+    modal_clear_a_presses: int = 2,
+    music_player_touch: tuple[int, int] = MUSIC_PLAYER_TOUCH_XY,
 ) -> list[NavStep]:
     """Build the data-driven navigation path to a plaza music-player track.
 
-    From the memory: HOME -> StreetPass Mii Plaza -> A through announcement modals
-    (D-pad is dead there; the cards need A) -> main plaza -> DLEFT walks the
-    selector left to Music Player (far left) -> A -> track list -> DDOWN * n -> A
-    plays. ``dleft_to_music_player`` and ``modal_clear_a_presses`` are counts to
-    confirm on hardware; each is a checkpoint so a wrong count fails loudly at its
-    step rather than silently mis-navigating.
+    Live-verified flow (2026-07-18): HOME -> select the plaza tile (banner
+    checkpoint) -> A launches (splash + "Please wait", ~11 s) -> A through the
+    "Careful!" modal ("Play" preselected) -> A through the announcement cards
+    ("Someone's here", "New stock", ... -- ONE A each; the count varies with
+    pending announcements, 2 on the verified run; an extra A opens your own
+    Mii's menu, B backs out of it) -> Y switches the bottom grid to FEATURES ->
+    touch selects Music Player (top screen names it) -> A opens the track list
+    (cursor on Entrance) -> DDOWN * n -> A plays ("A: Stop" appears).
+
+    Every step is a checkpoint so a wrong count/layout fails loudly at its step
+    rather than silently mis-navigating. NOTE: the default AcceptingVerifier
+    only proves the stream produced a frame per step -- true screen identity
+    (e.g. catching a third announcement card) needs a RegionMean/template
+    verifier over the ExpectScreen hints.
     """
     steps: list[NavStep] = []
     steps.append(NavStep(
-        "launch-plaza",
+        "select-plaza-tile",
         tuple(launch_taps),
-        ExpectScreen("plaza-intro", "top", hints={"note": "plaza title/intro screen"}),
-        settle_ms=1500,
+        ExpectScreen("plaza-tile-selected", "top",
+                     hints={"note": "top screen shows the StreetPass Mii Plaza banner"}),
+        settle_ms=500,
+    ))
+    steps.append(NavStep(
+        "launch-plaza",
+        (Tap(("A",), wait_ms=PLAZA_LAUNCH_WAIT_MS),),
+        ExpectScreen("careful-modal", "top",
+                     hints={"note": "'Careful!' modal, 'Play' preselected"}),
+        settle_ms=1000,
+    ))
+    steps.append(NavStep(
+        "enter-plaza",
+        (Tap(("A",), wait_ms=5000),),
+        ExpectScreen("plaza-cards", "top",
+                     hints={"note": "walkable plaza loads; announcement cards may stack"}),
+        settle_ms=1000,
     ))
     steps.append(NavStep(
         "clear-modals",
-        tuple(Tap(("A",), wait_ms=700) for _ in range(modal_clear_a_presses)),
-        ExpectScreen("plaza-main", "top", hints={"note": "main plaza, selector visible"}),
-        settle_ms=800,
+        tuple(Tap(("A",), wait_ms=2500) for _ in range(modal_clear_a_presses)),
+        ExpectScreen("plaza-main", "top",
+                     hints={"note": "walkable plaza, 'Plaza' label, no card overlay"}),
+        settle_ms=MODAL_CLEAR_SETTLE_MS,
     ))
     steps.append(NavStep(
-        "to-music-player",
-        tuple(Tap(("DLEFT",), wait_ms=350) for _ in range(dleft_to_music_player)),
-        ExpectScreen("music-player-selected", "bottom",
-                     hints={"note": "Music Player icon (black note) highlighted, far left"}),
+        "switch-icons",
+        (Tap(("Y",), hold_ms=120, wait_ms=1200),),
+        ExpectScreen("features-grid", "bottom",
+                     hints={"note": "features grid (music note bottom-left)"}),
+        settle_ms=1000,
+    ))
+    steps.append(NavStep(
+        "select-music-player",
+        (Tap((), touch=music_player_touch, hold_ms=120, wait_ms=1000),),
+        ExpectScreen("music-player-named", "top",
+                     hints={"note": "top screen names 'Music Player'"}),
         settle_ms=500,
     ))
     steps.append(NavStep(
         "open-music-player",
-        (Tap(("A",), wait_ms=800),),
-        ExpectScreen("track-list", "bottom", hints={"note": "track list visible"}),
+        (Tap(("A",), wait_ms=2500),),
+        ExpectScreen("track-list", "top",
+                     hints={"note": "track list visible, cursor on Entrance"}),
         settle_ms=800,
     ))
     if ddown_count > 0:
         steps.append(NavStep(
             "select-track",
             tuple(Tap(("DDOWN",), wait_ms=300) for _ in range(ddown_count)),
-            ExpectScreen("track-highlighted", "bottom",
+            ExpectScreen("track-highlighted", "top",
                          hints={"note": f"track {ddown_count} down highlighted"}),
             settle_ms=400,
         ))
     steps.append(NavStep(
         "play",
         (Tap(("A",), wait_ms=500),),
-        ExpectScreen("playing", "bottom", hints={"note": "playback started"}),
+        ExpectScreen("playing", "bottom",
+                     hints={"note": "bottom bar shows 'A: Stop' (playing state)"}),
         settle_ms=600,
     ))
     return steps
@@ -699,6 +1023,7 @@ class ConsoleCaptureSession:
         recorder: Optional[Recorder] = None,
         verifier: Optional[ScreenVerifier] = None,
         verdict_runner: Optional[VerdictRunner] = None,
+        rosalina_driver: Optional[RosalinaMenuDriver] = None,
     ) -> None:
         self.cfg = cfg
         self._input = input_client
@@ -710,6 +1035,7 @@ class ConsoleCaptureSession:
         self._recorder = recorder or FfmpegRecorder()
         self._verifier = verifier or AcceptingVerifier()
         self._verdict_runner = verdict_runner or _subprocess_verdict_runner
+        self._rosalina = rosalina_driver
 
     # -- lazy real clients -------------------------------------------------- #
     def input_client(self) -> InputClient:
@@ -732,6 +1058,16 @@ class ConsoleCaptureSession:
             self._ntr.start()
             self._ntr_started = True
         return self._ntr
+
+    def rosalina_driver(self) -> RosalinaMenuDriver:
+        if self._rosalina is None:
+            ip = self.cfg.n3ds.require_ip()
+            self._rosalina = RosalinaMenuDriver(
+                self.input_client(),
+                RosalinaReader(ip, self.cfg.n3ds.cmd_port),
+                menu_combo=sorted(self.cfg.n3ds.menu_combo),
+            )
+        return self._rosalina
 
     def close(self) -> None:
         if self._ntr is not None and self._ntr_started:
@@ -766,22 +1102,28 @@ class ConsoleCaptureSession:
     def _run_taps(self, taps: Sequence[Tap]) -> None:
         ic = self.input_client()
         for tap in taps:
-            ic.press(list(tap.buttons), hold_ms=tap.hold_ms)
+            if tap.touch is not None:
+                ic.touch(tap.touch[0], tap.touch[1], hold_ms=tap.hold_ms)
+            if tap.buttons:
+                ic.press(list(tap.buttons), hold_ms=tap.hold_ms)
             if tap.wait_ms > 0:
                 time.sleep(tap.wait_ms / 1000.0)
 
     # -- stage 1: preflight ------------------------------------------------- #
     def preflight(self, *, reapply_volume: bool = True) -> StageResult:
-        """ftpd reachable + NTR stream healthy, and (optionally) re-apply the
-        Rosalina volume-override pin."""
+        """File service reachable + NTR stream healthy, and (optionally)
+        re-apply the Rosalina volume-override pin."""
         data: dict = {}
 
-        # ftpd reachable: a directory listing round-trips.
+        # File service reachable: a directory listing round-trips. (Default =
+        # the Rosalina file service, port 4952, on at boot in dev mode.)
         try:
             entries = self._ftp_list(self.cfg.n3ds.require_ip(), "/", self.cfg.n3ds.ftp_port)
             data["ftp_entries"] = len(entries)
         except Exception as exc:
-            return StageResult("preflight", False, f"ftpd unreachable: {exc}", data)
+            return StageResult(
+                "preflight", False,
+                f"file service unreachable (port {self.cfg.n3ds.ftp_port}): {exc}", data)
 
         # NTR stream healthy: a frame arrives and status reports connected.
         try:
@@ -796,7 +1138,7 @@ class ConsoleCaptureSession:
         except Exception as exc:
             return StageResult("preflight", False, f"NTR stream error: {exc}", data)
 
-        # Re-apply the Rosalina volume-override pin (parameterised; see TODO).
+        # Re-apply the Rosalina volume-override pin (readout-verified).
         vol = self.reapply_rosalina_volume() if reapply_volume else None
         if vol is not None:
             data["volume"] = vol.data
@@ -804,39 +1146,53 @@ class ConsoleCaptureSession:
                 return StageResult("preflight", False, f"volume re-apply failed: {vol.message}", data)
 
         return StageResult("preflight", True,
-                           f"ftpd + NTR healthy (fps {data['ntr'].get('fps', 0):.1f})", data)
+                           f"file service + NTR healthy (fps {data['ntr'].get('fps', 0):.1f})", data)
 
     def reapply_rosalina_volume(self) -> StageResult:
-        """Re-apply the Rosalina volume-override pin.
+        """Re-apply the Rosalina volume-override pin (readout-verified).
 
         The camera-shutter path can silently reset the override, so the capture
-        preflight re-applies it every run. This is the documented, parameterised
-        hook: it runs ``cfg.rosalina_volume_taps`` (the live menu sequence the
-        main session captures) when they are defined, and otherwise SKIPS with a
-        clear notice -- it never fails preflight just because the sequence hasn't
-        been recorded yet. The chosen value (``cfg.rosalina_volume``) becomes a
-        rig constant in the calibration memory once measured.
+        preflight re-applies it every run. The walk is closed-loop over the
+        Rosalina text readout (see :class:`RosalinaMenuDriver`): every press is
+        confirmed from the cursor text and the applied value is read back from
+        the "Value: [NN%]" row, so a drifted menu or a dropped input FAILS the
+        preflight instead of silently mis-pinning the level. Run this while the
+        console sits on the HOME menu: the chord's DDOWN leak is harmless there
+        and navigate()'s DLEFT saturation re-anchors afterwards.
         """
-        if not self.cfg.rosalina_volume_taps or self.cfg.rosalina_volume is None:
+        if self.cfg.rosalina_volume is None:
             return StageResult(
                 "volume", True,
-                "SKIPPED (TODO): Rosalina volume-override sequence not yet recorded on "
-                "hardware; set CaptureConfig.rosalina_volume + rosalina_volume_taps "
-                "(menu chord " + "+".join(ROSALINA_MENU_CHORD) + ") from the live console.",
-                {"applied": False, "volume": self.cfg.rosalina_volume, "todo": True},
+                "SKIPPED: no Rosalina volume override configured "
+                "(CaptureConfig.rosalina_volume is None); the analog slider "
+                "position is authoritative for this run.",
+                {"applied": False, "volume": None, "skipped": True},
             )
-        # TODO(main session): verify the slider landed on the target value via an
-        # NTR-frame region read before trusting it; for now we send the sequence.
-        self._run_taps(self.cfg.rosalina_volume_taps)
+        try:
+            result = self.rosalina_driver().set_volume_override(self.cfg.rosalina_volume)
+        except Exception as exc:
+            return StageResult(
+                "volume", False,
+                f"volume-override walk failed: {exc}",
+                {"applied": False, "volume": self.cfg.rosalina_volume, "todo": False},
+            )
         return StageResult(
             "volume", True,
-            f"applied Rosalina volume override = {self.cfg.rosalina_volume}",
-            {"applied": True, "volume": self.cfg.rosalina_volume, "todo": False},
+            f"Rosalina volume override pinned at {result['value']}% (readout-verified)",
+            {**result, "volume": result["value"], "todo": False},
         )
 
     # -- stage 2: deploy ---------------------------------------------------- #
     def deploy(self, local_bcsar: str | Path, *, remote: Optional[str] = None) -> StageResult:
-        """ftp_put the cartridge, ftp_get it back, and hash-compare to confirm."""
+        """Verify-first cartridge deploy: read the remote back and hash-compare;
+        push only when the bytes differ.
+
+        The boot-time Rosalina file service (port 4952) is WRITE-CONFINED to
+        /luma/staging/ (a fork safety design, live-observed 2026-07-18), so an
+        already-installed cartridge can always be VERIFIED at boot, but pushing
+        a NEW cartridge to the Luma titles path needs legacy ftpd (launch it
+        console-side and set N3DS_FTP_PORT=5000).
+        """
         local_bcsar = Path(local_bcsar)
         if not local_bcsar.is_file():
             return StageResult("deploy", False, f"local .bcsar not found: {local_bcsar}", {})
@@ -845,23 +1201,53 @@ class ConsoleCaptureSession:
         port = self.cfg.n3ds.ftp_port
 
         local_hash = hashlib.sha256(local_bcsar.read_bytes()).hexdigest()
+        readback = self.cfg.captures_dir / (local_bcsar.stem + ".readback.bcsar")
+        readback.parent.mkdir(parents=True, exist_ok=True)
+
+        def remote_sha256() -> str:
+            self._ftp_get(ip, remote, str(readback), port)
+            return hashlib.sha256(readback.read_bytes()).hexdigest()
+
+        # Read-back first: if the remote already carries these exact bytes the
+        # push is a no-op -- and it works over the write-confined boot service.
+        preread_error: Optional[str] = None
+        try:
+            if remote_sha256() == local_hash:
+                return StageResult(
+                    "deploy", True,
+                    f"already deployed + verified (sha256 {local_hash[:12]}, no push needed)",
+                    {"remote": remote, "local_sha256": local_hash,
+                     "remote_sha256": local_hash, "readback": str(readback),
+                     "pushed": False})
+        except Exception as exc:
+            # A missing remote (fresh install) falls through to the push; keep
+            # the error so a transport failure stays diagnosable if the push
+            # then fails too.
+            preread_error = str(exc)
+
         try:
             self._ftp_put(ip, str(local_bcsar), remote, port)
         except Exception as exc:
-            return StageResult("deploy", False, f"ftp_put failed: {exc}",
-                               {"remote": remote, "local_sha256": local_hash})
+            hint = ""
+            # The boot-time file service (its default port) is ALWAYS
+            # write-confined; don't rely only on the fork's error spelling.
+            if port == DEFAULT_FTP_PORT or "staging" in str(exc):
+                hint = (" -- the boot-time file service only writes under "
+                        "/luma/staging/; launch ftpd on the console and set "
+                        "N3DS_FTP_PORT=5000 to push a new cartridge")
+            return StageResult("deploy", False, f"ftp_put failed: {exc}{hint}",
+                               {"remote": remote, "local_sha256": local_hash,
+                                "preread_error": preread_error})
 
-        readback = self.cfg.captures_dir / (local_bcsar.stem + ".readback.bcsar")
-        readback.parent.mkdir(parents=True, exist_ok=True)
         try:
-            self._ftp_get(ip, remote, str(readback), port)
+            remote_hash = remote_sha256()
         except Exception as exc:
             return StageResult("deploy", False, f"ftp_get readback failed: {exc}",
                                {"remote": remote, "local_sha256": local_hash})
 
-        remote_hash = hashlib.sha256(Path(readback).read_bytes()).hexdigest()
         data = {"remote": remote, "local_sha256": local_hash,
-                "remote_sha256": remote_hash, "readback": str(readback)}
+                "remote_sha256": remote_hash, "readback": str(readback),
+                "pushed": True}
         if remote_hash != local_hash:
             return StageResult("deploy", False,
                                f"hash mismatch after push (local {local_hash[:12]} != "
@@ -1025,7 +1411,7 @@ def _build_cli():
     ap.add_argument("--captures-dir", help="Host directory for captured WAVs.")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
-    sub.add_parser("preflight", help="ftpd + NTR health and volume re-apply.")
+    sub.add_parser("preflight", help="File-service + NTR health and volume re-apply.")
 
     d = sub.add_parser("deploy", help="Push a cartridge .bcsar and hash-verify it.")
     d.add_argument("bcsar")
@@ -1037,6 +1423,9 @@ def _build_cli():
     r.add_argument("out")
     r.add_argument("--passes", type=int, default=2)
     r.add_argument("--seconds-per-pass", type=float, default=None)
+    r.add_argument("--battery", choices=sorted(SECONDS_PER_PASS_V2),
+                   help="Battery-v2 track letter; sets the pass length from "
+                        "SECONDS_PER_PASS_V2 unless --seconds-per-pass is given.")
 
     v = sub.add_parser("verdict", help="console-tolerance verdict of a capture vs a render.")
     v.add_argument("capture")
@@ -1065,8 +1454,10 @@ def main(argv: Optional[list[str]] = None) -> int:
         elif args.cmd == "navigate":
             res = sess.navigate(plaza_path_for_track(args.track))
         elif args.cmd == "record":
-            res = sess.record(args.out, passes=args.passes,
-                              seconds_per_pass=args.seconds_per_pass)
+            spp = args.seconds_per_pass
+            if spp is None and args.battery:
+                spp = SECONDS_PER_PASS_V2[args.battery]
+            res = sess.record(args.out, passes=args.passes, seconds_per_pass=spp)
         elif args.cmd == "verdict":
             res = sess.verdict(args.capture, args.render)
         elif args.cmd == "ab":

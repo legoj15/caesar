@@ -119,7 +119,11 @@ def main():
               f"| {label}")
 
     if letter == "A":
-        # 3) pan curve: L-R split monotone; 32/96 strictly between center & edge
+        # 3) pan curve: byte 0 -> RIGHT, 127 -> LEFT (the console-confirmed
+        # inverted direction, player fix 9769a96 -- this check predates that
+        # fix and used to expect the opposite slope), so the L-R split is
+        # monotone-INCREASING with the byte; 32/96 strictly between center &
+        # edge.
         pans = [(t, lbl) for t, _, lbl in rows if "pan probe" in lbl]
         splits = []
         for t, lbl in pans:
@@ -128,13 +132,13 @@ def main():
             splits.append(dl)
             print(f"      pan {lbl.split()[-1]:>3}: L-R {dl:+7.2f} dB")
         if len(splits) == 5:
-            mono_dec = all(a > b for a, b in zip(splits, splits[1:]))
-            disc = (splits[0] > splits[1] > splits[2] > splits[3] > splits[4]
+            mono_inc = all(a < b for a, b in zip(splits, splits[1:]))
+            disc = (splits[0] < splits[1] < splits[2] < splits[3] < splits[4]
                     and abs(splits[2]) < 3
-                    and 2 < splits[1] < abs(splits[0])
-                    and 2 < -splits[3] < abs(splits[4]))
-            fails += not (mono_dec and disc)
-            print(f"  {'OK ' if mono_dec and disc else 'FAIL'} pan curve monotone "
+                    and 2 < -splits[1] < abs(splits[0])
+                    and 2 < splits[3] < abs(splits[4]))
+            fails += not (mono_inc and disc)
+            print(f"  {'OK ' if mono_inc and disc else 'FAIL'} pan curve monotone "
                   f"+ 32/96 between center and edges")
         else:
             fails += 1

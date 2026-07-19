@@ -265,44 +265,23 @@ Hardware-RE queue (New 3DS + CFW, feeds stages 2–3):
 - [x] **Surround-mode A/B probe** (`tools/surround-probe/`) — console-confirmed
       2026-07-11: `span` (0xD7) IS audible in Surround mode; write-up in the
       HISTORY 2026-07-11 addendum.
-- [ ] **Console-in-the-loop automation (`n3ds-mcp` + line-in rig).** The
-      capture loop that has cost a human session each time (build → SD →
-      navigate → record → hand over WAVs) becomes scriptable. Both legs
-      verified 2026-07-15: the `n3ds-mcp` server (`E:\GitHub\3ds-mcp`,
-      hardware-verified 2026-07-14 — dual-screen NTR capture, full input
-      injection incl. HOME/touch/`input_sequence` macros, ftpd transfer,
-      3dslink launch; needs Luma + NTR-HR active console-side) is registered
-      at **user scope** (it was project-scoped to its own repo via `.mcp.json`,
-      which is why it "vanished" from every other folder), and the Scarlett
-      line feed records programmatically (ffmpeg/dshow). **Loop PROVEN
-      hands-free 2026-07-15**: ftpd cartridge hash-check → plaza launch →
-      music-player navigation → battery A recorded and analyzed — 28/28
-      schedule onsets, passes exactly 23.50 s apart, channel map ch0=L/ch1=R
-      (NOT reversed; ±53 dB probe split), interface knob mismatch +0.045 dB
-      (negligible), peaks -6.2 dBFS; slider and gain knobs now FROZEN (rig
-      constants + plaza navigation path in the `capture-rig-calibration`
-      memory). **`tools/console-capture/` BUILT (offline, 26 tests green,
-      2026-07-16):** independently-callable stages — FTP push (hash-checked)
-      → HOME-menu launch → screenshot-verified navigation → ffmpeg record +
-      level/noise assertion → `console-tolerance` verdict, plus the Rosalina
-      volume-override re-apply hook and the one-time NTR on/off perturbation
-      A/B — reusing `n3ds-mcp` by import, exercised against the sims + a fake
-      ffmpeg/ftp. The ffmpeg dshow path, device presence and a −76 dBFS-RMS
-      quiet noise floor (both channels matched) were confirmed live
-      2026-07-16. **Open remainder = the live shakedown** + two live-nav
-      fill-ins: the Rosalina volume-override menu sequence + its chosen value
-      (→ a rig constant), and the HOME→plaza icon tap prefix — then run
-      battery v2, the (now-settled, see below) `0xB6` fix verification, and
-      re-verify the three filed stage-2 fixes through it. No memory
-      read in v0 — and the classic-NTR read-mem idea is RETRACTED 2026-07-16
-      (dead on current firmware per the n3ds-mcp research report); memory
-      access routes through the analog-free program bullet below (3GX plugin
-      for streams, Rosalina GDB stub for one-shot snapshots). Longer-view
-      enablers: routine console-goldens regression
-      passes per player change (tolerance-net only — the analog path can
-      never be byte-identical), sound-test captures from arbitrary titles,
-      and same-size CWAV payload pokes as stage-3 stimulus injection
-      (unproven: needs fixed-size DSP-ADPCM re-encode).
+- [x] **Console-in-the-loop automation (`n3ds-mcp` + line-in rig)** — live
+      shakedown PASSED 2026-07-18, all `tools/console-capture` stages proven on
+      hardware; full story in [HISTORY.md](HISTORY.md#console-in-the-loop-automation--the-live-shakedown-2026-07-18).
+- [ ] **Console-capture follow-ups** (from the 2026-07-18 shakedown):
+      real screen verification for the plaza announcement-card boundary
+      (RegionMean/template hints from reference frames — the card count is
+      genuinely variable per entry and blind counts mis-navigate into
+      StreetPass games; requires the standalone NTR-owning configuration),
+      the auto-ftpd deploy leg for pushing *new* cartridges (the boot-time
+      file service is write-confined to `/luma/staging/`), battery B's
+      track-list DDOWN count, and the longer-view enablers: routine
+      console-goldens regression per player change (tolerance-net only),
+      sound-test captures from arbitrary titles, and same-size CWAV payload
+      pokes as stage-3 stimulus injection (unproven: needs fixed-size
+      DSP-ADPCM re-encode). Memory read stays routed through the analog-free
+      program (3GX plugin for streams, Rosalina GDB stub for snapshots;
+      classic-NTR read-mem retracted 2026-07-16).
 - [ ] **Capture-rig v2 — repeatability** (decided 2026-07-16; interface
       confirmed **2nd-gen 2i2** — true analog knobs, no software gain
       control, so the 4th-gen software escape hatch is unavailable and the
