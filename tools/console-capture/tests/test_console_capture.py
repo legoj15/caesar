@@ -210,7 +210,8 @@ class FakeRosalinaMenu:
                  "Toggle Wireless", "Toggle Power Button",
                  "Toggle power to card slot", "Change screen brightness"]
 
-    def __init__(self, enabled: bool = False, value: int = 85) -> None:
+    def __init__(self, enabled: bool = False, value: int = 85,
+                 on_screenshot=None) -> None:
         self.state = "closed"   # closed | root | sysconfig | volume
         self.cursor = 0
         self.enabled = enabled
@@ -218,6 +219,10 @@ class FakeRosalinaMenu:
         self.success = False
         self.epoch = 100
         self.press_log: list[frozenset] = []
+        # Fired when A activates "Take screenshot" -- models the SD write of the
+        # framebuffer BMPs (the real menu writes them to /luma/screenshots/).
+        self._on_screenshot = on_screenshot
+        self.screenshots_taken = 0
 
     # -- input-client surface ----------------------------------------------- #
     def press(self, buttons, hold_ms: int = 120) -> None:
@@ -250,6 +255,10 @@ class FakeRosalinaMenu:
             elif "A" in keys and self.ROOT[self.cursor] == "System configuration...":
                 self.state = "sysconfig"
                 self.cursor = 0
+            elif "A" in keys and self.ROOT[self.cursor] == "Take screenshot":
+                self.screenshots_taken += 1
+                if self._on_screenshot is not None:
+                    self._on_screenshot()
         elif self.state == "sysconfig":
             if "DDOWN" in keys:
                 self.cursor = min(self.cursor + 1, len(self.SYSCONFIG) - 1)
@@ -298,6 +307,57 @@ class FakeRosalinaMenu:
         return RosalinaScreen(overlay_active=self.state != "closed",
                               epoch=self.epoch, torn=False,
                               rows_overflowed=False, truncated=False, rows=rows)
+
+
+def _make_bmp_bytes(size=(4, 4), color=(20, 40, 60)) -> bytes:
+    """A real, PIL-decodable uncompressed BMP -- stands in for what Rosalina's
+    'Take screenshot' writes to /luma/screenshots/."""
+    import io
+
+    from PIL import Image
+
+    buf = io.BytesIO()
+    Image.new("RGB", size, color).save(buf, format="BMP")
+    return buf.getvalue()
+
+
+class FakeScreenshotFtp:
+    """Path-aware fake for the Rosalina screenshot fetch: lists BMP basenames
+    under /luma/screenshots and serves their bytes on RETR. Records every get."""
+
+    DIR = "/luma/screenshots"
+
+    def __init__(self, bmps: dict) -> None:
+        self.bmps = dict(bmps)          # {basename: bytes}
+        self.gets: list[str] = []
+
+    def add(self, name: str, data: bytes) -> None:
+        """Materialise a screenshot BMP (what the menu's 'Take screenshot' does)."""
+        self.bmps[name] = data
+
+    def list(self, ip, path="/", port=4952):
+        if path.rstrip("/") == self.DIR:
+            return sorted(self.bmps)
+        raise RuntimeError(f"no such dir {path}")
+
+    def get(self, ip, remote, local, port=4952):
+        name = remote.rsplit("/", 1)[-1]
+        if name not in self.bmps:
+            raise RuntimeError(f"no such remote {remote}")
+        Path(local).parent.mkdir(parents=True, exist_ok=True)
+        Path(local).write_bytes(self.bmps[name])
+        self.gets.append(remote)
+        return str(Path(local).resolve())
+
+
+def _rosa_source(tmp_path, menu, ftp, *, is_recording=lambda: False):
+    """A RosalinaScreenshotSource driving the fake menu + fake screenshot ftp,
+    with the SD-write settle zeroed so tests don't sleep."""
+    drv = RosalinaMenuDriver(menu, menu)
+    return cc.RosalinaScreenshotSource(
+        drv, ftp.get, ftp.list, "127.0.0.1", 4952,
+        screenshots_dir=tmp_path / "shots",
+        is_recording=is_recording, screenshot_settle_s=0.0)
 
 
 def free_udp_port() -> int:
@@ -484,17 +544,109 @@ def test_deploy_verify_first_skips_push_when_identical(tmp_path):
     assert ftp.puts == 0
 
 
-def test_deploy_staging_refusal_gets_actionable_hint(tmp_path):
-    class StagingFtp(FakeFtp):
-        def put(self, ip, local, remote, port=5000):
-            raise RuntimeError("550 Writes are only permitted under /luma/staging/")
+def test_deploy_targets_the_titles_lane_on_the_file_service_port(tmp_path):
+    # deploy pushes over the file service (default port 4952) to a /luma/titles/
+    # content-lane path -- no ftpd:5000 leg, no staging confinement.
+    ftp = FakeFtp()
+    cfg = _cfg(tmp_path)
+    assert cfg.n3ds.ftp_port == 4952
+    assert cfg.luma_bcsar_path.startswith("/luma/titles/")
+    sess = ConsoleCaptureSession(cfg, ftp_put=ftp.put, ftp_get=ftp.get, ftp_list=ftp.list)
+    res = sess.deploy(_write_bcsar(tmp_path))
+    assert res.ok, res.message
+    assert cfg.luma_bcsar_path in ftp.store
 
-    ftp = StagingFtp()
+
+def test_deploy_missing_titles_dir_gets_actionable_hint(tmp_path):
+    # The /luma/titles/ lane has no MKD: a STOR into a path whose parent dir was
+    # never created fails, and listing that parent fails too. The hint must name
+    # the missing directory and the no-MKD constraint (NOT the retired ftpd:5000).
+    class NoDirFtp(FakeFtp):
+        def put(self, ip, local, remote, port=4952):
+            raise RuntimeError("552 Write failed")
+
+        def list(self, ip, path="/", port=4952):
+            raise RuntimeError("550 Not a directory")  # the parent dir is absent
+
+    ftp = NoDirFtp()
     sess = ConsoleCaptureSession(_cfg(tmp_path), ftp_put=ftp.put, ftp_get=ftp.get,
                                  ftp_list=ftp.list)
     res = sess.deploy(_write_bcsar(tmp_path))
     assert not res.ok
-    assert "N3DS_FTP_PORT=5000" in res.message
+    assert "does not exist" in res.message and "MKD" in res.message
+    assert "N3DS_FTP_PORT=5000" not in res.message  # ftpd is retired for deploy
+
+
+def test_deploy_stor_failure_with_existing_dir_gets_lane_hint(tmp_path):
+    # STOR fails but the parent directory lists fine -> not a missing-dir case;
+    # the generic content-lane hint is shown, with no misleading ftpd advice.
+    class StorFailFtp(FakeFtp):
+        def put(self, ip, local, remote, port=4952):
+            raise RuntimeError("552 Write failed")
+
+    ftp = StorFailFtp()  # .list returns a non-empty listing -> dir "exists"
+    sess = ConsoleCaptureSession(_cfg(tmp_path), ftp_put=ftp.put, ftp_get=ftp.get,
+                                 ftp_list=ftp.list)
+    res = sess.deploy(_write_bcsar(tmp_path))
+    assert not res.ok
+    assert "/luma/titles/" in res.message
+    assert "5000" not in res.message  # on the default port, no legacy-ftpd advice
+
+
+def test_deploy_refuses_oversize_before_transfer(tmp_path):
+    # The 16 MiB content-lane ceiling is enforced CLIENT-SIDE, before any bytes
+    # move -- an oversize STOR would otherwise stream the whole file (~149 s for
+    # 16 MiB) only to be refused. Nothing hits the wire here.
+    ftp = FakeFtp()
+    cfg = _cfg(tmp_path, max_content_bytes=16)       # tiny ceiling for the test
+    local = _write_bcsar(tmp_path, body=b"X" * 64)   # 64 B > 16 B ceiling
+    sess = ConsoleCaptureSession(cfg, ftp_put=ftp.put, ftp_get=ftp.get, ftp_list=ftp.list)
+    res = sess.deploy(local)
+    assert not res.ok
+    assert "over the" in res.message and "ceiling" in res.message
+    assert ftp.puts == 0                # never streamed
+    assert res.data["size_bytes"] == 64
+
+
+def test_deploy_allows_cartridge_exactly_at_ceiling(tmp_path):
+    # The guard is strictly greater-than: a cartridge exactly at the ceiling
+    # deploys normally.
+    ftp = FakeFtp()
+    cfg = _cfg(tmp_path, max_content_bytes=64)
+    local = _write_bcsar(tmp_path, body=b"X" * 64)
+    sess = ConsoleCaptureSession(cfg, ftp_put=ftp.put, ftp_get=ftp.get, ftp_list=ftp.list)
+    res = sess.deploy(local)
+    assert res.ok, res.message
+    assert ftp.puts == 1
+
+
+def test_deploy_refuses_write_while_ntr_streaming(tmp_path):
+    # A sustained STOR dies within seconds under an active NTR stream; when a push
+    # is actually needed and NTR is up, deploy refuses fast rather than streaming
+    # a few KB and dying with a socket reset.
+    ftp = FakeFtp()  # empty store -> RETR fails -> bytes "differ" -> write path
+    sess = ConsoleCaptureSession(_cfg(tmp_path), ntr_client=FakeNTR(),
+                                 ftp_put=ftp.put, ftp_get=ftp.get, ftp_list=ftp.list)
+    res = sess.deploy(_write_bcsar(tmp_path))
+    assert not res.ok
+    assert "NTR" in res.message and "stream" in res.message.lower()
+    assert res.data["ntr_streaming"] is True
+    assert ftp.puts == 0  # never streamed a byte
+
+
+def test_deploy_verify_only_succeeds_while_ntr_streaming(tmp_path):
+    # RETR is unaffected by NTR, so an already-deployed cartridge still verifies
+    # with the stream up -- the guard is only on the write path.
+    ftp = FakeFtp()
+    cfg = _cfg(tmp_path)
+    local = _write_bcsar(tmp_path)
+    ftp.store[cfg.luma_bcsar_path] = local.read_bytes()  # pre-installed, identical
+    sess = ConsoleCaptureSession(cfg, ntr_client=FakeNTR(),
+                                 ftp_put=ftp.put, ftp_get=ftp.get, ftp_list=ftp.list)
+    res = sess.deploy(local)
+    assert res.ok, res.message
+    assert res.data["pushed"] is False
+    assert ftp.puts == 0
 
 
 # =========================================================================== #
@@ -548,11 +700,12 @@ def test_plaza_path_structure_for_battery_a():
                      "open-music-player", "select-track", "play"]
     all_taps = [tap for s in path for tap in s.taps]
     all_buttons = [tap.buttons for tap in all_taps]
-    # HOME opens the menu; DLEFT saturates to the leftmost tile; 3x DRIGHT
-    # lands on the plaza tile (live-verified layout, 2026-07-18)
+    # HOME opens the menu; DLEFT saturates to the leftmost tile; 2x DRIGHT
+    # lands on the plaza tile (3rd tile in the 2026-07-19 layout -- the HOME
+    # layout is user-mutable, the banner checkpoint is the real guard)
     assert ("HOME",) in all_buttons
     assert sum(1 for b in all_buttons if b == ("DLEFT",)) == 12
-    assert sum(1 for b in all_buttons if b == ("DRIGHT",)) == 3
+    assert sum(1 for b in all_buttons if b == ("DRIGHT",)) == 2
     # Y switches the bottom grid to features; the Music Player is a touch tap
     assert sum(1 for b in all_buttons if b == ("Y",)) == 1
     touches = [tap.touch for tap in all_taps if tap.touch is not None]
@@ -756,3 +909,204 @@ def test_perturbation_ab_fails_when_audio_moves(tmp_path):
     assert not res.ok
     assert "perturb" in res.message.lower()
     assert res.data["worst_db"] > 1.0
+
+
+# =========================================================================== #
+# ScreenSource seam: per-step opt-in eyes (NTR default + Rosalina screenshot)
+# =========================================================================== #
+def test_rosalina_screenshot_source_fetches_appeared_bmp_not_litter(tmp_path, monkeypatch):
+    _no_deadzone(monkeypatch)
+    # /luma/screenshots/ holds litter, including a BOGUS FUTURE-dated file that a
+    # newest-by-name pick would wrongly choose. The source must instead fetch the
+    # file that APPEARED after the screenshot (set difference), and for "top" the
+    # plain framebuffer, not the 3D right-eye.
+    ftp = FakeScreenshotFtp({
+        "2020-01-01_00-00-00.000_top.bmp": b"old-litter",
+        "2031-09-09_09-09-09.999_top.bmp": b"future-litter",  # sorts last by name
+    })
+    ts = "2026-07-19_10-00-00.123"
+    real_top = _make_bmp_bytes((6, 4), (10, 20, 30))
+    menu = FakeRosalinaMenu(on_screenshot=lambda: (
+        ftp.add(f"{ts}_top.bmp", real_top),
+        ftp.add(f"{ts}_top_right.bmp", _make_bmp_bytes((2, 2))),  # 3D on
+        ftp.add(f"{ts}_bot.bmp", _make_bmp_bytes((5, 3))),
+    ))
+    src = _rosa_source(tmp_path, menu, ftp)
+    frame = src.grab(NavStep("look", (), menu_leak_safe=True), "top")
+    assert frame is not None
+    assert frame.size == (6, 4)              # decoded THIS capture's top BMP
+    assert menu.screenshots_taken == 1
+    assert menu.state == "closed"            # menu opened for the shot, then closed
+    # fetched the appeared top framebuffer -- not the 3D right-eye, not the 2031 litter
+    assert ftp.gets and ftp.gets[-1].endswith(f"{ts}_top.bmp")
+    assert "2031" not in ftp.gets[-1] and "_top_right" not in ftp.gets[-1]
+
+
+def test_rosalina_screenshot_source_returns_none_when_no_new_bmp(tmp_path, monkeypatch):
+    _no_deadzone(monkeypatch)
+    # The walk runs but no BMP materialises (e.g. the SD write failed). The source
+    # must NOT fall back to the dir's future-dated litter -- it returns None,
+    # which the verifier turns into a clean "no frame" checkpoint failure.
+    ftp = FakeScreenshotFtp({"2031-01-01_00-00-00.000_top.bmp": b"future-litter"})
+    menu = FakeRosalinaMenu()  # no on_screenshot -> nothing appears
+    src = _rosa_source(tmp_path, menu, ftp)
+    frame = src.grab(NavStep("look", (), menu_leak_safe=True), "top")
+    assert frame is None
+    assert menu.screenshots_taken == 1   # the walk did activate "Take screenshot"
+    assert ftp.gets == []                # nothing fetched -- litter untouched
+
+
+def test_rosalina_screenshot_source_returns_none_when_baseline_list_fails(tmp_path, monkeypatch):
+    _no_deadzone(monkeypatch)
+    # If the BASELINE (before) directory listing FAILS transiently, the source must
+    # NOT proceed with an empty baseline -- that would make the set difference
+    # degrade to the whole directory and fetch the future-dated litter. It bails to
+    # None (do-not-guess) before even opening the menu.
+    ftp = FakeScreenshotFtp({"2031-01-01_00-00-00.000_top.bmp": b"future-litter"})
+    orig_list = ftp.list
+    calls = {"n": 0}
+    def flaky_list(ip, path="/", port=4952):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("Could not reach the file service")  # baseline fails
+        return orig_list(ip, path, port)
+    ftp.list = flaky_list
+    menu = FakeRosalinaMenu(on_screenshot=lambda: ftp.add(
+        "2026-07-19_10-00-00.000_top.bmp", _make_bmp_bytes()))
+    src = _rosa_source(tmp_path, menu, ftp)
+    frame = src.grab(NavStep("look", (), menu_leak_safe=True), "top")
+    assert frame is None
+    assert menu.screenshots_taken == 0   # bailed before opening the menu -- no guess
+    assert ftp.gets == []                # the 2031 litter is never fetched
+
+
+def test_rosalina_screenshot_source_refuses_mid_record(tmp_path):
+    # Opening the menu freezes the app; the eye must refuse while a take is live.
+    ftp = FakeScreenshotFtp({"a_top.bmp": _make_bmp_bytes()})
+    menu = FakeRosalinaMenu()
+    src = _rosa_source(tmp_path, menu, ftp, is_recording=lambda: True)
+    with pytest.raises(RuntimeError, match="mid-record"):
+        src.grab(NavStep("look", (), menu_leak_safe=True), "top")
+    assert menu.state == "closed"            # the menu was never opened
+    assert ftp.gets == []
+
+
+def test_rosalina_screenshot_source_refuses_leak_unsafe_step(tmp_path):
+    # The open combo leaks buttons into the app; a step must vouch it is inert.
+    ftp = FakeScreenshotFtp({"a_top.bmp": _make_bmp_bytes()})
+    menu = FakeRosalinaMenu()
+    src = _rosa_source(tmp_path, menu, ftp)
+    with pytest.raises(RuntimeError, match="menu_leak_safe"):
+        src.grab(NavStep("look", ()), "top")  # menu_leak_safe defaults to False
+    assert menu.state == "closed"
+    assert ftp.gets == []
+
+
+def test_navigate_defaults_to_ntr_source(tmp_path):
+    # No step opts out -> every checkpoint uses the NTR eye, exactly as before.
+    with SimRig() as rig:
+        assert rig.wait_first_frame()
+        sess = ConsoleCaptureSession(_cfg(tmp_path), input_client=rig.input, ntr_client=rig.ntr)
+        res = sess.navigate(_short_path(2))
+        assert res.ok, res.message
+        assert all(s.source == "ntr" for s in _short_path(2))
+
+
+def test_navigate_per_step_rosalina_opt_in(tmp_path, monkeypatch):
+    _no_deadzone(monkeypatch)
+    with SimRig() as rig:
+        assert rig.wait_first_frame()
+        ftp = FakeScreenshotFtp({"2030-01-01_00-00-00.000_top.bmp": b"future-litter"})
+        ts = "2026-07-19_11-11-11.111"
+        menu = FakeRosalinaMenu(
+            on_screenshot=lambda: ftp.add(f"{ts}_top.bmp", _make_bmp_bytes((5, 5))))
+        rosa = _rosa_source(tmp_path, menu, ftp)
+        sess = ConsoleCaptureSession(
+            _cfg(tmp_path), input_client=rig.input, ntr_client=rig.ntr,
+            screen_sources={"rosalina-screenshot": rosa})
+        path = [
+            NavStep("ntr-step", (Tap(("A",), hold_ms=5, wait_ms=3),),
+                    ExpectScreen("cp0", "top"), settle_ms=3),  # default: NTR
+            NavStep("rosa-step", (Tap(("A",), hold_ms=5, wait_ms=3),),
+                    ExpectScreen("cp1", "top"), settle_ms=3,
+                    source="rosalina-screenshot", menu_leak_safe=True),
+        ]
+        res = sess.navigate(path)
+        assert res.ok, res.message
+        assert len(res.data["checkpoints"]) == 2
+        # the rosalina step drove the screenshot eye and fetched THIS capture's BMP
+        assert ftp.gets and ftp.gets[-1].endswith(f"{ts}_top.bmp")
+        assert menu.state == "closed"
+
+
+def test_navigate_rosalina_step_without_leak_safe_fails_that_checkpoint(tmp_path):
+    # A step opting into the screenshot eye but not declaring the leak safe fails
+    # its own checkpoint (source error), not crashes the run.
+    ftp = FakeScreenshotFtp({"x_top.bmp": _make_bmp_bytes()})
+    menu = FakeRosalinaMenu()
+    rosa = _rosa_source(tmp_path, menu, ftp)
+    with SimRig() as rig:
+        assert rig.wait_first_frame()
+        sess = ConsoleCaptureSession(
+            _cfg(tmp_path), input_client=rig.input, ntr_client=rig.ntr,
+            screen_sources={"rosalina-screenshot": rosa})
+        path = [NavStep("rosa", (Tap(("A",), hold_ms=5, wait_ms=3),),
+                        ExpectScreen("cp", "top"), settle_ms=3,
+                        source="rosalina-screenshot")]  # menu_leak_safe False
+        res = sess.navigate(path)
+        assert not res.ok
+        assert res.data["failed_step"] == "rosa"
+        assert "menu_leak_safe" in res.data["checkpoints"][0]["note"]
+
+
+def test_unknown_screen_source_raises(tmp_path):
+    sess = ConsoleCaptureSession(_cfg(tmp_path))
+    with pytest.raises(ValueError, match="unknown screen source"):
+        sess.screen_source("does-not-exist")
+
+
+# =========================================================================== #
+# SoundTestProfile: the plaza-specific navigation contract as a seam
+# =========================================================================== #
+def test_plaza_profile_reproduces_the_module_path_exactly():
+    prof = cc.PLAZA_PROFILE.path_for_track("Main Theme 1")
+    mod = plaza_path_for_track("Main Theme 1")
+    assert [s.name for s in prof] == [s.name for s in mod]
+    assert [s.taps for s in prof] == [s.taps for s in mod]
+    assert [s.settle_ms for s in prof] == [s.settle_ms for s in mod]
+
+
+def test_plaza_profile_composes_the_module_constants():
+    assert cc.PLAZA_PROFILE.tracks == cc.PLAZA_TRACKS
+    assert cc.PLAZA_PROFILE.seconds_per_pass == cc.SECONDS_PER_PASS_V2
+    assert cc.PLAZA_PROFILE.stop_playback_tap == cc.STOP_PLAYBACK_TAP
+    assert cc.PLAZA_PROFILE.stop_playback_tap.buttons == ("A",)  # "A stops" (plaza law)
+    with pytest.raises(KeyError):
+        cc.PLAZA_PROFILE.path_for_track("No Such Track")
+
+
+def test_config_defaults_to_the_plaza_profile(tmp_path):
+    assert _cfg(tmp_path).profile is cc.PLAZA_PROFILE
+
+
+def test_stop_playback_sends_the_profile_tap(tmp_path):
+    with SimRig() as rig:
+        sess = ConsoleCaptureSession(_cfg(tmp_path), input_client=rig.input, ntr_client=rig.ntr)
+        sess.stop_playback()  # plaza profile -> A
+        assert rig.sink.wait_for(2, timeout=2.0)  # press + release
+        pressed = [p["pressed"] for p in rig.sink.packets if p["pressed"]]
+        assert pressed == [{"A"}]
+
+
+def test_stop_playback_is_a_noop_when_profile_has_no_stop_tap(tmp_path):
+    import time
+
+    prof = cc.SoundTestProfile(name="no-single-tap-stop", tracks={"x": 0},
+                               home_to_target_taps=(), seconds_per_pass={},
+                               stop_playback_tap=None)
+    with SimRig() as rig:
+        sess = ConsoleCaptureSession(_cfg(tmp_path, profile=prof),
+                                     input_client=rig.input, ntr_client=rig.ntr)
+        sess.stop_playback()
+        time.sleep(0.15)  # give any stray packet time to (not) arrive
+        assert rig.sink.count() == 0  # nothing sent when there is no stop tap

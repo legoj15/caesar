@@ -9,8 +9,11 @@ success/failure and a machine-readable ``data`` payload:
   1. preflight   -- file service reachable + NTR stream healthy, and re-apply
                     the Rosalina volume-override pin (closed-loop against the
                     Rosalina text readout; live-verified 2026-07-18).
-  2. deploy      -- ftp_put a cartridge .bcsar to the Luma path, ftp_get it back
-                    and hash-compare to confirm the push landed intact.
+  2. deploy      -- push a cartridge .bcsar straight over the file service
+                    (/luma/titles/ STOR-only content lane, port 4952; no ftpd),
+                    verify-first: ftp_get the remote back and hash-compare, skip
+                    if identical, else push then re-verify. Refuses a >16 MiB
+                    cartridge before transferring; names a missing LayeredFS dir.
   3. navigate    -- frame-liveness-verified plaza navigation to a named track,
                     driven by InputRedirection input + a per-step NTR frame
                     check. NOTE: screen *identity* is unchecked by default (see
@@ -109,10 +112,20 @@ SAMPLE_RATE = 48000
 CHANNELS = 2
 
 # The Luma LayeredFS path the capture-cartridge MeetSound.bcsar is pushed to
-# (the plaza's v14 UPDATE romfs -- the base title path is a silent no-op).
+# (the plaza's v14 UPDATE romfs -- the base title path is a silent no-op). It is
+# under /luma/titles/, the file service's STOR-only content lane (see deploy()).
 LUMA_BCSAR_PATH = (
     "/luma/titles/0004001000021800/romfs/region_common/frame/sound/MeetSound.bcsar"
 )
+
+# The /luma/titles/ content-lane write ceiling, mirroring the firmware constant
+# FS_MAX_CONTENT_BYTES (sysmodules/rosalina/include/fileservice.h; the n3ds-mcp
+# sim pins the same number as MAX_CONTENT_BYTES). FTP STOR carries no size
+# upfront, so the firmware can only refuse an oversize write AFTER streaming the
+# whole file -- 16 MiB took 149 s to reach the ceiling on hardware (2026-07-19).
+# The local file size is known, so deploy() refuses over-ceiling cartridges
+# BEFORE any bytes go on the wire rather than paying that cost to fail.
+FS_MAX_CONTENT_BYTES = 16 * 1024 * 1024
 
 # Level calibration (memory: slider set so peaks land ~-6.2 dBFS; noise floor
 # -67.8 dBFS-rms at 48 kHz/16-bit dshow). ch0 = 3DS LEFT, ch1 = 3DS RIGHT (NOT
@@ -228,12 +241,25 @@ class ExpectScreen:
 @dataclass
 class NavStep:
     """One navigation step: run ``taps``, wait ``settle_ms``, grab a frame for
-    ``expect.screen`` and hand (step, frame) to the verifier."""
+    ``expect.screen`` and hand (step, frame) to the verifier.
+
+    ``source`` names the :class:`ScreenSource` (the "eye") that grabs this step's
+    checkpoint frame; it defaults to ``"ntr"`` (the live video stream) and is a
+    PER-STEP opt-in -- never a global swap. A step may point at the NTR-free
+    ``"rosalina-screenshot"`` eye instead (higher-fidelity BMP, but it freezes
+    the app while the menu is open). ``menu_leak_safe`` is the step's declaration
+    that opening the Rosalina menu HERE is safe: the open combo leaks its buttons
+    into the app underneath, so the screenshot eye REFUSES to run on a step that
+    has not asserted the leaked press is inert at this position (constraint (b)
+    of :class:`RosalinaScreenshotSource`). It is meaningless for the NTR eye.
+    """
 
     name: str
     taps: tuple[Tap, ...]
     expect: Optional[ExpectScreen] = None
     settle_ms: int = 500
+    source: str = "ntr"
+    menu_leak_safe: bool = False
 
 
 @dataclass
@@ -259,9 +285,10 @@ class CaptureConfig:
     The n3ds ``Config`` carries the console IP + ports (input UDP 4950, the
     fork's command/readout channel UDP 4951, NTR control TCP 8000, video UDP
     8001, and the file service TCP 4952 -- the Rosalina file service is on at
-    boot in dev mode; legacy ftpd needs N3DS_FTP_PORT=5000). The
-    capture-specific rig constants default from the calibration memory and are
-    all overridable.
+    boot in dev mode and is the deploy transport (STOR to the /luma/titles/
+    content lane; no ftpd needed). Legacy ftpd is still reachable via
+    N3DS_FTP_PORT=5000 but is no longer required. The capture-specific rig
+    constants default from the calibration memory and are all overridable.
     """
 
     n3ds: Config = field(default_factory=config_from_env)
@@ -271,7 +298,17 @@ class CaptureConfig:
     channels: int = CHANNELS
 
     luma_bcsar_path: str = LUMA_BCSAR_PATH
+    # The /luma/titles/ STOR ceiling; deploy() refuses a larger cartridge before
+    # transferring (see FS_MAX_CONTENT_BYTES). Overridable so tests can pin a
+    # tiny ceiling without writing a 16 MiB fixture.
+    max_content_bytes: int = FS_MAX_CONTENT_BYTES
     captures_dir: Path = field(default_factory=lambda: Path.cwd() / "captures")
+
+    # The sound-test navigation contract (default: the StreetPass Mii Plaza
+    # music player). stop_playback() and the CLI navigate/record commands read
+    # the plaza track map, HOME->plaza prefix, stop tap and battery lengths from
+    # here; see SoundTestProfile.
+    profile: SoundTestProfile = field(default_factory=lambda: PLAZA_PROFILE)
 
     seconds_per_pass: float = SECONDS_PER_PASS
     lead_in_s: float = 0.0
@@ -831,6 +868,210 @@ class RosalinaMenuDriver:
 
 
 # =========================================================================== #
+# Screen sources -- the per-step "eye" that grabs a checkpoint frame
+# =========================================================================== #
+
+class ScreenSource(Protocol):
+    """A pluggable eye that produces a checkpoint frame for one NavStep.
+
+    ``grab(step, screen)`` returns a PIL ``Image`` (upright) or ``None`` when no
+    frame was available; the result is handed straight to a :class:`ScreenVerifier`
+    (so both eyes must yield the same frame type the verifiers expect). Two
+    implementations ship: :class:`NtrScreenSource` (the default -- live video,
+    non-invasive) and :class:`RosalinaScreenshotSource` (NTR-free BMP over the
+    file service). The source is chosen PER STEP via ``NavStep.source``; the
+    default is always NTR, and no step ever swaps the default globally.
+    """
+
+    name: str
+
+    def grab(self, step: "NavStep", screen: str):  # pragma: no cover - Protocol
+        ...
+
+
+class NtrScreenSource:
+    """The default eye: a fresh frame from the live NTR video stream.
+
+    Non-invasive -- it never touches the app or the Rosalina menu, so it is
+    valid at every checkpoint including mid-navigation. This is exactly what
+    ``ConsoleCaptureSession._wait_frame`` has always done; it is now one
+    :class:`ScreenSource` among (currently two) rather than a hard-wired call.
+    """
+
+    name = "ntr"
+
+    def __init__(self, wait_frame: Callable[[str, float], object], timeout: float = 6.0) -> None:
+        self._wait_frame = wait_frame
+        self._timeout = timeout
+
+    def grab(self, step: "NavStep", screen: str):
+        return self._wait_frame(screen, self._timeout)
+
+
+class RosalinaScreenshotSource:
+    """An NTR-free eye: a Rosalina "Take screenshot" BMP over the file service.
+
+    The Rosalina menu's "Take screenshot" writes uncompressed BMPs of the
+    *underlying frozen framebuffers* (the app/HOME screen, not the overlay) to
+    ``/luma/screenshots/``; the menu is fully navigable blind over the 4951 text
+    readout and the BMPs are fetchable on 4952, so an agent can *see* the console
+    with NTR not running at all: open menu -> Take screenshot -> close -> fetch
+    the BMP that just appeared -> decode (~30 s/look). Uncompressed BMP is HIGHER
+    fidelity than the JPEG NTR stream that :class:`RegionMeanVerifier` was built
+    to tolerate. (firmware/README.md, "Eyes without NTR".)
+
+    Naming (confirmed against a real dump 2026-07-19):
+    ``YYYY-MM-DD_HH-MM-SS.mmm_top.bmp`` / ``_bot.bmp`` (plus ``_top_right.bmp``
+    when 3D is on). The file to fetch is found by set difference (list the dir
+    BEFORE the screenshot, take what APPEARED after) -- NOT by newest-by-name:
+    the directory accumulates litter stamped with bogus FUTURE dates (RTC
+    weirdness, 2030/2031), so a name sort over the whole dir picks the wrong
+    file. When no new BMP is detected, grab returns None rather than guessing.
+
+    THREE hard constraints, all enforced here as code guards, not just prose:
+
+      (a) Opening the menu FREEZES the app and the GPU. This eye is therefore
+          unusable mid-record -- opening the menu would freeze playback and
+          destroy the capture. ``grab`` refuses when ``is_recording()`` is true
+          (the session wires that to its own record state), so recording code
+          can never accidentally reach for it.
+      (b) The open combo LEAKS its buttons into the app underneath (DDOWN is
+          known-inert at the plaza card boundary; L/SELECT there are UNVERIFIED).
+          A NavStep must therefore DECLARE ``menu_leak_safe=True`` before this
+          eye may run at its position; otherwise ``grab`` refuses, because the
+          leaked press would silently corrupt navigation state.
+      (c) The 4951 readout serves ONE reader at a time. This eye drives the menu
+          over the SAME :class:`RosalinaMenuDriver` (hence the same 4951 reader)
+          that the volume walk uses -- it relocates the single-bind exclusivity
+          off NTR onto 4951 rather than removing it. Do not point it at a second,
+          independent reader; a concurrent 4951 query starves the walk.
+    """
+
+    name = "rosalina-screenshot"
+    SCREENSHOT_ENTRY = "Take screenshot"
+    SCREENSHOT_DIR = "/luma/screenshots"
+
+    def __init__(self, driver: "RosalinaMenuDriver", ftp_get: Callable,
+                 ftp_list: Callable, ip: str, port: int, *,
+                 screenshots_dir: Path,
+                 is_recording: Callable[[], bool] = lambda: False,
+                 decode: Optional[Callable[[Path], object]] = None,
+                 screenshot_settle_s: float = 1.0) -> None:
+        self._driver = driver
+        self._ftp_get = ftp_get
+        self._ftp_list = ftp_list
+        self._ip = ip
+        self._port = port
+        self._dir = Path(screenshots_dir)
+        self._is_recording = is_recording
+        self._decode = decode or self._default_decode
+        self._settle = screenshot_settle_s
+        self.last_fetched: Optional[str] = None
+
+    def grab(self, step: "NavStep", screen: str = "top"):
+        # (a) never open the menu while a recording is running -- it freezes the
+        # app the capture is measuring.
+        if self._is_recording():
+            raise RuntimeError(
+                "the Rosalina screenshot eye opens the menu, which FREEZES the "
+                "app -- it cannot be used mid-record (constraint a). Grab NTR "
+                "frames during a take, or take the screenshot before/after it.")
+        # (b) the step must have vouched that the open combo's button leak is
+        # inert at this position.
+        if not getattr(step, "menu_leak_safe", False):
+            raise RuntimeError(
+                f"step {step.name!r} did not declare menu_leak_safe; the Rosalina "
+                "open combo leaks its buttons into the app underneath, so the "
+                "screenshot eye refuses to run where the leak is unverified "
+                "(constraint b). Set NavStep.menu_leak_safe=True only where the "
+                "leaked press is known inert.")
+
+        # The BASELINE listing must succeed: if it FAILS (vs an empty dir),
+        # `before` would be empty and the set difference below would degrade to
+        # the whole directory -- litter included -- silently defeating the litter
+        # guard. A failed baseline => bail (the same do-not-guess policy used when
+        # no new BMP appears), never proceed on an empty baseline.
+        before_list = self._list_bmps()
+        if before_list is None:
+            return None  # could not establish a baseline; do NOT guess from litter
+        before = set(before_list)
+
+        self._driver.open()  # NOTE: leaks the open combo into the app (see (b))
+        scr = self._driver.seek_cursor(self.SCREENSHOT_ENTRY)
+        self._driver.press_and_wait(("A",), after_epoch=scr.epoch)
+        # The framebuffer dump lands a moment after the press; give the SD write
+        # a beat before we list for the new file.
+        time.sleep(self._settle)
+        self._driver.close()
+
+        # Fetch the file that APPEARED (set difference), never newest-by-name --
+        # the dir carries future-dated litter that a name sort would pick first.
+        # A failed AFTER listing is safe: it yields no `appeared`, so we return
+        # None below rather than guessing.
+        after_list = self._list_bmps() or []
+        appeared = sorted(set(after_list) - before)
+        picked = self._select(appeared, screen)
+        if picked is None:
+            return None  # no new screenshot detected; do NOT guess from litter
+        local = self._fetch(picked)
+        return self._decode(local)
+
+    # -- fetch helpers ------------------------------------------------------ #
+    def _list_bmps(self) -> Optional[list[str]]:
+        """List the `.bmp` files in the screenshot dir. Returns ``None`` if the
+        listing itself FAILED (so callers can distinguish a failed listing from a
+        genuinely empty directory); an empty but successful listing returns
+        ``[]``. The baseline listing in ``grab()`` must not treat a failure as an
+        empty directory -- that would defeat the set-difference litter guard."""
+        try:
+            entries = self._ftp_list(self._ip, self.SCREENSHOT_DIR, self._port)
+        except Exception:
+            return None
+        return [e.rstrip("/") for e in entries if e.lower().rstrip("/").endswith(".bmp")]
+
+    @staticmethod
+    def _select(appeared: list[str], screen: str) -> Optional[str]:
+        """Choose the requested screen's BMP among the files that appeared.
+
+        One "Take screenshot" writes ``<ts>_top.bmp`` and ``<ts>_bot.bmp`` (plus
+        ``<ts>_top_right.bmp`` when 3D is on). For "top" prefer the plain top
+        framebuffer, NOT the 3D right-eye. ``appeared`` holds only files from THIS
+        capture (set difference), so a max-by-name tiebreak inside it is safe --
+        the future-dated litter is never in this set. Returns None if empty.
+        """
+        if not appeared:
+            return None
+        low = [(n, n.lower()) for n in appeared]
+        if screen == "bottom":
+            tagged = [n for n, l in low if "_bot" in l]
+        else:
+            tagged = [n for n, l in low if "_top" in l and "_top_right" not in l]
+            if not tagged:  # only the 3D right-eye landed
+                tagged = [n for n, l in low if "_top" in l]
+        return max(tagged) if tagged else max(appeared)
+
+    def _fetch(self, name: str) -> Path:
+        remote = f"{self.SCREENSHOT_DIR}/{name}"
+        self._dir.mkdir(parents=True, exist_ok=True)
+        local = self._dir / name
+        self._ftp_get(self._ip, remote, str(local), self._port)
+        self.last_fetched = str(local)
+        return local
+
+    @staticmethod
+    def _default_decode(path: Path):
+        try:
+            from PIL import Image  # the harness env (n3ds-mcp venv) ships Pillow
+        except ImportError as exc:  # pragma: no cover - env-dependent
+            raise RuntimeError(
+                "Pillow is required to decode Rosalina BMP screenshots; install "
+                "it into the harness env (the n3ds-mcp venv already has it).") from exc
+        img = Image.open(path)
+        img.load()  # force the decode so the file handle can be released
+        return img
+
+
+# =========================================================================== #
 # Plaza navigation path (live-verified on the console, 2026-07-18)
 # =========================================================================== #
 
@@ -847,15 +1088,18 @@ PLAZA_TRACKS: dict[str, int] = {
     "Main Theme 2": 2,
 }
 
-# The HOME-menu -> plaza-tile prefix, live-verified 2026-07-18. The HOME menu
-# layout TODAY (it shifts when software is added/moved): leftmost tile =
-# "NTR CFW", then the Homebrew Utils folder, a blank tile, then StreetPass Mii
-# Plaza as the 4th tile. The prefix is layout-robust up to the DRIGHT count:
-# saturate DLEFT (12 exceeds any plausible row length; extra presses no-op at
-# the edge), then 3x DRIGHT -- and the checkpoint verifies the TOP screen shows
-# the plaza banner (selecting a tile names it there) BEFORE the A that
-# launches. Start-state contract (v0): HOME menu with NO suspended software --
-# a fresh launch shows splash -> "Please wait" -> the "Careful!" modal ("Play"
+# The HOME-menu -> plaza-tile prefix. The HOME layout is USER-MUTABLE (it
+# shifts as software is added/moved), so the DRIGHT count is a best-effort
+# starting point, NOT a fixed truth -- the plaza-banner checkpoint (the top
+# screen names the selected tile BEFORE the launching A) is the real guard, and
+# a wrong count fails there loudly rather than launching the wrong tile.
+# Layout on 2026-07-19: leftmost = "NTR CFW", then Homebrew Utils, then
+# StreetPass Mii Plaza as the 3rd tile -> saturate DLEFT (12 exceeds any
+# plausible row length; extra presses no-op at the edge) then 2x DRIGHT. (It was
+# the 4th tile / 3x DRIGHT on 07-18; the user removed/moved a tile since --
+# exactly why the count is not trusted and the banner checkpoint exists.)
+# Start-state contract (v0): HOME menu with NO suspended software -- a fresh
+# launch shows splash -> "Please wait" -> the "Careful!" modal ("Play"
 # preselected); resuming a suspended plaza skips all three, which this path
 # does not model.
 DEFAULT_HOME_TO_PLAZA_TAPS: tuple[Tap, ...] = (
@@ -863,7 +1107,7 @@ DEFAULT_HOME_TO_PLAZA_TAPS: tuple[Tap, ...] = (
 ) + tuple(
     Tap(("DLEFT",), wait_ms=250) for _ in range(12)
 ) + tuple(
-    Tap(("DRIGHT",), wait_ms=250) for _ in range(3)
+    Tap(("DRIGHT",), wait_ms=250) for _ in range(2)
 )
 
 # Live-measured navigation timings (2026-07-18) -- named next to the other
@@ -984,8 +1228,74 @@ def plaza_path_for_track(track_name: str, **kwargs) -> list[NavStep]:
     return plaza_music_player_path(PLAZA_TRACKS[track_name], **kwargs)
 
 
-# The A tap that stops playback (memory: "A plays, A stops").
+# The A tap that stops playback (memory: "A plays, A stops"). This is a PLAZA
+# law, not a universal one -- see SoundTestProfile.stop_playback_tap.
 STOP_PLAYBACK_TAP = Tap(("A",), wait_ms=300)
+
+
+# =========================================================================== #
+# Sound-test profile -- the per-title navigation contract
+# =========================================================================== #
+
+@dataclass
+class SoundTestProfile:
+    """A single title's sound-test navigation contract.
+
+    Everything that is true of the StreetPass Mii Plaza music player but NOT of
+    sound tests in general lives here rather than hard-coded in the harness:
+    the track->DDOWN map, the HOME->target tap prefix, the tap that stops
+    playback ("A stops" is a plaza law -- another title might use B, START, or
+    have no single-tap stop at all), and the per-battery loop lengths. The
+    :data:`PLAZA_PROFILE` below is the ONLY profile that exists and reproduces
+    today's behavior exactly; the dataclass is just the seam so a future title
+    can drop in without editing navigation code. (Do not speculatively add other
+    titles' profiles -- fill one in only when its walk is actually verified.)
+    """
+
+    name: str
+    tracks: dict[str, int]
+    home_to_target_taps: tuple[Tap, ...]
+    seconds_per_pass: dict[str, float]
+    # Tap is a (by-convention immutable) mutable dataclass, so the default comes
+    # via a factory returning the shared singleton. None => no single-tap stop.
+    stop_playback_tap: Optional[Tap] = field(default_factory=lambda: STOP_PLAYBACK_TAP)
+    music_player_touch: tuple[int, int] = MUSIC_PLAYER_TOUCH_XY
+    modal_clear_a_presses: int = 2
+
+    def path_for_track(self, track_name: str, **kwargs) -> list[NavStep]:
+        """Navigation path to ``track_name`` for this profile's layout.
+
+        Delegates to :func:`plaza_music_player_path` with the profile's own
+        prefix/touch/modal constants, so the plaza profile yields byte-for-byte
+        the same steps :func:`plaza_path_for_track` always did.
+        """
+        if track_name not in self.tracks:
+            raise KeyError(
+                f"unknown track {track_name!r} for profile {self.name!r}; "
+                f"known: {sorted(self.tracks)}")
+        return plaza_music_player_path(
+            self.tracks[track_name],
+            launch_taps=kwargs.pop("launch_taps", self.home_to_target_taps),
+            modal_clear_a_presses=kwargs.pop("modal_clear_a_presses",
+                                             self.modal_clear_a_presses),
+            music_player_touch=kwargs.pop("music_player_touch",
+                                          self.music_player_touch),
+            **kwargs,
+        )
+
+
+# The default profile: the StreetPass Mii Plaza music player, the only title the
+# harness has ever driven. Composed from the live-verified plaza constants above
+# so behavior is identical to the pre-profile harness.
+PLAZA_PROFILE = SoundTestProfile(
+    name="streetpass-mii-plaza",
+    tracks=PLAZA_TRACKS,
+    home_to_target_taps=DEFAULT_HOME_TO_PLAZA_TAPS,
+    seconds_per_pass=SECONDS_PER_PASS_V2,
+    stop_playback_tap=STOP_PLAYBACK_TAP,
+    music_player_touch=MUSIC_PLAYER_TOUCH_XY,
+    modal_clear_a_presses=2,
+)
 
 
 # =========================================================================== #
@@ -1028,6 +1338,7 @@ class ConsoleCaptureSession:
         verifier: Optional[ScreenVerifier] = None,
         verdict_runner: Optional[VerdictRunner] = None,
         rosalina_driver: Optional[RosalinaMenuDriver] = None,
+        screen_sources: Optional[dict[str, ScreenSource]] = None,
     ) -> None:
         self.cfg = cfg
         self._input = input_client
@@ -1040,6 +1351,12 @@ class ConsoleCaptureSession:
         self._verifier = verifier or AcceptingVerifier()
         self._verdict_runner = verdict_runner or _subprocess_verdict_runner
         self._rosalina = rosalina_driver
+        # Per-step screen "eyes"; seeded from injection (tests), otherwise built
+        # lazily by screen_source(). NTR is always the default.
+        self._sources: dict[str, ScreenSource] = dict(screen_sources or {})
+        # True only while a take is in flight -- the Rosalina screenshot eye
+        # reads this to refuse opening the (app-freezing) menu mid-record.
+        self._recording = False
 
     # -- lazy real clients -------------------------------------------------- #
     def input_client(self) -> InputClient:
@@ -1063,6 +1380,22 @@ class ConsoleCaptureSession:
             self._ntr_started = True
         return self._ntr
 
+    def _ntr_is_streaming(self) -> bool:
+        """True iff an NTR video stream is currently up on THIS session.
+
+        Only inspects the already-built client -- it never constructs or starts
+        one, because doing so would itself begin streaming (and the whole point
+        of the caller, deploy(), is that a sustained STOR dies under an active
+        stream). A started client that reports ``connected`` is streaming; if
+        status can't be read, assume up (refusing the write is the safe side).
+        """
+        if self._ntr is None or not self._ntr_started:
+            return False
+        try:
+            return bool(self._ntr.status().get("connected"))
+        except Exception:
+            return True
+
     def rosalina_driver(self) -> RosalinaMenuDriver:
         if self._rosalina is None:
             ip = self.cfg.n3ds.require_ip()
@@ -1072,6 +1405,37 @@ class ConsoleCaptureSession:
                 menu_combo=sorted(self.cfg.n3ds.menu_combo),
             )
         return self._rosalina
+
+    def screen_source(self, name: str) -> ScreenSource:
+        """Resolve a NavStep's ``source`` name to a :class:`ScreenSource`.
+
+        Sources are built lazily and cached. ``"ntr"`` wraps the always-present
+        NTR frame grab; ``"rosalina-screenshot"`` drives the SHARED Rosalina
+        menu driver (one 4951 reader; see constraint (c)) plus the file service,
+        and is wired to this session's record state so it refuses to open the
+        menu mid-record. Unknown names raise -- a step opting into a source that
+        does not exist is a wiring bug, not a silent NTR fallback.
+        """
+        src = self._sources.get(name)
+        if src is not None:
+            return src
+        if name == "ntr":
+            src = NtrScreenSource(self._wait_frame)
+        elif name == "rosalina-screenshot":
+            ip = self.cfg.n3ds.require_ip()
+            src = RosalinaScreenshotSource(
+                self.rosalina_driver(), self._ftp_get, self._ftp_list,
+                ip, self.cfg.n3ds.ftp_port,
+                screenshots_dir=self.cfg.captures_dir / "screenshots",
+                is_recording=lambda: self._recording,
+            )
+        else:
+            raise ValueError(
+                f"unknown screen source {name!r}; known: 'ntr', "
+                f"'rosalina-screenshot'" +
+                (f", {sorted(self._sources)}" if self._sources else ""))
+        self._sources[name] = src
+        return src
 
     def close(self) -> None:
         if self._ntr is not None and self._ntr_started:
@@ -1188,19 +1552,51 @@ class ConsoleCaptureSession:
 
     # -- stage 2: deploy ---------------------------------------------------- #
     def deploy(self, local_bcsar: str | Path, *, remote: Optional[str] = None) -> StageResult:
-        """Verify-first cartridge deploy: read the remote back and hash-compare;
-        push only when the bytes differ.
+        """Verify-first cartridge deploy over the file service (no ftpd).
 
-        The boot-time Rosalina file service (port 4952) is WRITE-CONFINED to
-        /luma/staging/ (a fork safety design, live-observed 2026-07-18), so an
-        already-installed cartridge can always be VERIFIED at boot, but pushing
-        a NEW cartridge to the Luma titles path needs legacy ftpd (launch it
-        console-side and set N3DS_FTP_PORT=5000).
+        Pushes straight over the boot-time Rosalina file service (port 4952,
+        ``cfg.n3ds.ftp_port``) to the ``/luma/titles/`` STOR-only content lane --
+        the ftpd-on-:5000 leg is retired (legacy ftpd still works if you set
+        N3DS_FTP_PORT=5000, but nothing requires it). Verify-first is preserved:
+        RETR the remote back and sha256-compare; identical bytes skip the push;
+        differing/absent bytes are pushed, then re-verified.
+
+        Two content-lane facts are guarded up front, before any bytes move:
+
+          * **16 MiB ceiling** (``cfg.max_content_bytes`` / FS_MAX_CONTENT_BYTES).
+            FTP STOR carries no size upfront, so the firmware can only refuse an
+            oversize write AFTER streaming the whole file (16 MiB took 149 s on
+            hardware). The local size is known, so an over-ceiling cartridge is
+            refused here without touching the wire.
+          * **no MKD.** The titles lane replaces bytes at an existing path only;
+            there is no MKD/RNFR, so the LayeredFS directory tree must already
+            exist on the SD. A STOR that fails because the parent directory is
+            missing is diagnosed with an explicit hint (see _titles_deploy_hint).
+          * **not while NTR streams.** A sustained STOR dies within seconds under
+            an active NTR-HR video stream; when a push is actually needed and the
+            stream is up, deploy refuses fast (see _ntr_is_streaming) instead of
+            streaming a few KB and dying with a socket reset. The verify-only
+            path is unaffected -- RETR works fine under NTR -- so an already-
+            deployed cartridge still verifies with the stream up.
         """
         local_bcsar = Path(local_bcsar)
         if not local_bcsar.is_file():
             return StageResult("deploy", False, f"local .bcsar not found: {local_bcsar}", {})
         remote = remote or self.cfg.luma_bcsar_path
+
+        # Client-side size guard -- refuse BEFORE any network I/O (see docstring).
+        size = local_bcsar.stat().st_size
+        if size > self.cfg.max_content_bytes:
+            mib = self.cfg.max_content_bytes / (1024 * 1024)
+            return StageResult(
+                "deploy", False,
+                f"cartridge is {size:,} B, over the /luma/titles/ content-lane "
+                f"ceiling of {self.cfg.max_content_bytes:,} B ({mib:.0f} MiB) -- "
+                f"refusing before transfer (an oversize STOR is only refused "
+                f"after streaming the whole file: ~149 s for 16 MiB).",
+                {"remote": remote, "size_bytes": size,
+                 "max_content_bytes": self.cfg.max_content_bytes})
+
         ip = self.cfg.n3ds.require_ip()
         port = self.cfg.n3ds.ftp_port
 
@@ -1213,7 +1609,8 @@ class ConsoleCaptureSession:
             return hashlib.sha256(readback.read_bytes()).hexdigest()
 
         # Read-back first: if the remote already carries these exact bytes the
-        # push is a no-op -- and it works over the write-confined boot service.
+        # push is a no-op. RETR is always allowed, so this works even before a
+        # first deploy (a missing remote just raises and falls through).
         preread_error: Optional[str] = None
         try:
             if remote_sha256() == local_hash:
@@ -1229,16 +1626,31 @@ class ConsoleCaptureSession:
             # then fails too.
             preread_error = str(exc)
 
+        # A write is now needed. NTR streaming and a sustained STOR are mutually
+        # exclusive: live-measured 2026-07-19, a multi-MB push dies within
+        # seconds under an active NTR-HR stream (6.1 MB aborted at 8 KB, a 1 MB
+        # staging push at ~144 KB after 3 s; WinError 10053 both times), while
+        # the same push on a quiet radio completed in 45.6 s. RETR is unaffected
+        # (so the verify-only path above already returned OK even with the stream
+        # up). Refuse the write up front rather than streaming a few KB and dying
+        # with a bare socket error.
+        if self._ntr_is_streaming():
+            return StageResult(
+                "deploy", False,
+                "NTR video stream is up -- a sustained STOR dies within seconds "
+                "under NTR-HR (the write and the stream are mutually exclusive; "
+                "a multi-MB push aborts after a few KB with a socket reset). "
+                "Stop the NTR stream (or reboot to a quiet radio) and retry. The "
+                "verify-first read-back is unaffected, so an already-deployed "
+                "cartridge still verifies with the stream up -- only a NEW push "
+                "is refused here.",
+                {"remote": remote, "local_sha256": local_hash,
+                 "ntr_streaming": True, "pushed": False})
+
         try:
             self._ftp_put(ip, str(local_bcsar), remote, port)
         except Exception as exc:
-            hint = ""
-            # The boot-time file service (its default port) is ALWAYS
-            # write-confined; don't rely only on the fork's error spelling.
-            if port == DEFAULT_FTP_PORT or "staging" in str(exc):
-                hint = (" -- the boot-time file service only writes under "
-                        "/luma/staging/; launch ftpd on the console and set "
-                        "N3DS_FTP_PORT=5000 to push a new cartridge")
+            hint = self._titles_deploy_hint(ip, remote, port)
             return StageResult("deploy", False, f"ftp_put failed: {exc}{hint}",
                                {"remote": remote, "local_sha256": local_hash,
                                 "preread_error": preread_error})
@@ -1259,6 +1671,37 @@ class ConsoleCaptureSession:
         return StageResult("deploy", True,
                            f"cartridge pushed + verified (sha256 {local_hash[:12]})", data)
 
+    def _titles_deploy_hint(self, ip: str, remote: str, port: int) -> str:
+        """Diagnose a failed titles-lane STOR into an actionable hint.
+
+        The most common fresh-deploy failure is a missing parent directory: the
+        titles lane has no MKD, and FS_OPEN_CREATE will not make a directory, so
+        STOR into a path whose LayeredFS tree was never created on the SD fails
+        fast. RETR/LIST are always allowed, so we probe the parent directory --
+        if it does not list, that is the cause and we say so. Otherwise fall back
+        to a generic content-lane note (dev mode off, path outside /luma/titles/,
+        transient link).
+        """
+        parent = remote.rsplit("/", 1)[0] or "/"
+        try:
+            self._ftp_list(ip, parent, port)
+            dir_ok = True
+        except Exception:
+            dir_ok = False
+        if not dir_ok:
+            return (f" -- the remote directory {parent} does not exist on the SD "
+                    f"card. The /luma/titles/ content lane has no MKD (it replaces "
+                    f"bytes at an existing path only), so the LayeredFS tree must "
+                    f"already exist -- create it via a card reader / an installed "
+                    f"cartridge, then redeploy.")
+        note = (f" -- writes go to the /luma/titles/ STOR-only content lane on the "
+                f"file service (port {port}); confirm the console is in dev mode "
+                f"and the target is under /luma/titles/.")
+        if port != DEFAULT_FTP_PORT:
+            note += (f" (You are on port {port}, not the file service default "
+                     f"{DEFAULT_FTP_PORT} -- legacy ftpd is not required for deploy.)")
+        return note
+
     # -- stage 3: navigate -------------------------------------------------- #
     def navigate(self, path: Sequence[NavStep], *,
                  verifier: Optional[ScreenVerifier] = None) -> StageResult:
@@ -1266,7 +1709,10 @@ class ConsoleCaptureSession:
 
         Aborts at the first checkpoint whose verifier rejects the frame, reporting
         the failed step name + index so a wrong path is diagnosable without a
-        human watching the screen.
+        human watching the screen. Each step's checkpoint frame comes from the
+        eye it names in ``NavStep.source`` (default ``"ntr"``); a source error --
+        e.g. a step that opts into the Rosalina screenshot eye without declaring
+        the menu-open leak safe -- fails that checkpoint rather than crashing.
         """
         verifier = verifier or self._verifier
         checkpoints: list[dict] = []
@@ -1275,7 +1721,16 @@ class ConsoleCaptureSession:
             if step.settle_ms > 0:
                 time.sleep(step.settle_ms / 1000.0)
             screen = step.expect.screen if step.expect else "top"
-            frame = self._wait_frame(screen, timeout=6.0)
+            try:
+                frame = self.screen_source(step.source).grab(step, screen)
+            except Exception as exc:
+                note = f"screen source {step.source!r} error: {exc}"
+                checkpoints.append({"step": step.name, "index": i, "ok": False, "note": note})
+                return StageResult(
+                    "navigate", False,
+                    f"checkpoint '{step.name}' (#{i}) failed: {note}",
+                    {"checkpoints": checkpoints, "failed_step": step.name, "failed_index": i},
+                )
             ok, note = verifier.verify(step, frame)
             checkpoints.append({"step": step.name, "index": i, "ok": ok, "note": note})
             if not ok:
@@ -1288,9 +1743,16 @@ class ConsoleCaptureSession:
                            f"reached target through {len(path)} checkpoints",
                            {"checkpoints": checkpoints})
 
-    def stop_playback(self) -> None:
-        """Send the stop-playback tap (A) after a recording."""
-        self._run_taps((STOP_PLAYBACK_TAP,))
+    def stop_playback(self, *, profile: Optional[SoundTestProfile] = None) -> None:
+        """Send the profile's stop-playback tap after a recording.
+
+        For the plaza profile this is A ("A plays, A stops" -- a plaza law, not
+        a universal one). A profile whose ``stop_playback_tap`` is None has no
+        single-tap stop, and this is a no-op.
+        """
+        profile = profile or self.cfg.profile
+        if profile.stop_playback_tap is not None:
+            self._run_taps((profile.stop_playback_tap,))
 
     # -- stage 4: record ---------------------------------------------------- #
     def record(self, out_name: str, *, passes: int = 2,
@@ -1302,11 +1764,16 @@ class ConsoleCaptureSession:
         seconds = record_seconds(passes, spp, self.cfg.lead_in_s)
         self.cfg.captures_dir.mkdir(parents=True, exist_ok=True)
         out_path = self.cfg.captures_dir / out_name
+        # Mark the record window so the Rosalina screenshot eye (which opens the
+        # app-freezing menu) refuses to fire while a take is running.
+        self._recording = True
         try:
             self._recorder.record(self.cfg, seconds, out_path)
         except Exception as exc:
             return StageResult("record", False, f"recording failed: {exc}",
                                {"seconds": seconds, "passes": passes, "out": str(out_path)})
+        finally:
+            self._recording = False
         if not out_path.is_file():
             return StageResult("record", False, "recorder produced no file",
                                {"seconds": seconds, "out": str(out_path)})
@@ -1420,16 +1887,16 @@ def _build_cli():
     d = sub.add_parser("deploy", help="Push a cartridge .bcsar and hash-verify it.")
     d.add_argument("bcsar")
 
-    n = sub.add_parser("navigate", help="Navigate to a plaza track (frame-liveness-verified; screen identity unchecked).")
-    n.add_argument("--track", default="Main Theme 1", choices=sorted(PLAZA_TRACKS))
+    n = sub.add_parser("navigate", help="Navigate to a sound-test track (frame-liveness-verified; screen identity unchecked).")
+    n.add_argument("--track", default="Main Theme 1", choices=sorted(PLAZA_PROFILE.tracks))
 
     r = sub.add_parser("record", help="Record N passes and level-check.")
     r.add_argument("out")
     r.add_argument("--passes", type=int, default=2)
     r.add_argument("--seconds-per-pass", type=float, default=None)
-    r.add_argument("--battery", choices=sorted(SECONDS_PER_PASS_V2),
-                   help="Battery-v2 track letter; sets the pass length from "
-                        "SECONDS_PER_PASS_V2 unless --seconds-per-pass is given.")
+    r.add_argument("--battery", choices=sorted(PLAZA_PROFILE.seconds_per_pass),
+                   help="Battery-v2 track letter; sets the pass length from the "
+                        "profile's seconds_per_pass unless --seconds-per-pass is given.")
 
     v = sub.add_parser("verdict", help="console-tolerance verdict of a capture vs a render.")
     v.add_argument("capture")
@@ -1456,11 +1923,11 @@ def main(argv: Optional[list[str]] = None) -> int:
         elif args.cmd == "deploy":
             res = sess.deploy(args.bcsar)
         elif args.cmd == "navigate":
-            res = sess.navigate(plaza_path_for_track(args.track))
+            res = sess.navigate(cfg.profile.path_for_track(args.track))
         elif args.cmd == "record":
             spp = args.seconds_per_pass
             if spp is None and args.battery:
-                spp = SECONDS_PER_PASS_V2[args.battery]
+                spp = cfg.profile.seconds_per_pass[args.battery]
             res = sess.record(args.out, passes=args.passes, seconds_per_pass=spp)
         elif args.cmd == "verdict":
             res = sess.verdict(args.capture, args.render)

@@ -21,7 +21,7 @@ Each stage is independently callable on `ConsoleCaptureSession` and returns a
 | Stage | Method | What it does |
 | --- | --- | --- |
 | 1. preflight | `preflight()` | File service reachable + NTR stream healthy; re-applies the Rosalina volume-override pin **closed-loop against the text readout** (every press verified from the cursor text, the value read back from the `Value: [NN%]` row). |
-| 2. deploy | `deploy(bcsar)` | **Verify-first**: `ftp_get` the remote back and sha256-compare — identical bytes = "already deployed, verified" with no write; differing bytes are pushed then re-verified. |
+| 2. deploy | `deploy(bcsar)` | **Verify-first**, straight over the file service (`/luma/titles/` content lane, port 4952 — **no ftpd**): `ftp_get` the remote back and sha256-compare — identical bytes = "already deployed, verified" with no write; differing bytes are pushed then re-verified. Refuses a >16 MiB cartridge **before** transferring, and names a missing LayeredFS directory (the lane has no MKD). |
 | 3. navigate | `navigate(path, verifier)` | Data-driven plaza navigation; sends input + grabs an NTR frame per step, aborts at the first checkpoint the verifier rejects. |
 | 4. record | `record(out, passes, ...)` | ffmpeg/dshow capture of N passes' seconds, then a **level/noise assertion** (peak window, noise floor, both channels present; loud fail on clipping/silence). |
 | 5. verdict | `verdict(capture, render)` | Runs `console_tolerance.py`; maps exit 0/1/2 → PASS / out-of-tolerance / harness-error. |
@@ -55,9 +55,13 @@ Each stage is independently callable on `ConsoleCaptureSession` and returns a
   (`POST_MENU_CLOSE_DEADZONE_S` waits it out). The readout can also stall past
   its own retry budget during open/close transitions — the driver's tolerant
   reads absorb that.
-- **HOME→plaza prefix**: saturate DLEFT (12×), then 3× DRIGHT — StreetPass
-  Mii Plaza is the 4th tile in today's layout (leftmost = NTR CFW) — and the
-  checkpoint verifies the top-screen banner *before* the launching A. Fresh
+- **HOME→plaza prefix**: saturate DLEFT (12×), then 2× DRIGHT — StreetPass
+  Mii Plaza is the **3rd tile** in the 2026-07-19 layout (leftmost = NTR CFW,
+  then Homebrew Utils, then Plaza; it was the 4th tile / 3× DRIGHT on 07-18).
+  The HOME layout is **user-mutable** (tiles move as software is added/removed),
+  so the DRIGHT count is best-effort — the top-screen **plaza-banner checkpoint
+  is the real guard**, and a wrong count fails there loudly rather than
+  launching the wrong tile. The checkpoint fires *before* the launching A. Fresh
   launch: splash + "Please wait" (~11 s) → "Careful!" modal ("Play"
   preselected) → announcement cards (ONE `A` each, count varies — 2 on the
   verified run; an extra `A` opens your own Mii's menu, `B` backs out).
@@ -70,11 +74,33 @@ Each stage is independently callable on `ConsoleCaptureSession` and returns a
 - **Start-state contract (v0)**: HOME menu with **no suspended software**.
   Close suspended software with HOME → `X` → `A`. Resuming a suspended plaza
   skips the splash/modals, which the encoded path does not model.
-- **Deploy semantics**: the boot-time Rosalina file service (TCP 4952, on at
-  boot in dev mode) is **write-confined to `/luma/staging/`** — it can always
-  *verify* the installed cartridge but cannot write the Luma titles path.
-  Pushing a *new* cartridge needs legacy ftpd: launch it console-side
-  (Homebrew Utils folder → FTPD) and set `N3DS_FTP_PORT=5000`.
+- **Deploy semantics** (hardware-verified 2026-07-19): the boot-time Rosalina
+  file service (TCP 4952, on at boot in dev mode) now has a **STOR-only
+  `/luma/titles/` content lane** (16 MiB ceiling), so `deploy` pushes the
+  cartridge straight over it — **ftpd on :5000 is retired** (still reachable via
+  `N3DS_FTP_PORT=5000`, but nothing requires it). STOR streams into
+  `<target>.n3dstmp` and publishes by delete-then-rename, so a dropped link no
+  longer destroys the installed cartridge; RETR (the verify read) is always
+  allowed. Two lane facts `deploy` guards for you: **the 16 MiB ceiling is
+  checked client-side before any bytes move** — an oversize STOR is otherwise
+  only refused *after* streaming the whole file (≈149 s for 16 MiB; a slow STOR
+  is not a hang) — and **there is no MKD**: the lane replaces bytes at an
+  existing path only, so the LayeredFS directory tree must already exist on the
+  SD; a STOR that fails on a missing parent directory is reported with that
+  explicit cause. The content lane is also **overwrite-only forever** (STOR-only,
+  no remote delete) — fine for a fixed cartridge path.
+- **Deploy and NTR are mutually exclusive** (live-measured 2026-07-19): a
+  sustained STOR **dies within seconds while NTR-HR is streaming** — a 6.1 MB
+  push aborted at 8 KB, a 1 MB staging push at ~144 KB after 3 s, `WinError
+  10053` both times; the same 6.1 MB push on a quiet radio (post-reboot, no NTR)
+  finished in 45.6 s at 131 KB/s. Tiny (~16 B) STORs survive, and **RETR of a
+  6 MB file works fine under NTR**. So `deploy` guards the *write* path: when
+  bytes differ and a push is needed while the NTR stream is up, it **refuses
+  fast** with a "stop the stream / reboot first" message instead of streaming a
+  few KB and dying on a bare socket error. The verify-only path (identical bytes)
+  still succeeds with the stream up, since RETR is unaffected. **Workflow
+  implication:** deploy on a quiet radio — push the cartridge *before* bringing
+  NTR up, or stop NTR / reboot, then deploy, then start streaming.
 - **NTR stream is a single bind**: the console always streams video to host
   UDP 8001, so the harness and an interactive n3ds-mcp session can never both
   own frames. Standalone runs own the stream; running *alongside* an MCP
@@ -85,6 +111,33 @@ Each stage is independently callable on `ConsoleCaptureSession` and returns a
   `read_rosalina_menu` from the MCP session can starve the harness's readout
   for >1 s (live-observed). The driver's outer read retries absorb it, but
   don't query 4951 from the session while a volume walk is in flight.
+- **Per-step screen sources (the `ScreenSource` seam)**: each `NavStep` names
+  the eye that grabs its checkpoint frame via `NavStep.source`, defaulting to
+  `"ntr"` (live video, non-invasive). It is a **per-step opt-in, never a global
+  swap**. The one alternative is `"rosalina-screenshot"`: open the Rosalina
+  menu → "Take screenshot" (dumps the frozen app framebuffers as uncompressed
+  BMP to `/luma/screenshots/`, named `YYYY-MM-DD_HH-MM-SS.mmm_top.bmp` / `_bot`
+  / `_top_right` when 3D is on) → close → fetch the BMP over the file service →
+  decode (higher fidelity than the JPEG NTR stream; ~30 s/look). The file is
+  found by **set difference** (list the dir before, take what *appeared* after),
+  **not** newest-by-name — the directory accumulates litter stamped with bogus
+  future dates (RTC weirdness, 2030/2031) that a name sort would pick first; if
+  no new BMP appears, the eye returns `None` rather than guessing. It is driven
+  blind by the same `RosalinaMenuDriver` over the 4951 readout the volume walk
+  uses. Three constraints are **enforced as code guards**, not just prose:
+  (a) opening the menu freezes the app, so the eye **refuses mid-record**
+  (wired to the session's record state); (b) the open combo leaks its buttons
+  into the app underneath (DDOWN is inert at the plaza card boundary; L/SELECT
+  there are unverified), so a step must set **`menu_leak_safe=True`** before this
+  eye may run at its position; (c) it drives the *shared* 4951 reader, so it
+  relocates the single-bind exclusivity off NTR rather than removing it.
+- **Sound-test profile (`SoundTestProfile`)**: everything true of the plaza but
+  not of sound tests in general — the track→DDOWN map, the HOME→target tap
+  prefix, the stop tap (`A` stops is a *plaza* law), the per-battery loop
+  lengths — lives in `cfg.profile`. `PLAZA_PROFILE` is the default and the only
+  profile that exists; it reproduces the pre-profile behavior exactly. Don't add
+  other titles' profiles speculatively — fill one in only when its walk is
+  actually verified on hardware.
 
 ## The exact ffmpeg command
 
@@ -143,31 +196,33 @@ E:\GitHub\3ds-mcp\.venv\Scripts\python.exe -m pytest tools\console-capture\tests
 ```
 
 Covers: pass-count→seconds math, the ffmpeg command shape, the level assertion
-(good / silence / clipping / dead-channel / too-hot / noisy-floor), verify-first
-deploy (identical-skip, hash-mismatch, staging-refusal hint), navigation
-checkpoint-failure abort, the live-verified path structure, the volume walk
-(happy / arbitrary start / close-on-failure / step law / screen parse), the
-verdict exit-code mapping, and the NTR on/off perturbation A/B. **32 tests.**
+(good / silence / clipping / dead-channel / too-hot / noisy-floor), **file-service
+deploy** (identical-skip, hash-mismatch, titles-lane targeting, missing-directory
+hint, generic lane hint, oversize client-side refusal, exactly-at-ceiling,
+NTR-streaming write refusal + verify-only-still-works), navigation
+checkpoint-failure abort, the live-verified path structure, the **`ScreenSource`
+seam** (Rosalina-screenshot set-difference fetch that survives future-dated
+litter + BMP decode, no-new-BMP → None, mid-record refusal, leak-unsafe refusal,
+NTR default, per-step opt-in, unknown-source error), the **`SoundTestProfile`**
+(plaza path reproduced byte-for-byte, constant composition, config default,
+stop-tap send, no-stop-tap no-op), the volume walk (happy / arbitrary start /
+close-on-failure / step law / screen parse), the verdict exit-code mapping, and
+the NTR on/off perturbation A/B. **51 tests.**
 
 ## Open follow-ups
 
-- **Screen-verification predicates.** The default `AcceptingVerifier` only
-  asserts a frame arrived at each checkpoint (proves the stream is alive, no
-  brittle pixels). For true screen identification — e.g. catching a third
-  announcement card — drop in `RegionMeanVerifier` (region mean-RGB, tolerant)
-  or a template matcher via the `ExpectScreen.hints` interface.
+- **Screen-verification predicates — reference data.** The default
+  `AcceptingVerifier` only asserts a frame arrived at each checkpoint (proves the
+  stream is alive, no brittle pixels). The `RegionMeanVerifier` (region mean-RGB,
+  tolerant) and the `"rosalina-screenshot"` eye are both wired offline; the
+  missing piece is *reference frames* — every plaza `ExpectScreen` carries a
+  prose-only `note`, no `mean_rgb`. **Needs console** to capture the reference
+  BMPs (e.g. at the variable plaza card boundary), then set the hints. The
+  offline `ScreenSource` seam prerequisite is **done**.
 - **Battery B's DDOWN count** in the plaza track list. The existing counts were
   read with session eyes, not verified by tooling; fill B's in the same way on
   its next capture, ideally with a screen checkpoint on the highlighted row.
-- **Auto-ftpd deploy flow** for pushing new cartridges hands-free (navigate
-  Homebrew Utils → FTPD, push on :5000, exit) — today that leg is manual.
-  As of 2026-07-19 this is unblocked and **hardware-verified**: the file service
-  has a STOR-only `/luma/titles/` lane (16 MiB ceiling) and STOR publishes by
-  temp + rename, so a dropped link no longer destroys the target. A 6,110,784 B
-  cartridge round-trips byte-exact to the real LayeredFS path in ~35 s. `deploy`
-  still routes through ftpd — moving it onto the file service is the remaining
-  work, and it is host-side only. Note an oversize write costs the full transfer
-  before failing (no size upfront in FTP STOR), so a slow STOR is not a hang.
+  **Needs console.**
 
 ## Notes
 
