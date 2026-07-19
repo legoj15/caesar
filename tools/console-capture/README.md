@@ -161,11 +161,13 @@ verdict exit-code mapping, and the NTR on/off perturbation A/B. **32 tests.**
   its next capture, ideally with a screen checkpoint on the highlighted row.
 - **Auto-ftpd deploy flow** for pushing new cartridges hands-free (navigate
   Homebrew Utils → FTPD, push on :5000, exit) — today that leg is manual.
-  As of 2026-07-19 the file service has a STOR-only `/luma/titles/` lane with a
-  16 MiB ceiling, and STOR no longer truncates the target (temp + rename), so
-  this leg can move onto it — **but that firmware has not been flashed or
-  hardware-tested**; the largest write ever proven on the console is 51 KB.
-  Until a ~6 MB STOR runs for real, keep using ftpd.
+  As of 2026-07-19 this is unblocked and **hardware-verified**: the file service
+  has a STOR-only `/luma/titles/` lane (16 MiB ceiling) and STOR publishes by
+  temp + rename, so a dropped link no longer destroys the target. A 6,110,784 B
+  cartridge round-trips byte-exact to the real LayeredFS path in ~35 s. `deploy`
+  still routes through ftpd — moving it onto the file service is the remaining
+  work, and it is host-side only. Note an oversize write costs the full transfer
+  before failing (no size upfront in FTP STOR), so a slow STOR is not a hang.
 
 ## Notes
 

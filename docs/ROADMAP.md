@@ -312,13 +312,25 @@ blockers across two repos):
       truncate-first shape made any drop destroy the working copy. Publishing is
       not atomic — a failure between delete and rename loses the old file — but
       the window is two filesystem calls with no network in it.
-      **What remains is entirely on-console:** the largest write ever proven on
-      hardware is 51 KB, so the ~6 MB STOR, the rename publish and the 16 MiB
-      ceiling are all unexercised. The build is not flashed and `boot.firm` is
-      deliberately not re-vendored. Until that runs, ftpd on :5000 stays the
-      deploy path and needs one manual launch. Still no MKD/RNFR:
+      **HARDWARE-VERIFIED 2026-07-19, 16/16** (n3ds-mcp `8446572`, boot.firm
+      `861716ce`, flashed and confirmed running by a fresh boot line in the
+      service log). The 6,110,784 B cartridge round-trips byte-exact in ~35 s
+      (~175 KB/s) to the real LayeredFS path; the temp/rename guarantee held
+      under both an oversize refusal and a real RST mid-transfer, leaving the
+      target byte-identical with no `.n3dstmp` litter; the lane boundaries hold
+      (DELE refused on titles, `/luma/payloads/` `/luma/sysmodules/` `/luma/`
+      `/boot.firm` all refused). The MiiPlaza cartridge hashed the same before
+      and after. **ftpd on :5000 is no longer needed for cartridge deploy.**
+      Two constraints the hardware run surfaced: an oversize write costs the
+      whole transfer before failing (16 MiB → 149 s), since FTP STOR carries no
+      size upfront — a slow STOR is not a hang; and the content lane is
+      overwrite-only forever, so a file deployed to `/luma/titles/` can never be
+      removed remotely, only overwritten (fine for a fixed cartridge path, but
+      scratch files there are permanent). Still no MKD/RNFR:
       replace-bytes-at-an-existing-path only, so the LayeredFS directory tree
       must already exist on the SD.
+      Remaining for this bullet: wire `console_capture.deploy` onto the titles
+      lane (it still routes through ftpd) — pure host-side work.
 - [ ] **Battery B's track-list DDOWN count** — "Find Mii - Dark Room", well
       below the Main Themes. **NEEDS CONSOLE**; nothing offline advances it.
       Both prior captures (2026-07-16, 2026-07-18 take 7) walked it with session
