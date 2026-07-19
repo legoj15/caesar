@@ -22,6 +22,14 @@
 
 #include <stdint.h>
 
+/* Per-voice gain geometry (slot stride, num sources, and BOTH candidate gain
+ * offsets + the still-open which-is-live question) comes from the ONE cross-tool
+ * authority, so this tap, the oracle, and the partb GDB reader stay in lockstep.
+ * Path is relative to this file: include/ -> tools/dsp-tap -> tools -> dsp-shared.
+ * The tap dumps the whole raw 192-byte slot, so BOTH candidate offsets land in
+ * every SOURCE_CONFIG record regardless of which one turns out live. */
+#include "../../dsp-shared/dsp_gain_geometry.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif

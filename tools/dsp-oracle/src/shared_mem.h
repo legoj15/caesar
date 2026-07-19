@@ -11,6 +11,12 @@
 #include <cstdint>
 #include <cstring>
 
+// The per-voice gain geometry (offset, type, and the still-open
+// which-offset-is-live question) is owned by ONE cross-tool authority so the
+// partb GDB reader, this oracle, and the dsp-tap plugin cannot re-diverge.
+// Path is relative to this file: src/ -> tools/dsp-oracle -> tools -> dsp-shared.
+#include "../../dsp-shared/dsp_gain_geometry.h"
+
 namespace dsp_oracle {
 
 // ---------------------------------------------------------------------------
@@ -113,8 +119,8 @@ enum RegionTableIndex : std::size_t {
 //   tail from the audio callback. A malformed 52-byte block is silently bypassed
 //   (dry) — that is SUITE-DESIGN risk #2; a known-good replayed config de-risks
 //   it before sweeping the 26 words.
-constexpr std::size_t kSourceConfigStride = 192;
-constexpr std::size_t kNumSources = 24;
+constexpr std::size_t kSourceConfigStride = DSP_SRC_CFG_STRIDE; // 192
+constexpr std::size_t kNumSources = DSP_NUM_SOURCES;            // 24
 constexpr std::size_t kDspConfigSize = 196;
 constexpr std::size_t kReverbEffectSize = 52; // 26 DSP words, opaque
 constexpr std::size_t kFinalMixSamplesPerFrame = 160;
@@ -130,14 +136,22 @@ constexpr std::size_t kFinalMixSamplesPerFrame = 160;
 // struct field-by-field against that layout.
 struct SrcCfgOffset {
     static constexpr std::size_t dirty_raw = 0x00;       // u32 LE, dirty bitmask (ln 121-147)
-    static constexpr std::size_t gain = 0x04;            // float_le gain[3][4] (ln 156)
+    // gain: Candidate A (Azahar HLE) — float_le gain[3][4] @ +0x04 (ln 156).
+    // SETTLED 2026-07-19 by the Surround Part B live read: Candidate A is the
+    // live DSP shared-memory gain layout (it tracked span through a constant-
+    // power crossfade), and the ARM11 driver's s16 store @ +0x3c (Candidate B)
+    // is DISPROVEN as the shared-mem field — it is an ARM11 intermediate the
+    // DSP-region read sees only as stale bytes. See the authority header verdict
+    // (../../dsp-shared/dsp_gain_geometry.h). This oracle correctly writes +0x04.
+    static constexpr std::size_t gain = DSP_SRC_GAIN_HLE_OFF;     // 0x04, float_le[12]
+    static constexpr std::size_t gain_drv = DSP_SRC_GAIN_DRV_OFF; // 0x3c, s16 (Cand. B, disproven as shared-mem)
     static constexpr std::size_t rate_multiplier = 0x34; // float_le (ln 161)
     static constexpr std::size_t interpolation = 0x38;   // u8 InterpolationMode (ln 169)
     static constexpr std::size_t filters_enabled = 0x3A; // u16 (ln 202-206)
     static constexpr std::size_t buffers_dirty = 0x4A;   // u16 (ln 246)
     static constexpr std::size_t buffers = 0x4C;         // Buffer[4], 20 B each (ln 247)
     static constexpr std::size_t loop_related = 0x9C;    // u32_dsp (ln 251)
-    static constexpr std::size_t enable = 0xA0;          // u8 (ln 252)
+    static constexpr std::size_t enable = DSP_SRC_ENABLE_OFF; // 0xA0, u8 (ln 252)
     static constexpr std::size_t sync_count = 0xA2;      // u16 (ln 254)
     static constexpr std::size_t play_position = 0xA4;   // u32_dsp, samples (ln 255)
     static constexpr std::size_t emb_phys_addr = 0xAC;   // u32_dsp, FCRAM phys (ln 262)

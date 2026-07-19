@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """Offline unit test for gdb_read.py — verifies the RSP framing, checksum, `}`
 escape / `*` run-length decode, the chunked `m<addr>,<len>` memory read + hex
-decode, the double-bank (higher-counter) selection, and the gain[3][4] float
-decode WITHOUT a console. A fake Luma-style RSP stub runs on a loopback socket
-in a background thread and serves a synthetic DSP-RAM image.
+decode, the double-bank (higher-counter) selection, that the slot geometry is
+PARSED FROM the single authority header, and the DUAL-DUMP decode (both the
+candidate-A f32 gain[3][4] @ +0x04 AND the candidate-B s16 lanes @ +0x3c, plus
+the raw slot head) WITHOUT a console. A fake Luma-style RSP stub runs on a
+loopback socket in a background thread and serves a synthetic DSP-RAM image.
 
 Run:  python test_gdb_read.py     (exit 0 = all pass)
+  or: pytest tools/surround-probe/partb -q   (checks assert, so pytest fails red)
 """
 
 import socket
@@ -32,10 +35,13 @@ def peek(addr, length) -> bytes:
     return bytes(MEM.get(addr + i, 0) for i in range(length))
 
 
-def make_source_config(gains12, enable):
-    """A 192-byte SourceConfiguration slot with the given 12 gains + enable."""
+def make_source_config(gains12, enable, drv=None):
+    """A 192-byte SourceConfiguration slot: candidate-A f32 gains @ +0x04, and
+    (optionally) candidate-B u16 lanes @ +0x3c, plus enable."""
     slot = bytearray(g.SRC_CFG_STRIDE)
-    struct.pack_into("<12f", slot, g.GAIN_OFF, *gains12)
+    struct.pack_into("<%df" % g.GAIN_HLE_COUNT, slot, g.GAIN_HLE_OFF, *gains12)
+    if drv is not None:
+        struct.pack_into("<%dH" % len(drv), slot, g.GAIN_DRV_OFF, *drv)
     slot[g.ENABLE_OFF] = enable
     return bytes(slot)
 
@@ -51,13 +57,18 @@ poke(g.word_vaddr(g.WORD_FRAME_COUNTER, 1), struct.pack("<H", COUNTER1))
 VOICE0_GAINS = (0.10, 0.10, 0.70, 0.70, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
 VOICE3_GAINS = (0.90, 0.90, 0.00, 0.00, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
 DECOY_GAINS = (0.5,) * 12
+# Voice 0 also carries candidate-B s16 lanes @ +0x3c: FL+FR = 32768 (the
+# constant-sum crossfade signature), rear-heavy RL/RR. The dual dump must decode
+# these independently of the f32 @ +0x04.
+VOICE0_DRV = (5243, 27525, 22937, 22937) + (0,) * (g.GAIN_DRV_COUNT - 4)
 
 src_base_cur = g.word_vaddr(g.WORD_SOURCE_CONFIG, 1)
 src_base_stale = g.word_vaddr(g.WORD_SOURCE_CONFIG, 0)
 for v in range(g.NUM_SOURCES):
     poke(src_base_stale + v * g.SRC_CFG_STRIDE, make_source_config(DECOY_GAINS, 1))
     if v == 0:
-        poke(src_base_cur + v * g.SRC_CFG_STRIDE, make_source_config(VOICE0_GAINS, 1))
+        poke(src_base_cur + v * g.SRC_CFG_STRIDE,
+             make_source_config(VOICE0_GAINS, 1, drv=VOICE0_DRV))
     elif v == 3:
         poke(src_base_cur + v * g.SRC_CFG_STRIDE, make_source_config(VOICE3_GAINS, 1))
     else:
@@ -130,10 +141,22 @@ class FakeStub(threading.Thread):
 # --------------------------------------------------------------------------
 
 def check(name, cond):
+    # assert (not a counter) so the checks fail RED under pytest, which collects
+    # each test_* function; standalone main() catches the AssertionError.
     print(("PASS" if cond else "FAIL") + "  " + name)
-    if not cond:
-        check.failed += 1
-check.failed = 0
+    assert cond, name
+
+
+def test_authority_geometry():
+    # The slot geometry must come from the ONE shared authority header, not be
+    # hardcoded in the reader — this pins the parsed values.
+    check("stride parsed == 192", g.SRC_CFG_STRIDE == 192)
+    check("num sources parsed == 24", g.NUM_SOURCES == 24)
+    check("enable off parsed == 0xA0", g.ENABLE_OFF == 0xA0)
+    check("candidate A gain off parsed == 0x04", g.GAIN_HLE_OFF == 0x04)
+    check("candidate A gain count parsed == 12", g.GAIN_HLE_COUNT == 12)
+    check("candidate B gain off parsed == 0x3c", g.GAIN_DRV_OFF == 0x3C)
+    check("raw dump window parsed == 0x50 bytes", g.SLOT_DUMP_BYTES == 0x50)
 
 
 def test_framing():
@@ -201,20 +224,36 @@ def test_live_against_fake():
     check("surround_depth == 0.75", abs(sd - 0.75) < 1e-6)
     check("no client packet had a bad checksum", stub.bad_checksums == 0)
 
-    # Render the report once to prove it doesn't throw.
+    # --- DUAL DUMP: candidate B (s16 @ +0x3c) + raw head, independent of A ---
+    check("voice0 candidate B s16 lanes decode to VOICE0_DRV",
+          tuple(v0[3]) == VOICE0_DRV)
+    check("voice0 candidate B FL+FR == 32768 (crossfade signature)",
+          v0[3][0] + v0[3][1] == 32768)
+    check("voice0 raw slot head is SLOT_DUMP_BYTES long",
+          len(v0[4]) == g.SLOT_DUMP_BYTES)
+    check("voice0 raw head preserves the f32 @ +0x04 (candidate A byte 0)",
+          abs(struct.unpack_from("<f", v0[4], g.GAIN_HLE_OFF)[0]
+              - VOICE0_GAINS[0]) < 1e-6)
+    check("voice0 raw head preserves the u16 @ +0x3c (candidate B lane 0)",
+          struct.unpack_from("<H", v0[4], g.GAIN_DRV_OFF)[0] == VOICE0_DRV[0])
+
+    # Render the report once to prove the dual-dump report doesn't throw.
     g.print_report(voices, of, sd, region, c0, c1, label="span=127",
                    show_all=False)
 
 
 def main():
-    test_framing()
-    test_rle_escape()
-    test_addressing()
-    test_live_against_fake()
-    print("-" * 40)
-    if check.failed:
-        print("%d CHECK(S) FAILED" % check.failed)
+    try:
+        test_authority_geometry()
+        test_framing()
+        test_rle_escape()
+        test_addressing()
+        test_live_against_fake()
+    except AssertionError as e:
+        print("-" * 40)
+        print("CHECK FAILED: %s" % e)
         return 1
+    print("-" * 40)
     print("ALL CHECKS PASSED")
     return 0
 

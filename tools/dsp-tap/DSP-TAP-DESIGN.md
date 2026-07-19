@@ -217,6 +217,20 @@ sections in fixed order:
 Helpers `dsptap_record_bytes()` / `dsptap_section_offset()` give the reader exact
 strides/offsets from `section_flags` alone.
 
+**Gain-offset note (SETTLED 2026-07-19 — Candidate A @ slot+0x04).** The
+`SOURCE_CONFIG` section is the **raw 192-byte slot**, so it captures *both*
+candidate gain layouts in every record: candidate A (Azahar HLE, `float_le
+gain[3][4]` @ slot+0x04) and candidate B (real ARM11 driver, disasm Session 7,
+s16 lanes @ slot+0x3c). The slot geometry + both offsets + the verdict live in the
+one cross-tool authority `tools/dsp-shared/dsp_gain_geometry.h` (included by
+`include/dsp_regions.h`); the replay reader decodes from there. The surround-probe
+Part B live read settled it: **Candidate A (f32 @ +0x04) is the live DSP
+shared-memory gain layout** (it tracked span through a constant-power crossfade),
+and **Candidate B (+0x3c) is an ARM11-side intermediate**, so the DSP-region tap
+sees the marshalled +0x04 gains, not the raw s16 pan lanes — which is exactly what
+the tap wants. The raw slot bytes are still dumped whole, so the record stays
+self-describing on any future firmware.
+
 **Not in the dump (by design, for v1):** the actual PCM/ADPCM **sample buffers**
 the sources point at. `SourceConfiguration.physical_address` references FCRAM, not
 the shared region, so the config says *which* buffer + gains/rate/interpolation,
