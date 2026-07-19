@@ -152,7 +152,9 @@ python gdb_read.py --host <console-ip> --port <port-from-rosalina> --label span=
 
 ## 4. LIVE RUN-BOOK (documented, NOT executed here) — with the honest blockers
 
-Everything below needs the physical console; none of it was run in this prep.
+Everything below needs the physical console (powered, on WiFi); none of it was
+run in this prep. It does **not** need a human at the console — every step is
+n3ds-mcp-drivable as of 2026-07-18 (see step 3).
 
 1. **System Settings → Sound → Surround.** Console navigation. Required — the
    whole point is that the sequence runtime only writes non-zero MAIN rear gains
@@ -162,11 +164,18 @@ Everything below needs the physical console; none of it was run in this prep.
    `.../MeetSound.bcsar` to the SD path in §1; enable Luma3DS "Game patching".
 3. **Enable the Rosalina GDB stub** — Rosalina menu (L+Down+Select) →
    *Debugger options* → *Enable debugger*, then attach MiiPlaza in the
-   *Process list*. **BLOCKER — PHYSICAL INTERACTION REQUIRED:** InputRedirection
-   cannot drive the Rosalina menu (it reads raw HID, which the overlay bypasses),
-   and opening Rosalina freezes the NTR/InputRedirection stream. So the n3ds-mcp
-   automation path does **not** work for this step — a human must hold the
-   console and press the buttons. **Note the port the menu shows** (per selected
+   *Process list*. **NO LONGER A BLOCKER (corrected 2026-07-19).** This step was
+   previously documented as requiring a human to hold the console, on the grounds
+   that InputRedirection cannot drive the Rosalina overlay (it reads raw HID,
+   which the overlay bypasses) and that opening Rosalina freezes the NTR stream.
+   Both premises still hold in isolation, but the conclusion was overtaken on
+   2026-07-18: the n3ds-mcp fork drives the overlay through its own command
+   channel and reads the menu back as text over UDP 4951, and
+   `tools/console-capture`'s closed-loop `RosalinaMenuDriver` navigates it
+   live-verified on hardware. The *Debugger options → Enable debugger* walk in
+   particular has not been run yet — expect to confirm the label text — but it is
+   ordinary menu navigation, not a physical-presence requirement.
+   **Note the port the menu shows** (per selected
    process; typically 4000–4002, some Luma builds/guides show 4003) — pass it as
    `--port`.
 4. **Launch plaza → Music Player → the hijacked track.** Track A ("Main Theme 1")
@@ -207,7 +216,8 @@ Everything below needs the physical console; none of it was run in this prep.
 
 ### The 3GX-tap alternative (later, not now)
 
-A headless read via the `tools/dsp-tap` 3GX plugin would avoid the halt and the
-physical Rosalina step, but it needs devkitARM + on-console bring-up (see
+A headless read via the `tools/dsp-tap` 3GX plugin would avoid the attach-halt
+(the Rosalina step is automatable as of 2026-07-18 — see §4 step 3), but it needs
+devkitARM + on-console bring-up (see
 `tools/dsp-tap/DSP-TAP-DESIGN.md` §6). The GDB stub is the *available-now* path;
 the tap is the follow-up once the toolchain is stood up.

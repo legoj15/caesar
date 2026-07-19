@@ -286,7 +286,9 @@ Hardware-RE queue (New 3DS + CFW, feeds stages 2–3):
       confirmed **2nd-gen 2i2** — true analog knobs, no software gain
       control, so the 4th-gen software escape hatch is unavailable and the
       knobs stay welded at the max rail, +0.045 dB known constant).
-      ADOPTED, lands with battery v2: (1) **pilot tone** — every battery
+      ADOPTED — **both parts shipped and hardware-verified with battery v2
+      (2026-07-16/18); this bullet looks closable, left open pending sign-off.**
+      (1) **pilot tone** — every battery
       opens with a fixed reference note; analysis normalizes each channel
       to it per-session, so constant rig gain (slider, knobs, temperature)
       divides out and cross-session absolute comparisons become
@@ -302,10 +304,27 @@ Hardware-RE queue (New 3DS + CFW, feeds stages 2–3):
       (noise floor buries tail forensics — the one defect a pilot tone
       cannot normalize away — plus the default-device risk). The
       analog-free endgame is GREENLIT — own bullet below.
+      **Delivery evidence:** the pilot tone is built into every battery-v2 track
+      (`build_cartridge_v2.py`, prg 23 / key 60 / vel 127 / 1.0 s at tick 0 on
+      both tracks; round-trip gated) and consumed by `analyze_capture_v2.py`
+      step 5 ("normalises each channel to the pilot tone"); the volume override
+      is pinned at the 65% rig constant by the closed-loop `RosalinaMenuDriver`
+      and verified against the Rosalina text readout (CHANGELOG, Unreleased).
+      Note this bullet does **not** retire with the analog-free program — item 5
+      there makes the rig the digital tap's validator, after which it *demotes*
+      to arbitrary-title spot checks and one-time DAC validation (both jobs the
+      tap structurally cannot do, since 3GX plugins are per-title).
 - [ ] **Analog-free capture program** (GREENLIT 2026-07-16 — the goal is
       maximum independent comparison surfaces: analog console recordings,
       bit-perfect digital console captures, and teakra renders, so every
-      stage-2/3 claim gets multiple test points). Two routes, shared
+      stage-2/3 claim gets multiple test points). **"Analog-free" names route
+      a's capture path — no line-in, no resampling — NOT the retirement of the
+      analog rig or of the console-driving harness. This bullet subsumes no
+      other bullet in this queue: it consumes the rig's tone-referenced captures
+      (item 4), is validated by them (item 5), re-mechanizes Surround Part B's
+      reader without answering Part B's question (item 3), and needs the
+      console-capture navigation + deploy legs to reach hardware. The one thing
+      it did retire is classic-NTR read-mem (2026-07-16).** Two routes, shared
       infrastructure, dependency order:
       1. [x] **dsp_oracle first — DONE 2026-07-16** (stage-3 commit 1,
          `tools/dsp-oracle/`; HISTORY): teakra vendored, firmware boots to
@@ -363,15 +382,21 @@ Hardware-RE queue (New 3DS + CFW, feeds stages 2–3):
       Rosalina GDB-RSP reader (`gdb_read.py`, offline unit-tested 24/24). Dumps
       the live `SourceConfiguration.gain[3][4]` while the span-sweeping `.bcseq`
       plays, binding `span`/`front_bypass` to the rear lanes. Feeds suite stage
-      3's Surround virtualization model. **Live run remains** (blocked on a
-      physical Rosalina GDB-stub enable — InputRedirection can't drive the
-      overlay). **KNOWN-ADDRESS CORRECTION (disasm Session 7):** the reader's
+      3's Surround virtualization model. **Live run remains — no longer blocked.**
+      (The former blocker, "InputRedirection can't drive the Rosalina overlay",
+      was dissolved 2026-07-18 by the closed console-automation bullet above:
+      the closed-loop `RosalinaMenuDriver` navigates the overlay against the
+      UDP-4951 text readout. The *Debugger options → Enable debugger* walk
+      specifically is untested, but it is ordinary menu navigation now, not a
+      physical-presence requirement. This path is available **today** — do not
+      re-gate it on the analog-free program, whose plugin is still uncompiled
+      scaffold.) **KNOWN-ADDRESS CORRECTION (disasm Session 7):** the reader's
       gain address (`f32 @ slot+0x04`, from the Azahar HLE model) does NOT match
       the real ARM11 driver, which writes **s16 gains at `slot+0x3c`** (front-L
       first at +0x3c, front-R +0x3e, rear +0x40..; channel order L-before-R is
       confirmed). Reconcile whether `slot+0x3c` is the DSP shared-mem struct or
-      an ARM11 intermediate before the live read (see the Known-bugs/follow-up
-      note).
+      an ARM11 intermediate before the live read (tracked under
+      [Known bugs](#known-bugs-open)).
 - [x] **Decay-table console spot-check — CLOSED 2026-07-16.** The corrected
       decay values (2026-07-08 fix) are exercised on hardware for the first time
       by battery-v2 track B's decay-byte-122 probe: console/prediction plateau
@@ -484,6 +509,18 @@ Fixed bugs and their verification stories are in
 [Remaining converter scope](#remaining-converter-scope) above, not here — this
 list is the known defect tail.
 
+- **The `SourceConfiguration` gain address is wrong in two tools at once
+  (hardware-RE blocker for Surround Part B).** `tools/surround-probe/partb/gdb_read.py`
+  and `tools/dsp-oracle/src/shared_mem.h` (`SrcCfgOffset::gain`) both carry
+  `f32 @ slot+0x04`, inherited from the Azahar HLE model. Disasm Session 7 found
+  the real ARM11 driver writes **s16 gains at `slot+0x3c`** (front-L +0x3c,
+  front-R +0x3e, rear +0x40..; L-before-R confirmed). Unresolved: whether
+  `slot+0x3c` is the DSP shared-mem struct itself or an ARM11 intermediate — if
+  it is an intermediate, the DSP-side tap cannot observe it at all and only the
+  GDB path can. Fix upstream in one place: `dsp_regions.h` /`shared_mem.h` feed
+  both the partb reader and `tools/dsp-tap`'s dump geometry, so a per-tool patch
+  would re-diverge. Blocks the Part B live read; the tap dumps raw bytes so both
+  candidate offsets land in every record either way.
 - **Bank/WARC/GROUP naming shares the symbol-collision hazard structurally.**
   The sequence-side collision fix (2026-07-12) covers `.bcseq`/`.mid` only;
   bank, wave-archive and group outputs are still named from the symbol alone
