@@ -7,11 +7,7 @@ measures each flagged constant. The harness is built and self-validated, and has
 **already been run against the two existing captures**. This doc records what is
 in hand and what one more short session would add.
 
-Default capture directory (override with `-CapturesDir`):
-
-```
-E:\legoj\Documents\3DSWii Dumps\Dumps\MiiPlaza\sound\MeetSound\BANK_BGM\
-```
+Default capture directory is configured in the harness (override with `-CapturesDir`).
 
 Run the harness with:
 

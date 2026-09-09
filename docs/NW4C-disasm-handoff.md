@@ -34,11 +34,11 @@ for the sign-off gate.)
   module). Confirmed present in every binary we checked via BCSAR magics + the NW4R
   envelope-table fingerprint. Binaries are **stripped** (no `nw::snd` symbols).
 - Extraction is done. Fully-decrypted base `.cia`s are in
-  `E:\legoj\Documents\3DSWii Dumps\3ds firmware` (ctrtool reports `Crypto key: None`,
-  no keys needed). `ctrtool.exe` (at `E:\legoj\Documents\3DSWii Dumps\ctrtool.exe`,
-  2020 build) does the whole chain and auto-decompresses `.code`. Extracted apps live in
-  `E:\legoj\Documents\3DSWii Dumps\re_extract\<App>\` (`exheader.bin`, `plain.bin`,
-  `exefs\code.bin`, romfs listing): **MiiPlaza** (MeetSound), **eShop** (TigerSound),
+  the local `3ds firmware` dump folder (ctrtool reports `Crypto key: None`,
+  no keys needed). `ctrtool.exe` (2020 build) does the whole chain and
+  auto-decompresses `.code`. Extracted apps live in a local `re_extract\<App>\`
+  folder (`exheader.bin`, `plain.bin`, `exefs\code.bin`, romfs listing):
+  **MiiPlaza** (MeetSound), **eShop** (TigerSound),
   **Photos_Camera** = the 3DS Camera app (PNOTE_Sound), **SystemSettings** (mset),
   **Sound_SNOTE** (3DS Sound app).
 - The console has **no newer Mii Plaza build** — its installed copy is byte-identical
@@ -161,10 +161,9 @@ at `0x00100000` (ARMv6K, little-endian) reproduces the loader's view.
 
 ## How to reproduce / continue
 
-- **Disassembler:** none is installed on this machine (no IDA/Ghidra). We worked headless
-  with **capstone 5.0.7** (`pip install capstone`, already done). The hunt script is
-  `…\scratchpad\disasm_hunt.py`; its output is `…\scratchpad\disasm_report.txt`.
-  (Scratchpad is session-temporary — re-run the script to regenerate.) For interactive
+- **Disassembler:** none installed locally. We worked headless
+  with **capstone 5.0.7** (`pip install capstone`). The hunt script and its report
+  live in a session-temporary scratchpad — re-run the script to regenerate. For interactive
   work, install **Ghidra + `Martmists-GH/ghidra-ctr-loader`**, load
   `re_extract\MiiPlaza\exefs\code.bin` at `0x00100000` with `exheader.bin`, and jump to
   the addresses above.
@@ -783,7 +782,7 @@ commit `0x14D474`; **gain writer `0x145E38` → `slot+0x3c`=FL / `slot+0x3e`=FR*
   remains open is the coefficient VALUES, which are runtime-computed → console 3GX tap or
   structured sweep. The Teak-side "deliberately not pursued" ruling stands; the oracle recovers
   the behaviour, not the code.)* Original pointer kept for the firmware side: firmware at Mii
-  Plaza `code.bin` file offset `0x255100`, content size `0xC288`. Parser + extractor: `…\3DSWii Dumps\re_extract\dsp_extract.py`, which writes
+  Plaza `code.bin` file offset `0x255100`, content size `0xC288`. Parser + extractor: the local `dsp_extract.py` (dump-tree scratch script), which writes
   standalone `*_dspfirm.cdc` and the PROG segments into `re_extract\dspfirm\`, self-certified by
   the firmware's own embedded per-segment SHA-256s (all `OK`).
 
