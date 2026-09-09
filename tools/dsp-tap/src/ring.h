@@ -25,10 +25,15 @@ extern "C" {
 
 typedef struct DspTapRing DspTapRing;
 
-/* Allocate a ring of `capacity_bytes` (rounded up to a power of two) and a
- * writer thread that appends drained bytes to `out_path` on the SD card.
- * `file_header_bytes`/`file_header` are written first, before any records.
- * Returns NULL on failure. */
+/* The ring pool is STATIC (4 MiB of .bss): the plugin links with -nostartfiles
+ * (no crt0 -> no heap), so malloc-backed allocation is unavailable and a fixed
+ * pool is the honest shape. A request above this is clamped to it. */
+#define DSPTAP_RING_CAPACITY_BYTES (4u * 1024u * 1024u)
+
+/* Prepare the static ring (capacity clamped to DSPTAP_RING_CAPACITY_BYTES) and
+ * start a writer thread that appends drained bytes to `out_path` on the SD
+ * card. `file_header_bytes`/`file_header` are written first, before any
+ * records. Returns NULL on failure. */
 DspTapRing* ring_open(const char* out_path,
                       const void* file_header, size_t file_header_bytes,
                       size_t capacity_bytes);

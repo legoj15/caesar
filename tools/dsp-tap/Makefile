@@ -8,9 +8,12 @@
 #
 # Requires (on a devkitARM machine):
 #   - devkitARM + libctru       (pacman -S 3ds-dev)  -> sets DEVKITARM/DEVKITPRO
-#   - 3gxtool                    (PabloMK7/3gxtool)   -> packs ELF -> .3gx
+#   - 3gxtool                    (ThePixellizerOSS/3gxtool, GitLab; C++/CMake)
 #     3gxtool is a BUILD tool only; it is not linked into the plugin, so its
 #     license does not affect the GPLv3 plugin output (see DSP-TAP-DESIGN.md).
+#     devkitPro's pacman does not ship it; build once:
+#       git clone --recursive https://gitlab.com/thepixellizeross/3gxtool.git
+#       cd 3gxtool && mkdir build && cd build && cmake .. && make
 #
 # Output: build/dsp-tap.3gx  (install to sd:/luma/plugins/<TitleID>/)
 #
@@ -71,8 +74,12 @@ LD      := $(PREFIX)gcc
 OBJCOPY := $(PREFIX)objcopy
 
 ARCH    := -march=armv6k -mtune=mpcore -mfloat-abi=hard -mfpu=vfpv2 -mtp=soft -marm
+# -fno-unwind-tables: 3gxtool accepts at most THREE PT_LOAD segments with flags
+# exactly 5(RX)/4(R)/6(RW); .ARM.exidx content would pull in a 4th
+# PT_ARM_EXIDX segment and the pack fails. The plugin never unwinds.
 CFLAGS  := $(ARCH) -Os -Wall -Wextra -ffunction-sections -fdata-sections \
            -fomit-frame-pointer -fno-strict-aliasing \
+           -fno-unwind-tables -fno-asynchronous-unwind-tables \
            -I$(INCLUDE) -I$(DEVKITPRO)/libctru/include \
            -DDSPTAP_CAPTURE_FINAL_SAMPLES=$(FINAL_SAMPLES) -std=gnu11
 LDFLAGS := $(ARCH) -T 3gx.ld -nostartfiles -Wl,--gc-sections \

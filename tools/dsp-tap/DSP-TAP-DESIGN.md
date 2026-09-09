@@ -86,9 +86,10 @@ first-class citizen of the loader — not a hack around it.
 
 ## 2. The 3GX loader ABI (what a barebones plugin must satisfy)
 
-Verified from the Luma3DS/Rosalina plugin-loader headers
-(`sysmodules/rosalina/include/plugin/3gx.h`, `plgldr.h`) and PabloMK7's public
-`3gx.ld`:
+Verified from upstream Luma3DS master (2026-09-09):
+`sysmodules/rosalina/include/plugin/{3gx.h,plgldr.h}`,
+`source/plugin/{file_loader.c,memoryblock.c,pluginLoader.s}` — and enforced in
+practice by the first devkitARM build + 3gxtool pack (HISTORY 2026-09-09):
 
 - **`.3gx` file** = `_3gx_Header` (magic `0x3230303024584733` = `"3GX$0002"`),
   then `_3gx_Infos` (author/title/summary/description + a flags word:
@@ -96,20 +97,40 @@ Verified from the Luma3DS/Rosalina plugin-loader headers
   (`codeOffset/rodataOffset/dataOffset` + sizes + `bssSize`), `_3gx_Targets`
   (allowed title-ID list), and `_3gx_Symtable`. `3gxtool` builds this from our
   ELF + `.plgInfo`.
-- **Install path**: `sd:/luma/plugins/<TitleID>/<name>.3gx`. The loader injects it
-  only for that title — the plugin is **inherently per-title**. MiiPlaza
-  (`0004001000021800`) hosts **both** the capture cartridge and this tap.
-- **Address-space model (the key fact):** the loader maps the plugin **into the
-  game's own process** and runs it on a thread it creates. The plugin therefore
-  **shares the game's virtual address space** — it does not "open a handle to the
-  game process," it is *already inside it*. The 0x100-byte **`PluginHeader`** is
-  mapped at **`0x07000000`**; plugin code begins at **`0x07000100`**; ENTRY is
-  **`_start`** at the top of `.text`. `PluginHeader` carries `heapVA/heapSize`,
-  `plgldrEvent/plgldrReply` (to talk to `plg:ldr`), and a `config[32]` array we
-  can drive from the `.plgInfo` / at runtime.
-- **PHDRS**: `code` RX, `rodata` R, `data` RW — `3gx.ld` reproduces this.
+- **Install path**: `sd:/luma/plugins/<TitleID>/<name>.3gx` (full 64-bit TitleID
+  folder). The loader injects it only for that title — the plugin is **inherently
+  per-title**. MiiPlaza (`0004001000021800`) hosts **both** the capture cartridge
+  and this tap.
+- **Targets match the LOW u32 of the title ID**: `CheckPluginCompatibility(header,
+  (u32)tid)` — so the `.plgInfo` target for MiiPlaza is `0x00021800` (137216),
+  not the full 64-bit ID. (`PluginLoadParameters.lowTitleId` is likewise u32.)
+- **Address-space model (the key fact):** the loader reserves the plugin memblock
+  at **`0x07000000`** (`svcControlMemoryUnsafe` with base `0x07000000`,
+  LINEAR-flagged, size = the plgInfo `MemorySize`; 5 MiB for us), writes the
+  0x100-byte **`PluginHeader`** at `0x07000000` and the segments at
+  **`0x07000100`** (`Read_3gx_LoadSegments(dst = memblock + sizeof(PluginHeader))`),
+  then **patches the game's entry instruction** at `0x00100000` to
+  `ldr pc, =gamePatchFunc`, which **`blx 0x07000100` — a hardcoded address, the
+  ELF entry field is not used by the loader** (3gxtool only requires
+  `e_entry ==` first-segment base). Consequences:
+  1. `_start` must be the **first byte of `.text`** (pinned via `.text.start` in
+     `3gx.ld`);
+  2. the entry runs **on the game's own main thread, before the game's `main()`** —
+     it must start our thread and **return** (the scaffold's never-returning
+     entry would have hung the game forever);
+  3. the whole memblock is remapped **RWX** afterwards, so the segment flags
+     matter only to 3gxtool, not to faulting.
+- **No crt0 runs.** The plugin links `-nostartfiles`; nothing initializes the
+  libctru runtime — no heap (`malloc`/libctru `threadCreate` are unusable),
+  `.bss` is zeroed only because the loader zeroes the whole memblock, and
+  `__service_ptr` must be provided by us (`NULL` → services resolve through our
+  own `srvInit()` session, which is what an in-game plugin wants).
+- **PHDRS**: exactly three PT_LOADs, flags 5(RX)/4(R)/6(RW), **contiguous**
+  (each segment starts exactly where the previous ends, `memSize` word-aligned)
+  — these are 3gxtool hard errors, not conventions. `3gx.ld` reproduces this.
 
-`src/main.c` reads `PluginHeader` at `0x07000000`, checks its magic, then runs.
+`src/main.c` reads `PluginHeader` at `0x07000000`, checks its magic, spawns the
+sampler thread (raw `svcCreateThread`, static stack), and returns.
 
 ---
 
@@ -257,8 +278,31 @@ core:
 - With devkitARM present: compile `main.c`/`tap.c`/`ring.c` (`-lctru`), link with
   `3gx.ld` (`-nostartfiles`, our own `_start`), then `3gxtool` packs the ELF +
   `dsp-tap.plgInfo` into `build/dsp-tap.3gx`.
-- **Route-a gate** is a compile flag: `DSPTAP_CAPTURE_FINAL_SAMPLES` (default `0`)
-  → `make FINAL_SAMPLES=1` once route-a confirms final-mix readback.
+- **`3gxtool` is ThePixellizerOSS/3gxtool on GitLab** (C++, CMake; permissive
+  license, build-tool only). Built once on the dev VM (`debian-on-s1`):
+  `git clone --recursive` + `cmake .. && make` → `build/3gxtool`; put it on PATH
+  for the plugin `make`. The devkitPro pacman tools do **not** ship it.
+- **3gxtool-enforced shape** (each a hard error at pack time, hit and fixed on
+  the first build): at most **3 PT_LOADs** with flags **exactly** 5(RX)/4(R)/6(RW);
+  **contiguous** segments (`memPos[i] == top of i-1`, so `.rodata` ends on a
+  32-byte boundary because `.bss` inputs carry up-to-32 alignments); word-aligned
+  segment sizes (`.rodata` is string-padded to 4); only the RW segment may have
+  `memSize != fileSize` (BSS); `e_entry == first-segment base` (our `_start` at
+  `0x07000100`). `-fno-unwind-tables` keeps `.ARM.exidx` empty — EXIDX content
+  would pull a 4th (PT_ARM_EXIDX) segment. The 4 MiB static ring is `.bss`
+  (NOBITS): file size stays ~6 KB; the pack prints a >2 MiB warning which is
+  expected and harmless (the loader's region for `MemorySize: 5mib` holds
+  ~4.2 MiB of image + slack, and we use none of the loader heap).
+- **`.plgInfo` keys are 3gxtool v1.3's exact set** (top-level YAML): `Version`,
+  `Author`, `Title`, `Summary`, `Description`, `Compatibility` (`console`),
+  `MemorySize` (`5mib` → loader size index 0), `EventsSelfManaged`,
+  `SwapNotNeeded`, `Targets` (u32 list; decimal `137216` = low word of the
+  MiiPlaza TitleID).
+- **Route-a gate** is a compile flag: `DSPTAP_CAPTURE_FINAL_SAMPLES` (default
+  `0`). Route-a itself is **answered YES** (dsp_oracle commit 2, 2026-07-16 —
+  the firmware does populate `final_samples`); the flag stays default-off so the
+  first bring-up can A/B the tap's own overhead (program item 5), not because
+  the region is in question.
 
 Deploy: `build/dsp-tap.3gx` → `sd:/luma/plugins/0004001000021800/`, enable Plugin
 Loader in Rosalina. n3ds-mcp deploys/toggles it (ftp + input; `config[0]!=0` stops
@@ -279,28 +323,36 @@ format already reserves the section and the version discipline covers the flip.
 
 ---
 
-## 6. What is NOT verified (no devkitARM / no console here)
+## 6. Verification status
 
-Everything here is design + scaffold; nothing was compiled or run. Concretely
-unconfirmed (all marked `VERIFY` in code):
+**Build-side: DONE (2026-09-09, devkitARM 16.1.0 / libctru 2.7.0 on the
+`debian-on-s1` VM).** The plugin compiles clean (`-Wall -Wextra`), links, and
+packs: `build/dsp-tap.3gx` (6,768 B) with `_start` at 0x07000100, three
+contiguous segments 5/4/6 summing exactly to the ELF image, the default checksum
+recomputing byte-exact, and the header fields (5 MiB region, console-only
+compatibility, targets `[0x21800]`) matching the loader's struct layout. The
+first build also **corrected five scaffold assumptions** against the real
+loader/toolchain (full story in HISTORY): the entry is a hardcoded `blx
+0x07000100` on the game's main thread (→ spawn-and-return), `.plgInfo` keys are
+3gxtool v1.3's top-level set, targets match the **low u32**, no crt0 runs (→
+static ring + raw `svcCreateThread` + `__service_ptr`), and `srvInit()` must
+precede `fsInit()`.
 
-- **Compiles/links under devkitARM.** Written against the documented libctru API
-  from memory; header names, `threadCreate` core/priority args, `LightEvent`
-  timeout units, and the FS calls need a real build.
-- **Barebones `_start` viability.** Whether a `-nostartfiles` plugin with our own
-  `_start` runs correctly without CTRPF's runtime (TLS/`.bss` zeroing/global-init
-  assumptions), and whether the loader expects the entry thread to **return**
-  (spawn detached workers) vs **run the loop and never return**. The scaffold does
-  the latter and flags the alternative.
-- **The exact `.plgInfo` keys/flag enums** for the installed `3gxtool` version
-  (`MemoryRegionSize` units, flag names).
+Still unconfirmed without a console (all marked `VERIFY` in code):
+
+- **Barebones plugin viability on hardware.** That the no-crt0 runtime
+  assumptions hold end-to-end (TLS for the created threads, svc-thread exit),
+  that `tap_probe()` sees the live counter advance, and that priority/core
+  choices behave under the game's real thread load.
 - **DSP region reads on hardware.** That `0x1FF40000 + W*2` is readable from the
   plugin without a fault, that MiiPlaza's word addresses match the oracle
   exemplar on the physical console, and that the higher-counter-is-current bank
   rule holds in the live firmware exactly as the HLE models it.
-- **Frame budget under real SD latency** — that a 4 MiB ring + app-core writer
+- **Frame budget under real SD latency** — that a 4 MiB ring + writer thread
   never forces drops during normal play.
-- **`final_mix` readback** — the route-a question itself.
+- **`final_mix` capture A/B** — the region is confirmed populated (route-a YES)
+  but the tap's own overhead must be proven inaudible: dumper-on vs dumper-off
+  analog captures must match (program item 5).
 
 First device bring-up should: build → install → confirm `tap_probe()` sees the
 counter advance → capture a few seconds → validate the dump header + a couple of

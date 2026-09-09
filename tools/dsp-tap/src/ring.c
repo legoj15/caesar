@@ -1,18 +1,29 @@
 /* ring.c — SPSC byte ring + SD writer thread. See ring.h.
  *
- * BUILD SCOPE: compiles only under devkitARM (needs <3ds.h> for threads + fs).
- * This is SCAFFOLD: the logic is complete and self-consistent, but it has NOT
- * been compiled against libctru or run on hardware in this session (no
- * devkitARM here). Anything a device would need to confirm is marked VERIFY.
+ * NO HEAP: the plugin links -nostartfiles (no crt0), so malloc/threadCreate
+ * are unavailable — the ring buffer, control struct and the writer's stack are
+ * all static (.bss), and the writer is a raw svcCreateThread thread (which
+ * must call svcExitThread, never return). libctru's allocating helpers are
+ * deliberately not used.
  *
  * caesar (GPLv3).
  */
 #include "ring.h"
 
-#include <stdlib.h>
+#include <stddef.h>
+#include <stdint.h>
 #include <string.h>
 
-#include <3ds.h> /* Thread, LightEvent, svc*, FS_Archive, FSFILE_* */
+#include <3ds.h> /* LightEvent, svc*, FS_Archive, FSFILE_* */
+
+/* The static pool. 4 MiB of .bss is free at load time: the loader zero-fills
+ * the whole memblock (file_loader.c clears it once after allocation) and
+ * bssSize is accounted into the plugin's exeSize, leaving ~0.9 MiB of the 5 MiB
+ * region for code/rodata/data + the loader's own heap (which we don't use). */
+static DspTapRing           g_ring;
+static uint8_t              g_ring_buf[DSPTAP_RING_CAPACITY_BYTES] __attribute__((aligned(32)));
+#define RING_STACK_BYTES    (32u * 1024u)
+static uint8_t              g_writer_stack[RING_STACK_BYTES] __attribute__((aligned(8)));
 
 struct DspTapRing {
     uint8_t*  buf;
@@ -28,7 +39,7 @@ struct DspTapRing {
     volatile uint64_t drops;      /* bytes the producer could not enqueue */
     volatile int      stop;       /* writer exits after draining when set */
 
-    Thread     writer;
+    Handle     writer;            /* raw kernel thread (not libctru Thread) */
     LightEvent data_evt;          /* producer signals the writer that data is ready */
 
     /* SD file handle (libctru FS). */
@@ -42,12 +53,6 @@ struct DspTapRing {
  * data memory barrier orders the buffer writes ahead of the head/tail store. */
 static inline void dsptap_dmb(void) {
     __asm__ __volatile__("mcr p15, 0, %0, c7, c10, 5" : : "r"(0) : "memory");
-}
-
-static size_t round_up_pow2(size_t v) {
-    size_t p = 1;
-    while (p < v) p <<= 1;
-    return p;
 }
 
 /* Consumer side: how many contiguous bytes are available to read right now. */
@@ -68,15 +73,14 @@ static int ring_file_write(DspTapRing* r, const void* p, size_t n) {
     return 1;
 }
 
-static void writer_main(void* arg) {
-    DspTapRing* r = (DspTapRing*)arg;
+static void writer_main(DspTapRing* r) {
     /* Drain in large chunks so SD writes are efficient (avoid per-record I/O). */
     for (;;) {
         size_t avail = ring_readable(r);
         if (avail == 0) {
             if (r->stop) break;
             /* Wait for the producer, but wake periodically so we flush steadily. */
-            LightEvent_WaitTimeout(&r->data_evt, 2 * 1000 * 1000LL); /* 2 ms VERIFY units */
+            LightEvent_WaitTimeout(&r->data_evt, 2 * 1000 * 1000LL); /* 2 ms */
             continue;
         }
         uint32_t t = r->tail;
@@ -107,51 +111,64 @@ static void writer_main(void* arg) {
     }
 }
 
+/* svcCreateThread targets must exit explicitly — a return would run off the
+ * end of the stack. */
+static void writer_thread_entry(void* arg) {
+    (void)arg;
+    writer_main(&g_ring);
+    svcExitThread();
+}
+
 DspTapRing* ring_open(const char* out_path,
                       const void* file_header, size_t file_header_bytes,
                       size_t capacity_bytes) {
-    DspTapRing* r = (DspTapRing*)calloc(1, sizeof(*r));
-    if (!r) return NULL;
+    DspTapRing* r = &g_ring;
+    memset(r, 0, sizeof(*r));
 
-    r->cap = round_up_pow2(capacity_bytes < 4096 ? 4096 : capacity_bytes);
-    r->mask = r->cap - 1;
-    r->buf = (uint8_t*)malloc(r->cap);
-    if (!r->buf) { free(r); return NULL; }
+    if (capacity_bytes > DSPTAP_RING_CAPACITY_BYTES) capacity_bytes = DSPTAP_RING_CAPACITY_BYTES;
+    size_t cap = 4096;
+    while (cap < capacity_bytes) cap <<= 1; /* the pool itself is a power of two */
 
-    /* Open sdmc:/ archive and (re)create the dump file. VERIFY: the plugin must
-     * have an fs:USER session — main.c calls fsInit() before ring_open(). We do
-     * NOT touch the game's own FS handles. */
+    r->cap  = cap;
+    r->mask = cap - 1;
+    r->buf  = g_ring_buf;
+
+    /* Open sdmc:/ archive and (re)create the dump file. main.c has called
+     * srvInit()+fsInit() first, so this is our OWN fs:USER session — we never
+     * touch the game's handles. */
     if (R_FAILED(FSUSER_OpenArchive(&r->archive, ARCHIVE_SDMC, fsMakePath(PATH_EMPTY, "")))) {
-        free(r->buf); free(r); return NULL;
+        return NULL;
     }
     FS_Path path = fsMakePath(PATH_ASCII, out_path);
     FSUSER_DeleteFile(r->archive, path); /* truncate any prior dump; ignore "missing" */
     /* FS_OPEN_CREATE makes the file if absent; the delete above guarantees a fresh
-     * zero-length file. VERIFY: parent dir /luma/plugins/<TitleID>/ already exists
-     * (the loader created it to find the .3gx), so no directory creation needed. */
+     * zero-length file. The parent dir /luma/plugins/<TitleID>/ exists (the loader
+     * created it to find the .3gx), so no directory creation needed. */
     if (R_FAILED(FSUSER_OpenFile(&r->file, r->archive, path, FS_OPEN_WRITE | FS_OPEN_CREATE, 0))) {
         FSUSER_CloseArchive(r->archive);
-        free(r->buf); free(r); return NULL;
+        return NULL;
     }
     r->file_off = 0;
     if (!ring_file_write(r, file_header, file_header_bytes)) {
         FSFILE_Close(r->file);
         FSUSER_CloseArchive(r->archive);
-        free(r->buf); free(r); return NULL;
+        return NULL;
     }
 
     LightEvent_Init(&r->data_evt, RESET_ONESHOT);
 
-    /* Writer thread: lower priority than the sampler, on an app core so the SD
-     * blocking never starves the poll loop. VERIFY prio/core on the target
-     * (New 3DS exposes core 2 to plugins; stack 32 KiB is ample). */
+    /* Writer thread: one priority step BELOW the sampler (higher number), any
+     * core — SD blocking must never starve the poll loop. Application threads
+     * live in the 0x30–0x3F priority band, so prio+1 stays legal; the console
+     * bring-up confirms the kernel agrees. */
     s32 prio = 0x30;
     svcGetThreadPriority(&prio, CUR_THREAD_HANDLE);
-    r->writer = threadCreate(writer_main, r, 32 * 1024, prio + 1, /*core=*/2, /*detached=*/false);
-    if (!r->writer) {
+    if (R_FAILED(svcCreateThread(&r->writer, writer_thread_entry, 0,
+                                 (u32*)(g_writer_stack + sizeof(g_writer_stack)),
+                                 prio + 1, -1))) {
         FSFILE_Close(r->file);
         FSUSER_CloseArchive(r->archive);
-        free(r->buf); free(r); return NULL;
+        return NULL;
     }
     return r;
 }
@@ -185,10 +202,8 @@ void ring_close(DspTapRing* r) {
     if (!r) return;
     r->stop = 1;
     LightEvent_Signal(&r->data_evt);
-    threadJoin(r->writer, U64_MAX);
-    threadFree(r->writer);
+    svcWaitSynchronization(r->writer, U64_MAX);
+    svcCloseHandle(r->writer);
     FSFILE_Close(r->file);
     FSUSER_CloseArchive(r->archive);
-    free(r->buf);
-    free(r);
 }

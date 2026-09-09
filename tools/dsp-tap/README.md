@@ -8,11 +8,12 @@ ring/file. The PC-side replay reader feeds that dump to `dsp_oracle` and diffs i
 against caesar's stage-2 player — isolating "is the ARM11 runtime model right?"
 from "is the DSP model right?" at exactly the stage-2/3 boundary.
 
-> **This is SCAFFOLD + design, not a working plugin.** The sources were **not
-> compiled or run** — no devkitARM toolchain and no console in the authoring
-> session. Everything a device/toolchain must confirm is marked `VERIFY`. The
-> full rationale, dump-format spec, mechanism, and unverified list are in
-> **[DSP-TAP-DESIGN.md](DSP-TAP-DESIGN.md)**.
+> **Status: builds and packs (2026-09-09, devkitARM on the `debian-on-s1` VM);
+> not yet run on a console.** The first build corrected five scaffold
+> assumptions against the real loader/3gxtool (entry semantics, plgInfo keys,
+> low-u32 targets, no-crt0 constraints, srv-before-fs) — all recorded in
+> DSP-TAP-DESIGN.md §2/§4 and HISTORY. Everything only an on-console run can
+> confirm stays marked `VERIFY` in code (see DSP-TAP-DESIGN.md §6).
 
 ## Why barebones `.3gx`, not CTRPluginFramework
 
@@ -45,10 +46,15 @@ of the core.
 
 ```sh
 make               # no devkitARM -> prints how to get it and exits 0
-make FINAL_SAMPLES=1   # also capture the final mix (only after route-a says yes)
+make FINAL_SAMPLES=1   # also capture the final mix (route-a confirmed YES; default
+                       # off so the first on-console run can A/B the tap's overhead)
 ```
 
-Needs devkitPro `3ds-dev` (devkitARM + libctru) and PabloMK7's `3gxtool`.
+Needs devkitPro `3ds-dev` (devkitARM + libctru) and **3gxtool**
+([ThePixellizerOSS/3gxtool](https://gitlab.com/thepixellizeross/3gxtool) — C++,
+CMake, build-tool only; devkitPro's pacman does not ship it). On the dev VM
+(`debian-on-s1`) 3gxtool is already built at `~/caesar-build/3gxtool/build/`
+(`git clone --recursive` + `cmake .. && make`). Add it to PATH, then:
 Output: `build/dsp-tap.3gx` → install to
 `sd:/luma/plugins/0004001000021800/`, enable Plugin Loader in Rosalina.
 

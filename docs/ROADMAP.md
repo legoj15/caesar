@@ -484,12 +484,17 @@ streams, Rosalina GDB stub for snapshots; classic-NTR read-mem retracted
          the Rosalina GDB stub meanwhile — **that path is now live-proven
          (2026-07-19): the Part B dual-dump read the per-voice
          `SourceConfiguration` off the console over the stub and settled the
-         span binding + the gain address.** Remaining for the streaming tap:
-         first devkitARM build + on-console bring-up (the plugin is uncompiled
-         scaffold, every device-dependent assumption marked VERIFY). **Blocked
-         on toolchain: devkitPro is not installed on the dev machine** (no
-         `/c/devkitPro`, no `3dslink` on PATH) — installing devkitARM is the
-         next concrete step. devkitARM stays optional, never in caesar_core/CI;
+         span binding + the gain address.** First devkitARM build + 3gxtool
+         pack of the streaming tap **DONE 2026-09-09** (dev VM; the build
+         corrected five scaffold-vs-loader assumptions — entry is a hardcoded
+         `blx 0x07000100` on the game's main thread and must return, real
+         `.plgInfo` keys, low-u32 targets, no-crt0 → static ring + raw
+         `svcCreateThread`, `srvInit` before `fsInit`). Remaining for the
+         streaming tap: **on-console bring-up** (install to
+         `sd:/luma/plugins/0004001000021800/`, confirm `tap_probe()` sees the
+         frame counter advance, validate a dump against a stage-2 render) —
+         needs the console. devkitARM stays optional, never in
+         caesar_core/CI;
          n3ds-mcp only deploys/toggles it; plugins are per-title — MiiPlaza
          hosts both cartridge and tap.
       4. **Replay harness**: dumped command stream → dsp_oracle → rendered

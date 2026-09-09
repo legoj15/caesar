@@ -58,8 +58,15 @@ House rules:
   Route-b console-capture side of the analog-free program: a barebones `.3gx`
   (not CTRPluginFramework — that is not GPL-compatible with this repo) that
   streams per-frame DSP config to an SD ring; versioned dump-format contract in
-  `DSP-TAP-DESIGN.md`. Uncompiled scaffold, optional devkitARM, never in
-  caesar_core/CI; output-identical.
+  `DSP-TAP-DESIGN.md`. Optional devkitARM, never in caesar_core/CI;
+  output-identical.
+  **First devkitARM build + 3gxtool pack DONE (2026-09-09)** on the dev VM:
+  `build/dsp-tap.3gx` packs clean and its header validates against the loader's
+  struct layout (`_start` at 0x07000100, three contiguous 5/4/6 segments,
+  checksum exact). The build corrected five scaffold-vs-loader assumptions
+  (entry semantics, `.plgInfo` keys, low-u32 targets, no-crt0 → static ring +
+  raw `svcCreateThread`, `srvInit` before `fsInit`); on-console bring-up
+  remains.
 - **Battery-v2 console-capture analysis scripts** (`tools/capture-cartridge/`):
   `analyze_capture_v2.py` (pilot-normalized pan L/R split + law/direction,
   LPF corner, velocity, steal tie-order), `analyze_capture_v2_trackB.py`

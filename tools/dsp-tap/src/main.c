@@ -5,20 +5,33 @@
  * tear-free per-voice + DspConfiguration snapshot to an SD ring/file that the
  * PC-side replay reader (route-b) consumes.
  *
- * ABI (VERIFIED from the Luma3DS/Rosalina plugin loader + PabloMK7 3gx.ld):
- *   - The loader maps the plugin into the game's address space. The 0x100-byte
- *     PluginHeader sits at 0x07000000; plugin code begins at 0x07000100 and the
- *     ENTRY symbol is `_start`. The loader starts a thread at _start.
+ * ABI — VERIFIED against upstream Luma3DS (sysmodules/rosalina/include/plugin/
+ * plgldr.h, source/plugin/file_loader.c, source/plugin/pluginLoader.s, master
+ * 2026-09), not assumed:
+ *   - The loader reserves a 0x07000000-placed memblock (memoryblock.c: requested
+ *     base 0x07000000, LINEAR) in the game's address space, writes the
+ *     0x100-byte PluginHeader at 0x07000000 and the plugin segments at
+ *     0x07000100 (file_loader.c: Read_3gx_LoadSegments(dst = memblock +
+ *     sizeof(PluginHeader))), then patches the game's entry instruction to
+ *     `blx 0x07000100` (pluginLoader.s: `ldr r5, =0x07000100; blx r5`).
+ *     The entry ADDRESS IS HARDCODED — the ELF entry symbol only has to agree
+ *     so 3gxtool accepts the file — so `_start` must be the first byte of
+ *     .text (pinned via the .text.start section in 3gx.ld).
+ *   - The entry call runs on the GAME's main thread BEFORE the game's own
+ *     main(): it must start our sampler thread and RETURN immediately, or the
+ *     game never boots. (The scaffold's never-returning entry was wrong.)
  *   - Because we share the game's address space and MiiPlaza has DSP access in
  *     its exheader, DSP RAM is mapped at 0x1FF00000 and we read it directly
  *     (dsp_regions.h) — no dsp::DSP session, no dspInit (which would unload the
  *     running firmware and kill audio).
  *
+ * NO CRT0: the plugin links with -nostartfiles, so no libctru runtime init
+ * runs — in particular there is NO heap. Everything here uses static storage
+ * and raw svc calls (svcCreateThread with static stacks, LightEvents); the
+ * libctru helpers that allocate (threadCreate, malloc) must not be used.
+ *
  * This is a barebones 3GX (NOT CTRPluginFramework) — see DSP-TAP-DESIGN.md for
  * the license verdict. It links libctru only (permissive, GPL-compatible).
- *
- * BUILD SCOPE: devkitARM only; SCAFFOLD, not compiled/run in this session.
- * Console-confirm items are marked VERIFY.
  *
  * caesar (GPLv3).
  */
@@ -33,22 +46,23 @@
 /* ------------------------------------------------------------------------- */
 /* Route-a dependency: whether to copy the final stereo mix.                  */
 /*                                                                            */
-/* final_mix readback is UNCONFIRMED — the concurrent dsp_oracle commit-2     */
-/* route-a spike answers whether the real firmware writes the final mix back  */
-/* to ARM11-visible shared memory. Until it says YES, DO NOT capture it (the  */
-/* region may be stale/garbage on hardware). Default OFF. Flip by building     */
-/* with -DDSPTAP_CAPTURE_FINAL_SAMPLES=1.                                     */
+/* The concurrent dsp_oracle commit-2 route-a spike ANSWERED YES (2026-07-16: */
+/* the real firmware writes the final mix back to ARM11-visible memory;       */
+/* final_region_peak == btdmp_peak at every amplitude). The capture stays     */
+/* opt-in so the first bring-up can A/B the tap's own overhead (queue item 5: */
+/* dumper-on vs dumper-off analog captures must match). Flip with             */
+/* -DDSPTAP_CAPTURE_FINAL_SAMPLES=1.                                          */
 /* ------------------------------------------------------------------------- */
 #ifndef DSPTAP_CAPTURE_FINAL_SAMPLES
 #define DSPTAP_CAPTURE_FINAL_SAMPLES 0
 #endif
 
-/* PluginHeader as the loader fills it — mapped at a fixed address (see below).
- * Mirrors Luma3DS sysmodules/rosalina/include/plugin/plgldr.h. */
+/* PluginHeader as the loader fills it — mapped at a fixed address (verified
+ * byte-for-byte against plgldr.h; _Static_assert'd on the size below). */
 typedef struct {
     uint32_t magic;            /* '3GX$' == 0x24584733 */
     uint32_t version;
-    uint32_t heapVA;
+    uint32_t heapVA;           /* loader fills 0x06000000 (its heap, not ours) */
     uint32_t heapSize;
     uint32_t exeSize;
     uint32_t isDefaultPlugin;
@@ -58,19 +72,28 @@ typedef struct {
     uint8_t  padding[7];
     uint64_t waitForReplyTimeout;
     uint32_t reserved[20];
-    uint32_t config[32];       /* plugin-config values (from the .plgInfo/plg:ldr) */
+    uint32_t config[32];       /* plugin-config values (via plg:ldr params) */
 } PluginHeader;
+
+_Static_assert(sizeof(PluginHeader) == 0x100, "PluginHeader must match the loader's 0x100-byte layout");
 
 #define PLUGIN_HEADER_VADDR 0x07000000u
 #define PLUGIN_HEADER_MAGIC 0x24584733u
 
+/* crt0 normally provides this (the APT-injected service list for 3DSX
+ * homebrew); -nostartfiles means we must. NULL makes libctru's envGetHandle
+ * resolve nothing, so every service session goes through our own srvInit()
+ * below — exactly what an in-game plugin wants. */
+void* __service_ptr = NULL;
+
 /* Tuning constants. */
 #define DUMP_PATH          "/luma/plugins/0004001000021800/dsptap.bin"
-#define RING_CAPACITY      (4u * 1024u * 1024u) /* 4 MiB absorbs multi-frame SD stalls */
-#define POLL_INTERVAL_NS   (1000u * 1000u)      /* 1 ms poll; frame is ~4.889 ms */
+#define RING_CAPACITY      DSPTAP_RING_CAPACITY_BYTES /* 4 MiB, see ring.h */
+#define POLL_INTERVAL_NS   (1000ull * 1000ull)        /* 1 ms poll; frame is ~4.889 ms */
+#define SAMPLER_STACK_BYTES (16u * 1024u)
 
-/* config[0] convention (VERIFY against how we author the .plgInfo): nonzero =>
- * stop capturing. Lets n3ds-mcp toggle the tap via plg:ldr without a rebuild. */
+/* config[0] convention (set via plg:ldr SetPluginLoadParameters — n3ds-mcp can
+ * toggle it without a rebuild): nonzero => stop capturing. */
 static int should_stop(const PluginHeader* h) {
     return h && h->config[0] != 0;
 }
@@ -95,16 +118,16 @@ static void build_file_header(DspTapFileHeader* fh, uint16_t section_flags) {
     fh->source_status_stride = (uint16_t)DSPTAP_SOURCE_STATUS_STRIDE;
     fh->section_flags       = section_flags;
     fh->start_tick          = svcGetSystemTick();
-    fh->tap_version         = 0; /* filled by the build with a git hash; 0 in scaffold */
+    fh->tap_version         = 0; /* filled by the build with a git hash; 0 for now */
 }
 
 static void plugin_main(void) {
     const PluginHeader* ph = (const PluginHeader*)PLUGIN_HEADER_VADDR;
-    /* Defensive: only proceed if we really are a loaded 3GX plugin. */
-    if (ph->magic != PLUGIN_HEADER_MAGIC) return;
 
-    /* Our own additive service sessions — never touch the game's handles. */
-    if (R_FAILED(fsInit())) return;
+    /* Our own additive service sessions — never touch the game's handles.
+     * srvInit gives us the service broker; fsInit opens OUR fs:USER session on
+     * top of it (no crt0 ran here, and the game's sessions are its own). */
+    if (R_FAILED(srvInit())) return;
 
     uint16_t section_flags = (uint16_t)(DSPTAP_SECT_SOURCE_CONFIG |
                                         DSPTAP_SECT_DSP_CONFIG |
@@ -114,13 +137,15 @@ static void plugin_main(void) {
 #endif
 
     /* Confirm the DSP region really is live before we create files. */
-    if (!tap_probe()) { fsExit(); return; }
+    if (!tap_probe()) { srvExit(); return; }
+
+    if (R_FAILED(fsInit())) { srvExit(); return; }
 
     DspTapFileHeader fh;
     build_file_header(&fh, section_flags);
 
     DspTapRing* ring = ring_open(DUMP_PATH, &fh, sizeof(fh), RING_CAPACITY);
-    if (!ring) { fsExit(); return; }
+    if (!ring) { fsExit(); srvExit(); return; }
 
     const uint32_t rec_bytes = fh.record_bytes;
     /* One reusable record staging buffer (max record is ~5.7 KiB). */
@@ -153,15 +178,37 @@ static void plugin_main(void) {
 
     ring_close(ring);
     fsExit();
+    srvExit();
 }
 
-/* ENTRY. The loader starts a thread here (barebones — no CTRPF runtime, no crt0).
- * We keep the entry thread as the sampler loop and never return while capturing;
- * returning may unload the plugin (VERIFY the loader's return semantics). */
-void _start(void) {
+/* Sampler thread entry. svcCreateThread targets must exit explicitly — a
+ * return would run off the end of the stack. */
+static void sampler_thread_entry(void* arg) {
+    (void)arg;
     plugin_main();
-    /* If plugin_main returns (stopped/failed), idle so the loader keeps us mapped
-     * rather than tearing down mid-frame. VERIFY: some loader builds expect the
-     * entry to return; if so, replace this with a clean return + detached threads. */
-    for (;;) svcSleepThread(1000ull * 1000ull * 1000ull);
+    svcExitThread();
+}
+
+/* ENTRY. The loader blx's 0x07000100 on the game's main thread at process
+ * entry (see the ABI note at the top): start the sampler and return.
+ * .text.start pins this as the first byte of the image (3gx.ld). */
+__attribute__((section(".text.start"), noinline, used))
+void _start(void) {
+    const PluginHeader* ph = (const PluginHeader*)PLUGIN_HEADER_VADDR;
+    /* Defensive: only proceed if we really are a loaded 3GX plugin. */
+    if (ph->magic != PLUGIN_HEADER_MAGIC) return;
+
+    static uint8_t sampler_stack[SAMPLER_STACK_BYTES] __attribute__((aligned(8)));
+
+    /* Same priority as the game's main thread (we are running on it), any
+     * core: the sampler sleeps ~1 ms per poll, so it round-robins harmlessly.
+     * The kernel keeps the thread alive after we drop the handle. */
+    s32 prio = 0x30;
+    svcGetThreadPriority(&prio, CUR_THREAD_HANDLE);
+    Handle sampler;
+    if (R_FAILED(svcCreateThread(&sampler, sampler_thread_entry, 0,
+                                 (u32*)(sampler_stack + sizeof(sampler_stack)),
+                                 prio, -1)))
+        return;
+    svcCloseHandle(sampler);
 }

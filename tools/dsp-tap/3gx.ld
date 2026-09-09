@@ -14,9 +14,12 @@ ENTRY(_start)
 
 MEMORY
 {
-    /* The plugin's virtual mapping in the game process. Size is generous; the
-     * loader reserves the actual region per PluginHeader.heapSize at runtime. */
-    plugin (rwx) : ORIGIN = 0x07000100, LENGTH = 0x00100000
+    /* The loader (file_loader.c) reserves the memblock at 0x07000000; its size
+     * is the plgInfo MemorySize (5 MiB). The PluginHeader takes the first
+     * 0x100 bytes and the plugin image (code..bss) must fit in the rest. The
+     * 4 MiB static SD ring is .bss, so the image is ~4.2 MiB — hence 5 MiB
+     * minus the header and a page of slack. */
+    plugin (rwx) : ORIGIN = 0x07000100, LENGTH = 0x004FF000
 }
 
 PHDRS
@@ -30,15 +33,25 @@ SECTIONS
 {
     . = ORIGIN(plugin);
 
+    /* Every segment's memSize must be a multiple of 4 (3gxtool: "The segments
+     * is not word-aligned!"), so pad the END of each output section — ALIGN(4)
+     * on the next section is not enough, the segment size itself must round up. */
     .text : ALIGN(4) {
         KEEP(*(.text.start))   /* _start pinned first */
         *(.text .text.*)
         *(.gnu.linkonce.t.*)
+        . = ALIGN(4);
     } >plugin :code
 
     .rodata : ALIGN(4) {
         *(.rodata .rodata.*)
         *(.gnu.linkonce.r.*)
+        /* 3gxtool requires each segment to start EXACTLY where the previous
+         * one ends ("Non-contiguous segments!"). The .bss inputs carry up to
+         * 32-byte alignments (the SD-ring pool), which ld would otherwise
+         * honor with a silent gap after this segment — end on a 32-boundary
+         * so the data segment starts flush. */
+        . = ALIGN(32);
     } >plugin :rodata
 
     .ARM.extab : ALIGN(4) { *(.ARM.extab* .gnu.linkonce.armextab.*) } >plugin :rodata
@@ -46,11 +59,13 @@ SECTIONS
         __exidx_start = .;
         *(.ARM.exidx* .gnu.linkonce.armexidx.*)
         __exidx_end = .;
+        . = ALIGN(4);
     } >plugin :rodata
 
     .data : ALIGN(4) {
         *(.data .data.*)
         *(.gnu.linkonce.d.*)
+        . = ALIGN(4);
     } >plugin :data
 
     .bss (NOLOAD) : ALIGN(4) {

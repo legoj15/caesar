@@ -1,24 +1,41 @@
-# dsp-tap.plgInfo — metadata 3gxtool bakes into the .3gx header (_3gx_Infos +
-# _3gx_Targets). Field set/format follows PabloMK7/3gxtool; VERIFY exact keys
-# against the installed 3gxtool version before the first build.
+# dsp-tap.plgInfo — metadata for 3gxtool v1.3 (ThePixellizerOSS/3gxtool).
 #
-# The Targets list restricts the plugin to MiiPlaza so the loader only injects it
-# there (belt-and-suspenders with the per-Title-ID install folder).
+# 3gxtool v1.3 (sources/main.cpp) parses EXACTLY these TOP-LEVEL keys:
+#   Version{Major,Minor,Revision}, Author, Title, Summary, Description,
+#   Compatibility (console|citra|any), MemorySize (2mib|5mib|10mib),
+#   EventsSelfManaged / UsePrivateMemory / SwapNotNeeded ("true"/"false"
+#   strings), Targets (list of u32). Unknown keys are ignored, so no Flags:
+#   block — the scaffold's MemoryRegionSize/Flags shape was wrong.
+#
+# MemorySize "5mib" -> infos.memoryRegionSize = 0 -> loader memRegionSizes[0]
+# = 5 MiB (file_loader.c), which is what a 4 MiB static ring + code needs.
+# Compatibility "console" (this tap touches real DSP shared memory and is
+# meaningless on Citra/Azahar).
+#
+# Targets are matched by the loader against the LOW u32 of the running title's
+# ID: CheckPluginCompatibility(header, (u32)tid). 137216 == 0x00021800, the low
+# word of StreetPass Mii Plaza 0004001000021800 (the install folder keeps the
+# full 64-bit ID; the plgInfo keeps the low word). Decimal is deliberate —
+# yaml-cpp parses plain integers, and the value must survive .as<u32>().
+
+Version:
+  Major: 0
+  Minor: 1
+  Revision: 0
 
 Author: caesar
 Title: caesar DSP tap
 Summary: Streams DSP shared-memory frame state to SD
-Description: Headless capture plugin for the analog-free program (route-b). Copies
- per-voice SourceConfiguration + DspConfiguration each audio frame to
- /luma/plugins/<TitleID>/dsptap.bin for offline replay through dsp_oracle.
+Description: >-
+  Headless capture plugin for the analog-free program (route-b). Copies the
+  per-voice SourceConfiguration + DspConfiguration each audio frame to
+  /luma/plugins/0004001000021800/dsptap.bin for offline replay via dsp_oracle.
 
-# Title IDs this plugin is allowed to load into.
+Compatibility: console
+MemorySize: 5mib
+EventsSelfManaged: true
+SwapNotNeeded: true
+
+# StreetPass Mii Plaza (US/EU/JP share the low word 0x00021800; VERIFY per-region).
 Targets:
-  - 0004001000021800   # StreetPass Mii Plaza (US/EU/JP share this in practice; VERIFY per-region)
-
-# Flags (VERIFY names/semantics against 3gxtool): the tap manages its own
-# threads/events and needs no game swap-out.
-Flags:
-  EventsSelfManaged: true
-  SwapNotNeeded: true
-  MemoryRegionSize: 5    # MiB; ring (4) + code/stacks headroom. VERIFY enum units.
+  - 137216

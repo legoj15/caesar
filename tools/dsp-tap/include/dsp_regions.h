@@ -56,7 +56,7 @@ static inline volatile uint8_t* dsp_word_ptr(uint32_t word_addr) {
 /* between firmware builds. MiiPlaza's build is byte-identical to launch (no   */
 /* newer build exists — NW4C-disasm-handoff), so these are stable for this     */
 /* per-title plugin. The tap still SANITY-CHECKS them at runtime by requiring   */
-/* the frame counter to advance (see tap.c dsp_regions_probe).                */
+/* the frame counter to advance (see tap.c tap_probe).                        */
 /* ------------------------------------------------------------------------- */
 #define DSP_WORD_FRAME_COUNTER  0xBFFFu /* u16, last word of region 0 (bank selector) */
 #define DSP_WORD_SOURCE_CONFIG  0x9E92u /* SourceConfiguration::Configuration[24], 192B each */

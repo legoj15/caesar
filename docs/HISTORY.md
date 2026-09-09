@@ -26,8 +26,8 @@ A single CMake build that works on current (2026) toolchains.
 - [x] Verify the build on Linux (2026-07-10). macOS output verification remains
       open — tracked in ROADMAP.md.
 
-      **Linux — ✅ DONE (end-to-end, output A/B).** On a Debian 13 (trixie) VM,
-      GCC 14.2.0 / CMake 3.31.6, configured with a plain `cmake -S . -B build
+      **Linux — ✅ DONE (end-to-end, output A/B).** On Linux (GCC 14.2.0 /
+      CMake 3.31.6), configured with a plain `cmake -S . -B build
       -DCMAKE_BUILD_TYPE=Release` (no preset — the only preset is Windows-gated;
       Ninja absent so the default Make generator is used) and built in ~17 s. The
       clone→configure→build→extract chain ran clean. Extracted three archives
@@ -170,8 +170,8 @@ entire audio codec, and more. Users couldn't tell what they didn't get.
       preset/bank numbers move (sample PCM byte-identical, file size unchanged). In
       FluidSynth's default mode the affected Mii Plaza SEs now play the intended
       instrument (they differ from the old dropped-default render). **Console-validated
-      on the New 3DS (2026-07-08):** A/B of a six-effect MeetSound SE pack (staged at
-      `…/3DSWii Dumps/caesar_AB_MiiPlaza`) confirmed the pre-fix renders all collapse
+      on the New 3DS (2026-07-08):** A/B of a six-effect MeetSound SE pack (staged
+      in a local A/B folder) confirmed the pre-fix renders all collapse
       onto the same wrong fallback patch while the fixed renders play the intended,
       distinct instruments and match the console. Five of six were confirmed
       positively by ear; the sixth (`SE_LEGEND_ENEMY_HEAL`) was subtle-by-design and
@@ -565,14 +565,13 @@ The cheapest changes with the most audible or visible payoff.
           embedded DSP1 component, which is shared across titles.
 
       **Disassembly prep — extraction DONE, envelope anchors located (2026-07-09).**
-      The user's `E:\legoj\…\3ds firmware` holds fully-decrypted base `.cia`s
-      (ctrtool: `Crypto key: None` → no keys needed). `ctrtool.exe` (top of the
-      `3DSWii Dumps` folder) does the whole chain and auto-decompresses `.code` — so
-      **GodMode9 was not needed**. Extracted exheader + plain region + decompressed
-      `code.bin` for Mii Plaza (MeetSound), eShop (TigerSound), 3DS Camera/"Photos"
-      (PNOTE_Sound), System Settings (mset), 3DS Sound (SNOTE) into
-      `…\3DSWii Dumps\re_extract\<App>\`. Mii Plaza `code.bin` is byte-identical to the
-      earlier scripted BLZ decompress (cross-validated).
+      The local `3ds firmware` dump folder holds fully-decrypted base `.cia`s
+      (ctrtool: `Crypto key: None` → no keys needed). `ctrtool.exe` does the whole
+      chain and auto-decompresses `.code` — so **GodMode9 was not needed**. Extracted
+      exheader + plain region + decompressed `code.bin` for Mii Plaza (MeetSound),
+      eShop (TigerSound), 3DS Camera/"Photos" (PNOTE_Sound), System Settings (mset),
+      3DS Sound (SNOTE) into `re_extract\<App>\`. Mii Plaza `code.bin` is
+      byte-identical to the earlier scripted BLZ decompress (cross-validated).
         - **Engine confirmed present in every binary, incl. Mii Plaza** — via BCSAR
           magics and the NW4R-form envelope `DecibelSquareTable` fingerprint. (Mii
           Plaza's plain region has no per-module `NW4C_snd` tag — early CTR_SDK 5.2
@@ -586,12 +585,12 @@ The cheapest changes with the most audible or visible payoff.
           in the target binaries, not just inferred from the Wii decomp.
         - Binaries are **stripped** (no `nw::snd` symbols), so identification is by
           envelope-anchor xref + NW4R (`ogws`) structural match.
-        - **Remaining gap: a disassembler.** No IDA/Ghidra and no python `capstone`
-          on the machine. Either install Ghidra + `Martmists-GH/ghidra-ctr-loader`
-          (free), or `pip install capstone` and script the xref hunt to
-          0x328844/0x328944 headlessly. The NAND dump in progress is not required.
-          (Since resolved: `capstone` was installed and used for the session-3
-          disassembly work recorded above and in `NW4C-disasm-handoff.md`.)
+        - **Remaining gap: a disassembler.** Either install Ghidra +
+          `Martmists-GH/ghidra-ctr-loader` (free), or `pip install capstone` and
+          script the xref hunt to 0x328844/0x328944 headlessly. The NAND dump in
+          progress is not required. (Since resolved: the `capstone` route was used
+          for the session-3 disassembly work recorded above and in
+          `NW4C-disasm-handoff.md`.)
 
 ## v0.5.0 §5 — Licensing
 
@@ -617,10 +616,10 @@ conflict with caesar's GPL-3.0.
       usage/liveness smoke that tolerates caesar's by-design non-zero no-input exit
       while failing if the banner is absent (a crash signature). Runs on
       **GitHub-hosted runners**, not self-hosted: caesar is a public repo, so a
-      self-hosted runner would let a fork PR execute code on the always-on
-      server/VM — a documented RCE risk with nothing to gain (hosted is free and
-      the build is ~17 s). The user's own Windows server + Debian VM stay the
-      *private* A/B bench against copyrighted archives, which can't enter public CI.
+      self-hosted runner would let a fork PR execute code on the always-on host —
+      a documented RCE risk with nothing to gain (hosted is free and the build is
+      ~17 s). Private hardware remains the A/B bench for copyrighted archives,
+      which can't enter public CI.
 - [x] Release workflow: `.github/workflows/release.yml`, triggered on `v*` tags.
       Build matrix (same three OSes) → per-OS `caesar-<os>-<arch>.zip`
       (binary + `LICENSE` + `README.md`) → `upload-artifact@v4` → a single gather
@@ -632,7 +631,7 @@ conflict with caesar's GPL-3.0.
 
       Validation before first push: both workflows pass `actionlint` 1.7.12 clean
       and parse as valid YAML; the build commands are the same ones verified
-      end-to-end on Debian. The live run has since gone green across all three
+      end-to-end on Linux. The live run has since gone green across all three
       hosted OSes.
 - [x] **v0.5.0 shipped 2026-07-10** — the `v0.5.0` tag was pushed and
       `release.yml` published the first maintained GitHub Release, with
@@ -4350,8 +4349,8 @@ input, so the play-goldens/diag-goldens freshness gates see nothing stale).
 
 ### What it is
 
-`console_tolerance.py` (numpy only — scipy is not installed, so every DSP
-primitive is hand-rolled on `numpy.fft`, exactly like `tools/surround-probe`)
+`console_tolerance.py` (numpy only — every DSP primitive is hand-rolled on
+`numpy.fft`, exactly like `tools/surround-probe`)
 ingests a New 3DS line-in capture of a sequence and a `caesar-play --render` of
 the same sequence, and verdicts them to the stage-2 criterion: **match within
 tolerance, EXCEPT the reverb tail.** A PowerShell driver
@@ -5393,8 +5392,8 @@ a Y sent ~2.4 s after a card-dismiss A is swallowed by the dismissal animation
 4. Navigate "passed" its stub checkpoints but the Y had been swallowed — the
    whole tail ran against the games grid, and the record stage captured the
    *walkable plaza's ambient BGM* (itself battery-patched, loud enough to pass
-   the level gate). The verdict stage refused (exit 2: the venv lacked numpy —
-   installed). Also proven here: the record level gate passes real content at
+   the level gate). The verdict stage refused (exit 2: the venv lacked numpy).
+   Also proven here: the record level gate passes real content at
    the pinned override (−4.3/−5.6 dBFS).
 5. The 4951 transient finally reproduced under instrumentation: **a
    concurrent `console_status` query from the MCP session collided with the
@@ -5581,3 +5580,98 @@ launch showed **no announcement cards** (they are pending-StreetPass-gated and
 none were queued). The `ScreenSource` screenshot-eye is built and offline-tested,
 ready to consume the frames whenever cards next appear — the item is content-gated,
 not tooling-blocked.
+
+## The DSP tap's first devkitARM build — five scaffold assumptions corrected against the real loader (2026-09-09)
+
+The analog-free capture program's console side (`tools/dsp-tap/`, the Luma 3GX
+plugin) had never been compiled — the 2026-07-16 authoring session had no
+devkitARM. With the `debian-on-s1` dev VM ready (devkitARM 16.1.0, libctru
+2.7.0 already installed), this session took it through the full build chain:
+compile → link → pack → independently validate the packed `.3gx` against the
+loader's own struct definitions.
+
+**Tooling first: 3gxtool is not what the scaffold's comments guessed.** It does
+not come from a PabloMK7 GitHub repo (dead link) — it is
+[ThePixellizerOSS/3gxtool on GitLab](https://gitlab.com/thepixellizeross/3gxtool),
+a small C++/CMake tool (permissive license; build-tool only, so it never taints
+the GPLv3 plugin). devkitPro's pacman does not ship it. Built once on the VM
+(`git clone --recursive` + `cmake .. && make`; the only build warning is a
+harmless static-dlopen note about the unused encryption-lib feature). It is now
+a permanent resident at `~/caesar-build/3gxtool/build/3gxtool`.
+
+**The loader's real entry contract (read from upstream Luma3DS master:
+`file_loader.c`, `memoryblock.c`, `pluginLoader.s`, `plgldr.h`):**
+
+- The loader reserves the plugin memblock at `0x07000000` (LINEAR, size from the
+  plgInfo `MemorySize`; 5 MiB for us), writes the 0x100-byte `PluginHeader`
+  there, copies the segments to `memblock + 0x100` = **`0x07000100`**, remaps the
+  whole block RWX, and patches the game's entry instruction to eventually
+  **`blx 0x07000100` — a hardcoded address**. The ELF entry field is never used
+  by the loader; 3gxtool merely requires `e_entry ==` first-segment base.
+  So `_start` must be the physical first byte of `.text` (`.text.start` pin).
+- The entry is called **on the game's own main thread, before the game's
+  `main()`**. The scaffold ran the capture loop in the entry and never returned —
+  that would have hung the game at boot forever. It now spawns the sampler with
+  a raw `svcCreateThread` (static 16 KiB stack, game-main priority, any core),
+  drops the handle, and **returns**.
+- `CheckPluginCompatibility` matches the `_3gx_Targets` entries against the
+  **low u32 of the running title's ID** — MiiPlaza's target is `0x00021800`
+  (137216), not the full `0004001000021800` the scaffold had listed (which, as a
+  bonus, could not survive 3gxtool's `as<u32>()` anyway).
+
+**3gxtool-enforced shape — each a hard error the first build actually hit:**
+
+| Error | Cause | Fix |
+|---|---|---|
+| `Too many segments!` risk | a 4th PT_ARM_EXIDX segment from `.ARM.exidx` content | `-fno-unwind-tables -fno-asynchronous-unwind-tables` (the plugin never unwinds) |
+| `The segments is not word-aligned!` | `.rodata` ended at 49 bytes | pad each output section's **end** to 4 (segment `ALIGN` at the *next* section is not enough — the segment size itself must round) |
+| `Non-contiguous segments!` | ld silently bumped `.bss` to a 32-byte boundary (the ring pool's `aligned(32)` input), leaving a 12-byte gap after `.rodata` | end `.rodata` on `ALIGN(32)` so the data segment starts flush |
+| `Entrypoint should be zero!` (i.e. e_entry must equal the base) | — | satisfied by the `.text.start` pin: `_start` lands at `0x07000100` |
+
+Region overflow (1 MiB region vs a 4 MiB `.bss` ring) was the other fix — the
+linker region is now `ORIGIN 0x07000100, LENGTH 0x004FF000`, matching the
+loader's 5 MiB memblock minus header and a page of slack.
+
+**No crt0 runs** (`-nostartfiles`), which reshaped the runtime:
+
+- No heap at all → the 4 MiB SD ring and its control struct are **static
+  `.bss`** (free: the loader zeroes the whole memblock, and `bssSize` is
+  accounted into `exeSize`), and libctru's allocating `threadCreate` is replaced
+  by raw `svcCreateThread` + explicit `svcExitThread` (a return would run off
+  the stack); joining is `svcWaitSynchronization` + `svcCloseHandle`.
+- `__service_ptr` is normally provided by crt0 (the APT-injected service list);
+  we define it as `NULL`, which makes every service resolve through our own
+  `srvInit()` session — and `fsInit()` **must** follow `srvInit()` (the first
+  rewrite dropped the scaffold's `fsInit()` entirely; the link then exposed the
+  missing `__service_ptr` via libctru's `env.o`, and the review pass caught the
+  missing `fsInit`).
+
+**`.plgInfo` rewritten to 3gxtool v1.3's actual key set** (read from its
+`main.cpp`): top-level `Version{Major,Minor,Revision}`, `Author`, `Title`,
+`Summary`, `Description`, `Compatibility: console`, `MemorySize: 5mib`
+(loader size index 0 → the 5 MiB slot), `EventsSelfManaged: true`,
+`SwapNotNeeded: true`, `Targets: [137216]`. The scaffold's `Flags:` block with
+`MemoryRegionSize: 5` was fiction — unknown keys are silently ignored, so it
+would have defaulted to "Any" compatibility.
+
+**Result:** `build/dsp-tap.3gx` (6,768 B; the >2 MiB pack warning is expected —
+the 4 MiB is NOBITS `.bss`, costing no file bytes and no heap). Independent
+validation, from the packed file alone: header magic `"3GX$0002"`, version
+0.1.0, flags word 0xC3 (5 MiB region, console-only, events-self-managed,
+swap-not-needed), target `[0x21800]`, section sizes summing exactly to the ELF
+image bytes (0x17f8 + 0x48 + 0 + 0x40d76c = 0x40EFAC), the loader's built-in
+checksum recomputing byte-exact (0xdb29f147), the loader-copy layout
+(0x07000100 / 0x070018F8 / 0x07001940) matching the ELF VMAs, and the first
+code word at 0x07000100 being `_start`'s `push {r0-r4, lr}` — the hardcoded
+`blx` lands on it in ARM state.
+
+Both sources compile warning-clean under `-Wall -Wextra` (the only compile
+error ever produced was `ThreadFunc`'s `void*` argument). All changes are
+quarantined to `tools/dsp-tap/` as designed — caesar_core, the CLI, and the
+gate are untouched.
+
+**Still on the console:** install to `sd:/luma/plugins/0004001000021800/`,
+enable the Rosalina plugin loader, confirm `tap_probe()` sees the frame counter
+advance, then validate a short dump against a caesar stage-2 render — the
+hardware-side items in DSP-TAP-DESIGN.md §6, and the entry now required for the
+program's item 5 (dumper-on/off A/B).
