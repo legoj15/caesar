@@ -631,6 +631,22 @@ Fixed bugs and their verification stories are in
 [Remaining converter scope](#remaining-converter-scope) above, not here — this
 list is the known defect tail.
 
+- **`caesar-play` plays a length-0 note as silence; hardware plays the wave to
+  its end.** Evidence (2026-11-16): Kid Icarus: Uprising shared archive
+  (`us/02.snd`), sequence list index 286. Its five boom notes (wave archive 62
+  slot 35, ticks 64 and 142) have length 0 and envelope release 127; a CD
+  master of that exact sequence holds each of them for the wave's full length
+  (2.3 to 3.6 s), while `--render` stops them at once and ends the file at the
+  last tick. Reference clips and the note table: HISTORY, 2026-11-16 entry.
+- **Stereo placement of that same sequence is far wider on the CD master than
+  in `caesar-play`.** Tracks with pan 27/100 (and 24/104) sit about 25 dB down
+  in the opposite channel on the recording; the render mixes them much closer
+  to centre. Unknown whether the recording used a different output mode
+  (surround) or the pan curve is off for this player setup. Not console-checked.
+- **86 of the 333 sequences in Uprising's shared archive fire no note at all**
+  under `--trace`, with banks bound correctly. Not investigated.
+- **`getBank` re-parses a failing bank on every note** (`src/play/Loader.cpp`):
+  only successful builds are cached, although the comment says otherwise.
 - **Bank/WARC/GROUP naming shares the symbol-collision hazard structurally.**
   The sequence-side collision fix (2026-07-12) covers `.bcseq`/`.mid` only;
   bank, wave-archive and group outputs are still named from the symbol alone

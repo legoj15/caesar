@@ -404,7 +404,15 @@ bool Csar::Parse()
 		cseq.CbnkOffset = Ctx.ReadFixLen(pos, 4);
 		cseq.Word14 = Ctx.ReadFixLen(pos, 4);
 
-		cseq.FileName = TypedName(strgOffset != 0xFFFFFFFF ? Strgs[Ctx.ReadFixLen(pos, 4)].String : to_string(cseq.Id), "SEQ");
+		// The symbol-index word is part of the record whether or not the archive
+		// carries a string table, so consume it unconditionally: the bank
+		// reference below is located relative to pos. Skipping it for a
+		// table-less archive left pos 4 bytes short, so BankIndex read the
+		// word before the bank id (the sound's bank-reference count, 1 in
+		// every archive seen) and every sequence bound to bank position 1.
+		uint32_t symbolIndex = Ctx.ReadFixLen(pos, 4);
+
+		cseq.FileName = TypedName(strgOffset != 0xFFFFFFFF ? Strgs[symbolIndex].String : to_string(cseq.Id), "SEQ");
 
 		NamesById[cseq.Id] = cseq.FileName;
 
@@ -412,6 +420,9 @@ bool Csar::Parse()
 		// pos - 16 from just after the symbol lookup. Store it span-relative so
 		// Export reconstructs Data + WarnOffset and hands it to the pointer-form
 		// Warning, preserving this Csar site's exact AT POSITION (pinned behaviour).
+		// For an archive without a string table the position sat 4 bytes early
+		// (on Word08) until the symbol word above was read unconditionally;
+		// it is the type field for both archive kinds now.
 		cseq.WarnOffset = static_cast<uint32_t>((pos - 16) - Data);
 
 		switch (cseq.Type)
@@ -443,6 +454,16 @@ bool Csar::Parse()
 
 					pos += cseq.CbnkOffset;
 					cseq.BankIndex = Ctx.ReadFixLen(pos, 2);
+
+					// Export indexes CbnkRecords with this (the bank records are
+					// all parsed above), so a value past the table is a malformed
+					// record, not something to carry forward.
+					if (cseq.BankIndex >= CbnkRecords.size())
+					{
+						Ctx.Error(pos - 2, "A bank index below the bank count", cseq.BankIndex);
+
+						return false;
+					}
 				}
 
 				break;

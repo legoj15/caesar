@@ -137,6 +137,19 @@ House rules:
 
 ### Fixed
 
+- **Sequences of an archive without a string table now bind to their own
+  bank.** The sound record's symbol-index word was only consumed when the
+  archive had a string table, so on a table-less archive the bank reference was
+  read 4 bytes short and every sequence got bank position 1. On Kid Icarus:
+  Uprising's shared archive all 246 extracted sequences landed under one bank
+  folder and `caesar-play` dropped 376 of 451 notes; they now spread over 18
+  bank folders and 7 notes drop. Archives with a string table are output-identical;
+  for table-less archives `.bcseq`/`.mid` outputs move to the right `BANK_n`
+  folder, convert against the right bank, `caesar-play` renders change, and the
+  `-w` position printed for a skipped stream or wave-sound record moves 4 bytes
+  onto the record's type field. A sequence whose bank index is past the bank
+  table is now a parse error instead of an unchecked read.
+
 - **`tools/capture-cartridge/check_prediction_v2.py` pan gate un-staled.** The
   track-A pan check predated the console-confirmed pan-direction inversion
   (player fix `9769a96`, byte 0 → RIGHT) and failed correct renders; it now

@@ -100,6 +100,8 @@ struct CsarCseq
 	// live `pos - 16`), reconstructed as Data + WarnOffset at export so the
 	// pointer-form Warning keeps its exact current AT POSITION (pinned behaviour,
 	// including the heap-nondeterminism this Csar site shares -- Known bugs).
+	// Always the record's type field; for archives without a string table it
+	// was 4 bytes earlier before the 2026-11-16 bank-binding fix.
 	uint32_t WarnOffset = 0;
 
 	// A 0x2203 sequence with in-archive data (Type == 0x2203 && Files[Id].Internal).

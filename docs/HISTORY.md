@@ -5675,3 +5675,137 @@ enable the Rosalina plugin loader, confirm `tap_probe()` sees the frame counter
 advance, then validate a short dump against a caesar stage-2 render — the
 hardware-side items in DSP-TAP-DESIGN.md §6, and the entry now required for the
 program's item 5 (dumper-on/off A/B).
+
+## One Uprising sequence pinned note for note in a CD master: `--zones`/`--trace`, `tools/sample-locate`, and the table-less bank-binding fix (2026-11-16)
+
+Driven from a session in another project: the transition effect in a Smash 3DS
+medley track had to be identified. Not roadmap work.
+
+### What was found
+
+The effect is one Kid Icarus: Uprising sound: shared archive `us/02.snd`,
+sequence list index 286 (SEQ_12, record 419, bank file 35), tempo 75, timebase
+48, 14 notes, no effect sends, root key 60 on all three waves of wave archive
+file 62 (slot 14 = 22050 Hz 0.50 s, slot 39 = 22050 Hz 0.64 s, slot 35 =
+20000 Hz 2.28 s):
+
+| tick | wave | key (track pan) | vel |
+|---|---|---|---|
+| 0 | 14 | 60 (64) | 127 |
+| 6 | 39 | 57 (27), 59 (100) | 127 |
+| 26 | 14 | 60 (64) | 64 |
+| 28 | 39 | 59 (27), 57 (100) | 70 |
+| 52 | 14 | 60 (64) | 25 |
+| 53 | 39 | 59 (27), 57 (100) | 40 |
+| 64 | 35 | 60 (64) vel 100; 53 (27), 52 (100) | 115 |
+| 142 | 35 | 55 (24), 53 (104), attack 64 | 95 |
+
+The same sequence was located independently in a lossless CD master (Kid
+Icarus: Uprising soundtrack, "Wrath of the Reset Bomb" medley) by matched
+filtering the three waves at semitone speeds, per stereo channel:
+
+- Every note-on sits on the engine frame grid (160/32728 s) within 0.105 ms:
+  frames 0, 20, 88, 95, 177, 180, 218, 484 after the first note, i.e.
+  `floor(tick * 16.667 ms / 4.889 ms)`. The recording came from the real
+  engine.
+- Speeds are exact semitones (refined to within half a cent; the booms cancel
+  to -26 dB over 3 s, which bounds the speed error near 15 ppm).
+- Levels follow `(vel/127)^2`: the wave-39 pair echoes sit 9.4 and 19.5 dB
+  under the first pair (expected 10.3, 20.1), the wave-14 echoes 11.5 and
+  29.6 dB under the first (expected 11.9, 28.2).
+- Attack 64, measured per engine frame on the recording: -80, -29 x4, -16,
+  -11 x2, -5 x5, then 0 dB.
+- Length-0 notes (all five wave-35 notes) play the wave to its end.
+- Panned notes are about 25 dB down in the opposite channel.
+
+A rebuild from the three waves and that table cancels the music-free recording
+by 26 to 28 dB on the wave-35 notes, 17 dB on the first wave-14 note and 15 dB
+on the first wave-39 pair.
+
+### What changed in the tree
+
+- `caesar-play --zones` and `--trace` (`src/play`): read-only TSV diagnostics.
+  `resolveVoice` and `getBank` report why a note cannot sound through optional
+  out-parameters; no decision changed. Render identity: all 333 sequences of
+  `us/02.snd` rendered with the old and new binary hash the same, and
+  play-goldens passed ("ALL 8 render(s) byte-identical").
+- `tools/sample-locate/sample_locate.py`: the matched-filter instruments used
+  above as one tool (`speeds`, `semis`, `pursue`, `fit`, `all`); it reproduces
+  the session's measured table.
+- `src/Csar.cpp`: the sound record's symbol-index word is now consumed whether
+  or not the archive has a string table. Before, a table-less archive left the
+  bank reference 4 bytes short, `BankIndex` read the bank table's count
+  (always 1), and every sequence bound to bank position 1. On `us/02.snd`:
+  376 of 451 notes dropped as `program-range` before, 7 after (4
+  `program-range`, 3 `no-zone`); extraction put all 246 sequences (`.bcseq` + `.mid`)
+  under `BANK_24` before, 18 bank folders after.
+
+### Gate, 2026-11-16 (working tree, baseline 83c0266)
+
+diag-goldens PASS, play-goldens PASS, console-tolerance PASS, roundtrip-verify
+PASS. ab-verify reports output FILE differences, all of them the intended
+relocation: 93 archives, 0 files changed in place, 13,604 added, 12,356
+removed, only `.bcseq`/`.mid`, console output identical. Exactly the four
+corpus archives without a string table are touched (three Pokémon
+`niji_sound.bcsar`, `3DSNand/sound/safe.bcsar`); the other 89 are
+byte-identical. Every removed file reappears with the same name and content
+under another bank folder (0 lost); each Pokémon archive gains 416 files that
+used to overwrite one another in the single wrong folder. Re-run on the final
+build (with the bank-index range check): same result to the file, so the check
+rejects nothing in the corpus. The gate itself exits 1 on any file difference,
+so this change cannot produce a full pass; the evidence above is what stands in
+for it.
+
+### Delegation log
+
+- `scout`: caesar play/bank/sequence code facts for the brief. Useful; flagged
+  the missing drop-reason plumbing and the unverified table-order assumption.
+- `impl` (Sonnet), `--zones`/`--trace`: delivered, found the `Csar.cpp`
+  binding bug on its own. Started at `impl`, not `implement_single`, because
+  the work had to iterate against a game archive that is not in the repository.
+- `impl` (Sonnet), `tools/sample-locate`: delivered, all six acceptance items
+  matched. Started at `impl` for the same reason (reference audio and game
+  waves outside the repository).
+- Orchestrator: the measuring scripts themselves (written while measuring) and
+  the three-line `Csar.cpp` fix (under the 30-line bar).
+- `reviewer` (Haiku): no finding at high or medium on `src/play`, no path found
+  where a render can differ from HEAD. Two mediums on `sample_locate.py`, both
+  folded: peak listing blanked every pitch row around a pick, hiding a chord in
+  one channel (now only rows within 50 cents); `semis` ignored
+  `--tpl-offset-ms` in its reported time. Lows folded: bad-argument tracebacks
+  now exit 2 with one line, a dead branch in the subtraction curve removed, the
+  written-gate caveat documented in the `--trace` header.
+- `review_fast` round 1 (snapshot before the `Csar.cpp` fix): GLM-flash refused
+  on weekly quota, DeepSeek-flash stood in and finished; shop26 errored at
+  35 min with partial text only (it had confirmed the `resolveVoice` decision
+  order and a clean GCC `-Wall -Wextra -Werror` compile). DeepSeek ran a
+  200k-case fuzz of `resolveVoice` against a verbatim HEAD copy and GCC 12 with
+  extra warnings: no finding on `src/play`. Three findings on
+  `sample_locate.py` (the `semis` time offset again, non-positive speed bounds,
+  inverted ranges), all folded.
+- `reviewer` (Haiku) on the `Csar.cpp` fix: pass with nits. The read is right
+  for all three record types; the wave-archive, bank and group record parsers
+  do not read past their own conditional word; with the fix the bank reference
+  sits at record + CbnkOffset + 0x1C for both archive kinds, matching
+  `tools/capture-cartridge/build_cartridge.py`. One medium, folded: Export
+  indexed `CbnkRecords[BankIndex]` unchecked, and the fix lets a table-less
+  archive carry a real (possibly malformed) index, so Parse now rejects an
+  index past the bank table. The `-w` position of skipped stream/wave-sound
+  records moves 4 bytes onto the type field for table-less archives.
+- `review_fast` round 2 (snapshot with the `Csar.cpp` fix, before the range
+  check): shop26 and DeepSeek-flash both finished (GLM-flash again refused on
+  quota). Eight findings, all low, no disagreement with the fix. Folded: the
+  two reviewers' shared note that the warning-position comments no longer held
+  for table-less archives (comments updated), the unchecked export index (the
+  range check above), a one-frame-short suppression slice, a placeholder row
+  from `all` for a wave too short at every semitone, a docstring that said
+  sample time for a playback-time offset, and a validation that refused a
+  single-pitch scan.
+- `review_fast` round 3 (final state: the range check, the comment edits, the
+  last tool edits): shop26 and DeepSeek-flash both finished. shop26: no
+  finding; it searched the docs and `build_cartridge.py` for a "no bank"
+  sentinel in the bank-reference field and found none. DeepSeek-flash: one low
+  (non-finite arguments slipped past the new tool validation), folded by the
+  orchestrator without a further round. Not run by any reviewer: the corpus
+  A/B and the real-archive traces (no game data in the review containers);
+  those rest on the gate runs above.
