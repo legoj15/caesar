@@ -1,7 +1,7 @@
 # DSP tap — design & license verdict
 
-The console-capture side of the **analog-free capture program** (ROADMAP →
-"Analog-free capture program", sub-points 3–4). A small **Luma 3GX game plugin**
+The console-capture side of the **analog-free capture program** (issues #25
+and #26, formerly ROADMAP "Analog-free capture program", sub-points 3–4). A small **Luma 3GX game plugin**
 runs inside StreetPass Mii Plaza, copies the live DSP audio shared-memory frame
 state to an SD-card ring/file every ~4.889 ms audio frame, and the PC-side
 **replay reader** feeds that dump to `dsp_oracle` (route-b) and diffs it against

@@ -84,7 +84,7 @@ reported and skipped without affecting the others.
 
 ## Roadmap
 
-This fork is actively evolving. See [docs/ROADMAP.md](docs/ROADMAP.md) for the plan
+This fork is actively evolving. See the [issues page](https://github.com/legoj15/caesar/issues) for the plan
 toward the first maintained release and beyond.
 
 ## Licensing

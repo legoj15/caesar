@@ -7,9 +7,55 @@ best-effort SF2/MIDI export. Everything below was settled by a 20-agent design w
 (7 recon + 12 adversarial verifiers + synthesis). Three of the four load-bearing claims
 were **refuted on their headlines** and are recorded here in their corrected form.
 
-This is the settled design record. Stage *status* is tracked as checkboxes in
-[ROADMAP.md](ROADMAP.md); completed-work narratives live in [HISTORY.md](HISTORY.md);
+This is the settled design record. Stage *status* is tracked in
+[GitHub Issues](https://github.com/legoj15/caesar/issues); completed-work narratives live in [HISTORY.md](HISTORY.md);
 disassembly addresses and evidence in [NW4C-disasm-handoff.md](NW4C-disasm-handoff.md).
+
+## Project goals
+
+The plan is big; each goal is its own large step.
+
+| # | Goal | Status |
+|---|------|--------|
+| 1 | Get the caesar MIDI/SF2 converter debugged to the best effort — fix the known bugs, apply the obvious UX fixes, ship it | ✅ Shipped: v0.5.0 (2026-07-10) and the v0.5.1 fidelity patch (2026-07-12). Everything still open converter-side is the next two sections |
+| 2 | Rebrand the repo as **"caesar salad"**, a play on the mix of things this repo strives to bring | Not started |
+| 3 | Make an honest, **accurate-to-console player** | Design settled (this document); suite stages 0–4 (issues) |
+| 4 | Make said player play at a **higher fidelity than console** *(ultimate goal)* | After goal 3 — a genuinely second pipeline clocked at the output rate (see the Nyquist correction in the design doc) |
+| 5 | Add **PC-compatible tracker export** (best format, or several) | Format chosen: `.it`, with `.mptm` as a one-flag upgrade; suite stage 5 |
+| 6 | **Editor** *(low priority)* | Suite stage 6 — write-back, gated on the round-trip milestone |
+
+## Settled decisions & standing rules
+
+Hard-won conclusions — do not re-litigate without new evidence. Full stories in
+[HISTORY.md](HISTORY.md) and [SUITE-DESIGN.md](SUITE-DESIGN.md).
+
+- **Envelope byte 127 = instant** (fastest rate), for decay *and* release —
+  settled by disassembly of the NW4C envelope code. The seconds-long tails on
+  console are **DSP reverb**, not the note envelope. `--pad-sustain` exists as
+  a labelled fake for reverb-less players; the future player must *not*
+  inherit it.
+- **Do not compensate for the missing reverb tail** with an SF2
+  `reverbEffectsSend` generator (it would double-count the CC91 the sequence
+  already carries) or by boosting a GM player's reverb (the 3DS reverb's
+  *shape* is wrong in GM players, not its level).
+- **`BGM_DEN_EMPTY_LANDSCAPE` cannot discriminate release times** — it is too
+  dense for any voice to ring out exposed. `BGM_MAIN_Mii_Only_One` (1.6 s
+  all-voices-off gap at ~51 s) is the discriminating console capture.
+- **Reverb lives in the embedded Teak DSP firmware**, not `code.bin` — the
+  reverse of the Wii architecture. Recover it behaviourally (offline `teakra`
+  impulse capture); do not disassemble Teak code, and do not crib the Wii's
+  `FxReverbHi` (that would import Wii reverb into a 3DS player).
+- **Do not port Citra/Azahar's HLE audio** — it is the known-inaccurate path,
+  and it is only the DSP *sink*; the game-side ARM11 sound driver it consumes
+  from is the real project.
+- **Stay in C++** — no language rewrite. The parser proven byte-identical
+  across 40,000+ files is the project's one irreplaceable asset.
+- **Verification is byte-identical old-vs-new A/B** over the private archive
+  corpus (never in public CI — the archives are copyrighted). That net covers
+  only the export path; the player needs its own golden-render +
+  console-tolerance net from its first `.wav`.
+- **SF2 bank selects go in CC0 (MSB)** — FluidSynth-GS and GM players ignore
+  the LSB; only XG/MMA read it.
 
 ## The decision that determines everything else: internal pipeline rate
 
@@ -117,7 +163,7 @@ holding an external/absent file fail round-trip for a *reading* reason and muddy
 **is now satisfied**: that bug and the `Csar` 8-byte-width UB were both fixed on 2026-07-09
 (`8c811e7`, `8869f89`). Group-bearing archives (MK7 `ctr_dash`) can therefore be in the round-trip
 corpus from day one rather than quarantined. The remaining reader-side hazard is the hardcoded
-bank-note offsets (tracked under "Known bugs" in ROADMAP.md; a default-visible warning now
+bank-note offsets (tracked as issue #42; a default-visible warning now
 fires on any bank whose note-flags word differs from `0x21F` — never yet observed).
 
 ## Library-core refactor (a strangler, not a rewrite)
@@ -175,7 +221,7 @@ a broken player ships unnoticed.
 ## Staged plan
 
 Ordered so each stage is worth having even if work stops there. (Stage status is
-tracked in ROADMAP.md.)
+tracked in GitHub Issues.)
 
 | # | Stage | Effort | Proof it works |
 |---|---|---|---|
