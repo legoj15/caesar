@@ -65,6 +65,10 @@ namespace play
 			// C10: the track's CURRENT bank (0xB6) at note-on -- the voice resolves its
 			// instrument against this bank, so a mid-sequence switch re-points it.
 			uint32_t bankIndex = 0;
+
+			// Trace-only: where the note came from (command offset, tick, track mix state).
+			// Filled only when a trace was requested; never read by the render.
+			NoteOrigin origin;
 		};
 
 		// A 48-slot variable file with the converter's scoping: 0-31 are shared
@@ -133,6 +137,13 @@ namespace play
 			int velRange = 127;
 			bool muted = false;
 
+			// Trace-only (0xD9 fx send A, 0xDA fx send B, 0xDB main send): the last value
+			// the track commanded, -1 = never. The player has no effect bus, so the opcodes
+			// stay safe-skipped; the argument is recorded for --trace and nothing else.
+			int fxSendA = -1;
+			int fxSendB = -1;
+			int mainSend = -1;
+
 			bool cmpFlag = true;
 			int16_t vars[16] = { 0 };        // slots 32-47 (track-local)
 			bool varWritten[16] = { false };
@@ -179,6 +190,11 @@ namespace play
 			vector<NoteEvent> events;
 			RenderStats* stats = nullptr;
 			set<uint32_t> skipped;   // safe-skipped opcodes (for the report)
+
+			// Trace-only: capture each note's NoteOrigin (and the send opcodes' arguments).
+			// currentTick is the 0-based index of the sequencer tick being stepped.
+			bool captureOrigin = false;
+			uint64_t currentTick = 0;
 
 			explicit Runtime(const map<uint32_t, CseqCmd>& cmds) : commands(cmds)
 			{
@@ -249,6 +265,61 @@ namespace play
 				}
 			}
 		};
+
+		// A track's mix state at `sample`, for the trace (see TrackSnapshot).
+		TrackSnapshot snapshotTrack(const TrackState& t, uint32_t sample)
+		{
+			TrackSnapshot snap;
+
+			snap.volume = t.timeline.volume.valueAt(sample);
+			snap.expression = t.timeline.expression.valueAt(sample);
+			snap.pan = t.timeline.pan.valueAt(sample);
+			snap.initPan = t.timeline.initPan.valueAt(sample);
+			snap.transpose = t.timeline.transpose.valueAt(sample);
+			snap.bend = t.timeline.bend.valueAt(sample);
+			snap.bendRange = t.timeline.bendRange.valueAt(sample);
+			snap.fxSendA = t.fxSendA;
+			snap.fxSendB = t.fxSendB;
+			snap.mainSend = t.mainSend;
+
+			return snap;
+		}
+
+		// One trace row from a scheduled note event plus what it resolved to. `voice` is
+		// null for a dropped note; `zone` holds the facts (and the drop reason) either way.
+		NoteTraceRow makeTraceRow(const NoteEvent& ev, const VoiceTrace& zone, const VoiceSpec* voice)
+		{
+			NoteTraceRow row;
+
+			row.origin = ev.origin;
+			row.bankIndex = ev.bankIndex;
+			row.track = ev.track;
+			row.startSample = ev.startSample;
+			row.gateSamples = ev.gateSamples;
+			row.program = ev.program;
+			row.key = ev.key;
+			row.velocity = ev.velocity;
+			row.priority = ev.priority;
+			row.mono = ev.mono;
+			row.resolved = (voice != nullptr);
+			row.voice = zone;
+			row.sweepFromSemis = ev.sweepFromSemis;
+			row.sweepDurSamples = ev.sweepDurSamples;
+			row.portaFromSemis = ev.portaFromSemis;
+			row.portaDurSamples = ev.portaDurSamples;
+			row.tieRegion = ev.tieRegion;
+
+			if (voice)
+			{
+				row.env[0] = voice->envAttack;
+				row.env[1] = voice->envHold;
+				row.env[2] = voice->envDecay;
+				row.env[3] = voice->envSustain;
+				row.env[4] = voice->envRelease;
+			}
+
+			return row;
+		}
 
 		double samplesPerTick(const Runtime& rt)
 		{
@@ -680,6 +751,28 @@ namespace play
 							ev.track = track;
 							ev.mono = t.mono;
 							ev.bankIndex = t.bankIndex;   // C10: resolve against the current bank
+
+							if (rt.captureOrigin)
+							{
+								ev.origin.cmdOffset = here;
+								ev.origin.tick = rt.currentTick;
+								ev.origin.lenTicks = len;
+								ev.origin.lenSource = ArgSource::Plain;
+
+								if (cmd.Args.size() > 1)
+								{
+									if (cmd.Suffix1 == SuffixType::Rnd)
+									{
+										ev.origin.lenSource = ArgSource::Rnd;
+									}
+									else if (cmd.Suffix1 == SuffixType::Var)
+									{
+										ev.origin.lenSource = ArgSource::Var;
+									}
+								}
+
+								ev.origin.track = snapshotTrack(t, currentSample);
+							}
 
 							// C8 sweep (0xE3): a pending signed pitch offset gliding to 0
 							// over this note's gate.
@@ -1230,6 +1323,20 @@ namespace play
 				if (c == 0xC5) { setParam(rt, track, cmd, currentSample, t.timeline.bendRange,   0, 127); ++t.cursor; continue; }
 				if (c == 0xC3) { setParam(rt, track, cmd, currentSample, t.timeline.transpose, -64,  63); ++t.cursor; continue; }
 
+				// FX send A/B and main send (0xD9/0xDA/0xDB): recorded for --trace only,
+				// then safe-skipped below exactly as before -- the player has no effect bus.
+				if (rt.captureOrigin && (c == 0xD9 || c == 0xDA || c == 0xDB) && !cmd.Args.empty())
+				{
+					bool drop = false;
+					int32_t sent = resolveArg(rt, track, cmd, 0, drop);
+
+					if (!drop)
+					{
+						int& slot = (c == 0xD9) ? t.fxSendA : (c == 0xDA) ? t.fxSendB : t.mainSend;
+						slot = sent;
+					}
+				}
+
 				// Everything else is a parameter/effect command that does NOT bear
 				// time (LFO, fx sends, tie, sweep, portamento, ...). Safe-skip it so the
 				// cursor never desyncs; native rendering of these is C8+.
@@ -1417,7 +1524,8 @@ namespace play
 		}
 	}
 
-	bool renderSequence(LoadedArchive& arch, StereoBus& bus, uint32_t maxSeconds, RenderStats& stats)
+	bool renderSequence(LoadedArchive& arch, StereoBus& bus, uint32_t maxSeconds, RenderStats& stats,
+		SequenceTrace* trace)
 	{
 		if (!arch.seq)
 		{
@@ -1426,6 +1534,7 @@ namespace play
 
 		Runtime rt(arch.seq->Commands);
 		rt.stats = &stats;
+		rt.captureOrigin = (trace != nullptr);
 		rt.defaultBankIndex = arch.bankIndex;   // C10: the bank 0xB6 switches away from
 
 		// Start the conductor track at the entry's start offset (fall back to the
@@ -1470,6 +1579,7 @@ namespace play
 
 			for (int s = 0; s < steps && rt.anyActive(); ++s)
 			{
+				rt.currentTick = totalTicks;
 				stepOneTick(rt, currentSample, maxSamples);
 				++totalTicks;
 			}
@@ -1496,13 +1606,29 @@ namespace play
 		{
 			VoiceSpec v;
 
+			// Diagnostics only (--trace): the zone facts and the drop reason, filled through
+			// optional out-parameters; null in a normal render, which never reads them.
+			VoiceTrace zoneTrace;
+			DropReason bankReason = DropReason::None;
+
 			// C10: resolve against the track's CURRENT bank (a 0xB6 switch may have
 			// re-pointed it), built + cached on demand.
-			Cbnk* bank = getBank(arch, ev.bankIndex);
+			Cbnk* bank = getBank(arch, ev.bankIndex, trace ? &bankReason : nullptr);
 
-			if (!bank || !resolveVoice(*bank, ev.program, ev.key, ev.velocity, v))
+			if (!bank || !resolveVoice(*bank, ev.program, ev.key, ev.velocity, v, trace ? &zoneTrace : nullptr))
 			{
 				++stats.notesDropped;
+
+				if (trace)
+				{
+					if (!bank)
+					{
+						zoneTrace.reason = bankReason;
+					}
+
+					trace->notes.push_back(makeTraceRow(ev, zoneTrace, nullptr));
+				}
+
 				continue;
 			}
 
@@ -1513,6 +1639,14 @@ namespace play
 			if (ev.envOverride[2] >= 0) v.envDecay = static_cast<uint8_t>(ev.envOverride[2]);
 			if (ev.envOverride[3] >= 0) v.envSustain = static_cast<uint8_t>(ev.envOverride[3]);
 			if (ev.envOverride[4] >= 0) v.envRelease = static_cast<uint8_t>(ev.envOverride[4]);
+
+			// A trace stops here: the note resolved to a voice. It leaves `voices` empty, so
+			// the pool and the mixer below run over nothing and `bus` stays silent.
+			if (trace)
+			{
+				trace->notes.push_back(makeTraceRow(ev, zoneTrace, &v));
+				continue;
+			}
 
 			// The per-sound INFO volume byte: the archive-static attenuation the sound
 			// designer set on this sequence (retail archives almost never ship 127).

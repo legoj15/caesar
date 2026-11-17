@@ -427,11 +427,171 @@ namespace play
 		return gainFromValue(value);
 	}
 
-	bool resolveVoice(const Cbnk& bank, uint32_t program, int key, int velocity, VoiceSpec& out)
+	const char* dropReasonName(DropReason reason)
 	{
-		if (program >= bank.Insts.size() || !bank.Insts[program].Exists)
+		switch (reason)
+		{
+			case DropReason::None: return "ok";
+			case DropReason::BankIndexRange: return "bank-index-range";
+			case DropReason::BankExternal: return "bank-external";
+			case DropReason::BankParseFailed: return "bank-parse-failed";
+			case DropReason::ProgramRange: return "program-range";
+			case DropReason::InstrumentMissing: return "instrument-missing";
+			case DropReason::NoZone: return "no-zone";
+			case DropReason::ZoneNoCwav: return "zone-no-cwav";
+			case DropReason::SentinelSample: return "sentinel-sample";
+			case DropReason::CwarsNull: return "cwars-null";
+			case DropReason::WarPositionMissing: return "war-position-missing";
+			case DropReason::WarExternal: return "war-external";
+			case DropReason::SampleIndexRange: return "sample-index-range";
+			case DropReason::SampleNotConverted: return "sample-not-converted";
+			case DropReason::EmptyChannel: return "empty-channel";
+		}
+
+		return "unknown";
+	}
+
+	map<int, Cwar*>::const_iterator findWarByPosition(const map<int, Cwar*>& cwars, size_t pos)
+	{
+		// Cbnk::Export's rule: advance Cwars.begin() by the stored Cwar index, counting
+		// null slots. The map is ordered by file id, so a position is a rank, not an id.
+		size_t k = 0;
+		auto it = cwars.begin();
+
+		for (; it != cwars.end(); ++it, ++k)
+		{
+			if (k == pos)
+			{
+				break;
+			}
+		}
+
+		return it;
+	}
+
+	const Cwav* resolveZoneWave(const Cbnk& bank, const CbnkNote& zone, VoiceTrace* trace, DropReason& reason)
+	{
+		reason = DropReason::None;
+
+		if (trace)
+		{
+			trace->haveZone = true;
+			trace->rootKey = zone.RootKey;
+			trace->tune = zone.Tune;
+			trace->volume = zone.Volume;
+			trace->pan = zone.Pan;
+
+			if (zone.Cwav)
+			{
+				trace->cwarPos = zone.Cwav->Cwar;
+				trace->waveIndex = zone.Cwav->Id;
+			}
+		}
+
+		if (!zone.Cwav)
+		{
+			reason = DropReason::ZoneNoCwav;
+			return nullptr;
+		}
+
+		if (zone.Cwav->Id >= 0xF000)
+		{
+			reason = DropReason::SentinelSample;
+			return nullptr;
+		}
+
+		// Resolve the live wave archive by the SAME positional index Cbnk::Export
+		// uses (advance Cwars.begin() by the stored Cwar index, counting null slots).
+		const map<int, Cwar*>* cwars = bank.Cwars;
+
+		if (!cwars)
+		{
+			reason = DropReason::CwarsNull;
+			return nullptr;
+		}
+
+		auto it = findWarByPosition(*cwars, zone.Cwav->Cwar);
+
+		if (it == cwars->end())
+		{
+			reason = DropReason::WarPositionMissing;
+			return nullptr;
+		}
+
+		if (trace)
+		{
+			trace->warFileId = it->first;
+		}
+
+		if (it->second == nullptr)
+		{
+			reason = DropReason::WarExternal;
+			return nullptr;
+		}
+
+		if (zone.Cwav->Id >= it->second->Cwavs.size())
+		{
+			reason = DropReason::SampleIndexRange;
+			return nullptr;
+		}
+
+		const Cwav& src = *it->second->Cwavs[zone.Cwav->Id];
+
+		if (trace)
+		{
+			trace->haveWave = true;
+			trace->sampleRate = src.SampleRate;
+		}
+
+		if (!src.Converted)
+		{
+			reason = DropReason::SampleNotConverted;
+			return nullptr;
+		}
+
+		if (src.Channels.empty() || src.Channels[0].empty())
+		{
+			reason = DropReason::EmptyChannel;
+			return nullptr;
+		}
+
+		return &src;
+	}
+
+	bool waveIsLooped(const Cwav& wave)
+	{
+		if (wave.Channels.empty())
 		{
 			return false;
+		}
+
+		uint32_t frames = static_cast<uint32_t>(wave.Channels[0].size());
+
+		return (wave.SampleMode % 2) != 0
+			&& wave.LoopEnd > wave.LoopStart
+			&& wave.LoopEnd <= frames;
+	}
+
+	bool resolveVoice(const Cbnk& bank, uint32_t program, int key, int velocity, VoiceSpec& out, VoiceTrace* trace)
+	{
+		auto fail = [trace](DropReason why)
+		{
+			if (trace)
+			{
+				trace->reason = why;
+			}
+
+			return false;
+		};
+
+		if (program >= bank.Insts.size())
+		{
+			return fail(DropReason::ProgramRange);
+		}
+
+		if (!bank.Insts[program].Exists)
+		{
+			return fail(DropReason::InstrumentMissing);
 		}
 
 		const CbnkInst& inst = bank.Insts[program];
@@ -450,44 +610,26 @@ namespace play
 			}
 		}
 
-		if (!zone || !zone->Cwav || zone->Cwav->Id >= 0xF000)
+		if (!zone)
 		{
-			return false;
+			return fail(DropReason::NoZone);
 		}
 
-		// Resolve the live wave archive by the SAME positional index Cbnk::Export
-		// uses (advance Cwars.begin() by the stored Cwar index, counting null slots).
-		const map<int, Cwar*>* cwars = bank.Cwars;
-
-		if (!cwars)
+		if (trace)
 		{
-			return false;
+			trace->zoneIndex = static_cast<uint32_t>(zone - inst.Notes.data());
 		}
 
-		size_t k = 0;
-		auto it = cwars->begin();
+		// Zone -> wave archive -> decoded sample (shared with the --zones report).
+		DropReason why = DropReason::None;
+		const Cwav* wave = resolveZoneWave(bank, *zone, trace, why);
 
-		for (; it != cwars->end(); ++it, ++k)
+		if (!wave)
 		{
-			if (k == zone->Cwav->Cwar)
-			{
-				break;
-			}
+			return fail(why);
 		}
 
-		if (it == cwars->end() || it->second == nullptr
-			|| zone->Cwav->Id >= it->second->Cwavs.size()
-			|| !it->second->Cwavs[zone->Cwav->Id]->Converted)
-		{
-			return false;
-		}
-
-		const Cwav& src = *it->second->Cwavs[zone->Cwav->Id];
-
-		if (src.Channels.empty() || src.Channels[0].empty())
-		{
-			return false;
-		}
+		const Cwav& src = *wave;
 
 		out.chan0 = &src.Channels[0];
 		out.chan1 = (src.ChanCount >= 2 && src.Channels.size() >= 2) ? &src.Channels[1] : out.chan0;
@@ -496,9 +638,7 @@ namespace play
 		// Loop points come from the same smpl-chunk rule Cbnk uses: SampleMode odd
 		// = looped, [LoopStart, LoopEnd). Guard against malformed points so a bad
 		// loop can never spin.
-		out.looped = (src.SampleMode % 2) != 0
-			&& src.LoopEnd > src.LoopStart
-			&& src.LoopEnd <= out.sampleCount;
+		out.looped = waveIsLooped(src);
 		out.loopStart = src.LoopStart;
 		out.loopEnd = out.looped ? src.LoopEnd : out.sampleCount;
 

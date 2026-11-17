@@ -6,7 +6,9 @@
 // same parsed models (Csar/Cbnk/Cseq/Cwav), so the shipped converter's A/B and
 // round-trip guards keep watching caesar_core unchanged.
 
+#include <cstddef>
 #include <cstdint>
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
@@ -14,7 +16,10 @@
 struct ParseContext;
 struct Csar;
 struct Cbnk;
+struct CbnkNote;
 struct Cseq;
+struct Cwar;
+struct Cwav;
 
 namespace play
 {
@@ -36,6 +41,134 @@ namespace play
 		uint32_t startOffset = 0;  // entry start within the shared sequence bank (DATA+8-relative)
 		uint32_t recordIndex = 0;  // index into Csar::CseqRecords
 		uint8_t volume = 127;      // the INFO per-sound volume byte (linear vol/127; >127 = boost)
+	};
+
+	// --- Diagnostics (read-only; caesar-play --zones / --trace) ---------------
+	//
+	// Why a note could not become a voice. getBank and resolveVoice report it through
+	// an optional out-parameter; the render path passes none and never reads it, so
+	// recording a reason cannot change a decision. Each value names exactly one early
+	// return of the lookup chain bank -> instrument -> zone -> wave archive -> sample.
+	enum class DropReason : uint8_t
+	{
+		None,                 // resolved (a zone's status "ok")
+		BankIndexRange,       // bank index >= Csar::CbnkRecords.size()
+		BankExternal,         // bank has no in-archive data
+		BankParseFailed,      // bank constructor/Parse threw or returned false
+		ProgramRange,         // program >= the bank's instrument count
+		InstrumentMissing,    // the instrument slot is not an existing instrument
+		NoZone,               // no existing zone's [StartNote, EndNote] covers the key
+		ZoneNoCwav,           // the zone carries no sample reference
+		SentinelSample,       // the zone's sample id is a >= 0xF000 "no sample" sentinel
+		CwarsNull,            // the bank has no wave-archive map
+		WarPositionMissing,   // the zone's wave-archive position is not in the map
+		WarExternal,          // that wave archive is external (a null slot)
+		SampleIndexRange,     // the sample id is beyond the wave archive's sample count
+		SampleNotConverted,   // the sample did not decode
+		EmptyChannel          // channel 0 decoded to no frames
+	};
+
+	// The stable lowercase-hyphen name of a reason ("ok" for None), as the TSV prints it.
+	const char* dropReasonName(DropReason reason);
+
+	// What resolveVoice / resolveZoneWave learned about the zone a note landed on,
+	// filled as far as the lookup got (a note dropped at the sample step still reports
+	// its zone and wave archive). Written only when the caller passes one.
+	struct VoiceTrace
+	{
+		DropReason reason = DropReason::None;
+		bool haveZone = false;       // a zone covering the key was found; the fields below are valid
+		uint32_t zoneIndex = 0;      // index into the instrument's Notes
+		uint32_t cwarPos = 0;        // CbnkCwav.Cwar: positional index into Csar::Cwars (null slots count)
+		uint32_t waveIndex = 0;      // CbnkCwav.Id: the sample's index inside that wave archive
+		int32_t warFileId = -1;      // that position's wave-archive FILE id; -1 = position not in the map
+		uint32_t rootKey = 0;
+		float tune = 1.0f;
+		uint32_t volume = 0;
+		uint32_t pan = 0;
+		bool haveWave = false;       // the sample was found; sampleRate is valid
+		uint32_t sampleRate = 0;     // the wave's native rate
+	};
+
+	// The wave archive at positional index `pos` of a Csar::Cwars map, counting the
+	// null (external) slots: the SAME mapping resolveVoice and Cbnk::Export use to turn
+	// a CbnkCwav.Cwar into a wave archive. Returns end() when `pos` is out of range;
+	// the iterator's key is the archive's file id.
+	std::map<int, Cwar*>::const_iterator findWarByPosition(const std::map<int, Cwar*>& cwars, size_t pos);
+
+	// The decoded sample one zone plays, resolved exactly as resolveVoice does it
+	// (positional wave archive -> sample index -> Converted -> non-empty channel 0).
+	// Null on failure, with `reason` set; `trace` (optional) gets every fact known up to
+	// the failure.
+	const Cwav* resolveZoneWave(const Cbnk& bank, const CbnkNote& zone, VoiceTrace* trace, DropReason& reason);
+
+	// Whether a decoded wave plays as a loop under the player's rule (smpl-chunk
+	// SampleMode odd and [LoopStart, LoopEnd) a valid span inside channel 0's frames):
+	// the rule resolveVoice applies, shared so the --zones report cannot drift from it.
+	bool waveIsLooped(const Cwav& wave);
+
+	// Where an argument came from: a literal, a variable slot, or a random range (the
+	// player stands the midpoint in for a range).
+	enum class ArgSource : uint8_t { Plain, Var, Rnd };
+
+	// A track's mix state at a note-on, for the trace. Values are the track timeline's
+	// value at the note's start sample (a `_t` ramp in flight reports its mid-ramp
+	// value). The fx/main sends are recorded from their argument only; the player
+	// safe-skips those opcodes, so they never reach audio. -1 = the track never set it.
+	struct TrackSnapshot
+	{
+		float volume = 127.0f;      // 0xC1
+		float expression = 127.0f;  // 0xD5
+		float pan = 64.0f;          // 0xC0
+		float initPan = 64.0f;      // 0xDC
+		float transpose = 0.0f;     // 0xC3
+		float bend = 0.0f;          // 0xC4
+		float bendRange = 2.0f;     // 0xC5
+		int fxSendA = -1;           // 0xD9
+		int fxSendB = -1;           // 0xDA
+		int mainSend = -1;          // 0xDB
+	};
+
+	// Where a note came from in the sequence; captured only when a trace is requested.
+	struct NoteOrigin
+	{
+		uint32_t cmdOffset = 0;                 // the note command's offset in the shared sequence blob
+		uint64_t tick = 0;                      // sequencer tick the note-on ran at
+		int lenTicks = 0;                       // the resolved note length, in ticks
+		ArgSource lenSource = ArgSource::Plain; // how the length argument was written
+		TrackSnapshot track;
+	};
+
+	// One note event of a traced sequence: the scheduled note, the voice it resolved
+	// to (or why it did not), and the envelope the voice would run.
+	struct NoteTraceRow
+	{
+		NoteOrigin origin;
+		uint32_t bankIndex = 0;      // CbnkRecords index the note resolved against (after any 0xB6)
+		int track = 0;
+		uint32_t startSample = 0;    // on the 32,728 Hz bus
+		uint32_t gateSamples = 0;
+		uint32_t program = 0;
+		int key = 0;
+		int velocity = 0;
+		int priority = 64;
+		bool mono = false;
+		bool resolved = false;       // became a voice (the 24-voice pool is NOT run by a trace)
+		VoiceTrace voice;            // the zone facts, and the reason when !resolved
+		uint8_t env[5] = { 0, 0, 0, 0, 0 };  // attack, hold, decay, sustain, release actually used; valid when resolved
+		float sweepFromSemis = 0.0f;
+		uint32_t sweepDurSamples = 0;
+		float portaFromSemis = 0.0f;
+		uint32_t portaDurSamples = 0;
+		int tieRegion = -1;
+	};
+
+	// Every note event of one sequence, in the order the sequencer scheduled them.
+	// Tied notes folded into a region's continuous voice are not events (RenderStats
+	// counts them as tieRetunes).
+	struct SequenceTrace
+	{
+		std::vector<NoteTraceRow> notes;
 	};
 
 	// The loaded, resolved object graph for one archive plus (optionally) one
@@ -85,12 +218,19 @@ namespace play
 	// no disk round-trip happens. Returns false on failure (message to stderr).
 	bool resolveSequence(LoadedArchive& arch, const SequenceInfo& info);
 
+	// Drop the resolved sequence and every bank built for it, in the reverse of the
+	// order they were built (the ParseContext frames must pop in that order), so
+	// resolveSequence can bind the next sequence of a multi-sequence run (--trace).
+	void releaseSequence(LoadedArchive& arch);
+
 	// Return the parsed bank at CbnkRecords index `bankIndex`, building + caching it
 	// on demand -- a 0xB6 mid-sequence bank switch's target (C10). The sequence's own
 	// default bank is returned directly; others are constructed against the already-
 	// decoded Cwars, exactly like resolveSequence's bank. Null if the index is out of
-	// range or the bank has no in-archive data (an external bank).
-	Cbnk* getBank(LoadedArchive& arch, uint32_t bankIndex);
+	// range or the bank has no in-archive data (an external bank); `why` (optional)
+	// then says which, or that the bank failed to parse. With no sequence resolved
+	// (--zones) every bank is built on demand.
+	Cbnk* getBank(LoadedArchive& arch, uint32_t bankIndex, DropReason* why = nullptr);
 
 	// --- The voice DSP + native mix bus (C2) --------------------------------
 
@@ -338,8 +478,11 @@ namespace play
 	// Returns false for a note with no matching instrument, zone, or sample
 	// (a dropped note), leaving `out` untouched. `bank` is the track's CURRENT bank
 	// (the sequence default, or a 0xB6-switched one), so a mid-sequence bank change
-	// re-points the instrument lookup (C10).
-	bool resolveVoice(const Cbnk& bank, uint32_t program, int key, int velocity, VoiceSpec& out);
+	// re-points the instrument lookup (C10). `trace` (optional, diagnostics only) is
+	// filled with the zone facts and, on a false return, the reason; it never alters
+	// the result.
+	bool resolveVoice(const Cbnk& bank, uint32_t program, int key, int velocity, VoiceSpec& out,
+		VoiceTrace* trace = nullptr);
 
 	// Render one voice into the native-rate bus: loop-aware, linearly-interpolated
 	// sample fetch, shaped by the NW4R EnvGenerator (attack/hold/decay/sustain, then
@@ -472,5 +615,11 @@ namespace play
 	// `maxSeconds` caps a forever-looping sequence. Returns false only on a hard
 	// setup error; an empty/instant sequence still returns true with 0 notes.
 	// Non-const: a 0xB6 bank switch lazily builds + caches its target bank (C10).
-	bool renderSequence(LoadedArchive& arch, StereoBus& bus, uint32_t maxSeconds, RenderStats& stats);
+	//
+	// `trace` (optional, diagnostics only): run the same VM and the same note -> voice
+	// resolution, record every note event into it, then stop -- the 24-voice pool and
+	// the mixer never run, `bus` stays empty, and the pool counters in `stats` stay 0.
+	// Passing none changes nothing about the render.
+	bool renderSequence(LoadedArchive& arch, StereoBus& bus, uint32_t maxSeconds, RenderStats& stats,
+		SequenceTrace* trace = nullptr);
 }

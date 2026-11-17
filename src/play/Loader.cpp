@@ -245,10 +245,29 @@ namespace play
 		return true;
 	}
 
-	Cbnk* getBank(LoadedArchive& arch, uint32_t bankIndex)
+	void releaseSequence(LoadedArchive& arch)
 	{
-		// The sequence's own default bank is already built (resolveSequence).
-		if (bankIndex == arch.bankIndex)
+		// Reverse of the build order: the switch banks (built last, on demand), then the
+		// sequence, then its bank (both built by resolveSequence, bank first).
+		arch.switchBanks.clear();
+		arch.seq.reset();
+		arch.bank.reset();
+
+		// Every parse appends analysis rows to the shared context's Log. Nothing in the
+		// player reads them, and a run over many sequences would grow it without bound.
+		arch.ctx->Log.clear();
+	}
+
+	Cbnk* getBank(LoadedArchive& arch, uint32_t bankIndex, DropReason* why)
+	{
+		if (why)
+		{
+			*why = DropReason::None;
+		}
+
+		// The sequence's own default bank is already built (resolveSequence). With no
+		// sequence resolved (--zones) there is none, so every bank is built on demand.
+		if (arch.bank && bankIndex == arch.bankIndex)
 		{
 			return arch.bank.get();
 		}
@@ -257,6 +276,11 @@ namespace play
 
 		if (bankIndex >= csar.CbnkRecords.size())
 		{
+			if (why)
+			{
+				*why = DropReason::BankIndexRange;
+			}
+
 			return nullptr;
 		}
 
@@ -281,6 +305,11 @@ namespace play
 
 			if (!locateChild(csar, bankRec.Id, bankData, bankLen))
 			{
+				if (why)
+				{
+					*why = DropReason::BankExternal;
+				}
+
 				return nullptr;   // external bank: no in-archive data
 			}
 
@@ -288,6 +317,11 @@ namespace play
 
 			if (!bank->Parse())
 			{
+				if (why)
+				{
+					*why = DropReason::BankParseFailed;
+				}
+
 				return nullptr;
 			}
 
@@ -297,6 +331,11 @@ namespace play
 		}
 		catch (const exception&)
 		{
+			if (why)
+			{
+				*why = DropReason::BankParseFailed;
+			}
+
 			return nullptr;   // a malformed switch target must not abort the render
 		}
 	}

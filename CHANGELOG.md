@@ -24,6 +24,26 @@ House rules:
 
 ### Added
 
+- **`caesar-play --zones` and `--trace` — two read-only diagnostics.** They
+  answer which bank zones and which sequence notes play a given wave, and at
+  what pitch, level and envelope. `--zones <archive> [--wave <warFileId>:<waveIndex>]`
+  prints a TSV of every bank zone (its wave, tune/volume/pan/envelope fields,
+  the unnamed words, and a status saying whether it can sound); `--trace
+  <archive> [--seq <name-or-index>] [--wave …]` runs the same sequence VM as
+  `--render` up to note-to-voice resolution and prints a TSV of every note event
+  with the zone it resolved to, the semitone offset and playback speed, the
+  envelope used, sweep/portamento, the track's mix state at note-on, and
+  `fired` or `dropped:<reason>`, plus per-sequence counts and a drop-reason
+  histogram. Existing modes (`--list`, `--render`, `--render-note`) are
+  output-identical; no audio or converter output changes.
+
+- **`tools/sample-locate` — find a bank sample inside a recording.** A
+  numpy/scipy command-line tool (`speeds`, `semis`, `pursue`, `fit`, `all`)
+  that pins where, at which semitone, in which stereo channel and at what level
+  a sound-bank wave occurs in a reference recording, by sample-exact matched
+  filtering. Worked case in its README: one Kid Icarus: Uprising sequence found
+  note for note in a CD master. Tooling only; output-identical.
+
 - **`tools/console-capture` live-shakedown hardening (console-in-the-loop
   automation shipped).** The capture pipeline is now live-proven end-to-end on
   the New 3DS (console-tolerance PASS): a closed-loop `RosalinaMenuDriver`
